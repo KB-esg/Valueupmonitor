@@ -1,5 +1,8 @@
 import os
-import requests
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import telegram
@@ -21,34 +24,43 @@ class KRXMonitor:
         if not self.telegram_token or not self.chat_id:
             raise ValueError("환경 변수 TELEGRAM_TOKEN과 CHAT_ID가 필요합니다.")
             
-        self.base_url = "https://kind.krx.co.kr/valueup/disclsstat.do"
+        self.base_url = "https://kind.krx.co.kr/valueup/disclsstat.do?method=valueupDisclsStatMain"
         self.bot = telegram.Bot(token=self.telegram_token)
 
-    def fetch_krx_data(self, page: int = 1) -> str:
-        """KRX 웹사이트에서 데이터 가져오기"""
-        params = {
-            "method": "valueupDisclsStatMain",
-            "currentPageSize": "15",
-            "pageIndex": str(page)
-        }
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        try:
-            response = requests.get(self.base_url, params=params, headers=headers)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logging.error(f"KRX 데이터 요청 실패 (페이지 {page}): {e}")
-            raise
+    def setup_driver(self):
+        """Selenium 웹드라이버 설정"""
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        return webdriver.Chrome(options=chrome_options)
+
+    def get_page_content(self, driver, page: int = 1) -> str:
+        """특정 페이지의 컨텐츠 가져오기"""
+        if page > 1:
+            # 페이지 번호 클릭
+            try:
+                page_link = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, f"//a[@onclick=\"fnPageGo('{page}');return false;\"]"))
+                )
+                page_link.click()
+                # 새 데이터 로딩 대기
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "CI-GRID-BODY-TABLE"))
+                )
+            except Exception as e:
+                logging.error(f"페이지 {page} 이동 실패: {e}")
+                return None
+
+        return driver.page_source
 
     def get_total_pages(self, html_content: str) -> int:
         """총 페이지 수 추출"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
-            info_div = soup.find('div', {'class': 'info', 'type': '00'})
+            info_div = soup.find('div', {'class': 'info', 'type-00': True})
             if info_div:
-                # "1/6" 형태에서 총 페이지 수 추출
                 match = re.search(r'/(\d+)', info_div.text)
                 if match:
                     return int(match.group(1))
@@ -60,7 +72,7 @@ class KRXMonitor:
     def parse_disclosures(self, html_content: str, week_ago: datetime) -> tuple[List[Dict], bool]:
         """HTML 컨텐츠에서 공시 정보 파싱"""
         soup = BeautifulSoup(html_content, 'html.parser')
-        table = soup.find('table', {'class': 'list type-00 mt10'})
+        table = soup.find('table', {'class': 'CI-GRID-BODY-TABLE'})
         
         if not table:
             logging.error("테이블을 찾을 수 없습니다.")
@@ -69,9 +81,7 @@ class KRXMonitor:
         disclosures = []
         need_next_page = False
         
-        # tbody 내의 모든 tr 태그 찾기
-        rows = table.find('tbody').find_all('tr')
-        
+        rows = table.find_all('tr')
         logging.info(f"총 {len(rows)}개의 행을 찾았습니다.")
         
         for row in rows:
@@ -93,10 +103,8 @@ class KRXMonitor:
                             })
                             logging.info(f"파싱 성공: {date_str} - {company}")
                         elif len(disclosures) > 0:
-                            # 일주일 이전 데이터가 나오면 중단
                             break
                         
-                        # 마지막 행이 일주일 이내라면 다음 페이지 필요
                         if row == rows[-1] and disclosure_date >= week_ago:
                             need_next_page = True
                             
@@ -142,7 +150,8 @@ class KRXMonitor:
         
         for date, group in groupby(sorted_disclosures, key=itemgetter('date')):
             message += f"📅 <b>{date}</b>\n"
-            for disc in group:
+            group_list = list(group)
+            for disc in group_list:
                 message += f"• {disc['company']}\n"
                 message += f"  └ {disc['title']}\n"
             message += "\n"
@@ -152,13 +161,25 @@ class KRXMonitor:
 
     async def run_weekly_check(self):
         """주간 모니터링 실행"""
+        driver = None
         try:
+            driver = self.setup_driver()
+            driver.get(self.base_url)
+            
+            # 초기 페이지 로딩 대기
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "CI-GRID-BODY-TABLE"))
+            )
+            
             all_disclosures = []
             page = 1
             week_ago = datetime.now() - timedelta(days=7)
             
             while True:
-                html_content = self.fetch_krx_data(page)
+                html_content = self.get_page_content(driver, page)
+                if not html_content:
+                    break
+                    
                 disclosures, need_next_page = self.parse_disclosures(html_content, week_ago)
                 all_disclosures.extend(disclosures)
                 
@@ -183,6 +204,9 @@ class KRXMonitor:
                 await self.send_telegram_message(f"⚠️ {error_message}")
             except Exception as telegram_error:
                 logging.error(f"에러 메시지 전송 실패: {telegram_error}")
+        finally:
+            if driver:
+                driver.quit()
 
 def main():
     monitor = KRXMonitor()
