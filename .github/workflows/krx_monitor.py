@@ -5,13 +5,7 @@ from datetime import datetime, timedelta
 import telegram
 import asyncio
 import logging
-import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from typing import List, Dict
 
 # 로깅 설정
 logging.basicConfig(
@@ -26,98 +20,100 @@ class KRXMonitor:
         if not self.telegram_token or not self.chat_id:
             raise ValueError("환경 변수 TELEGRAM_TOKEN과 CHAT_ID가 필요합니다.")
             
-        self.url = "https://kind.krx.co.kr/valueup/disclsstat.do?method=valueupDisclsStatMain#viewer"
+        self.url = "https://kind.krx.co.kr/valueup/disclsstat.do?method=valueupDisclsStatMain"
         self.bot = telegram.Bot(token=self.telegram_token)
 
-    def setup_driver(self):
-        """Selenium 웹드라이버 설정"""
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.binary_location = "/usr/bin/google-chrome"
-        
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=chrome_options)
-
-    def get_this_week_disclosures(self):
-        """이번 주의 신규 공시 데이터 수집"""
-        driver = self.setup_driver()
-        try:
-            driver.get(self.url)
-            
-            # 페이지 로딩 대기
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "CI-GRID-BODY-TABLE"))
-            )
-            
-            # 테이블 데이터 가져오기
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            table = soup.find('table', {'class': 'CI-GRID-BODY-TABLE'})
-            
-            if not table:
-                logging.error("테이블을 찾을 수 없습니다.")
-                return []
-
-            # 이번 주의 날짜 범위 계산
-            today = datetime.now()
-            start_of_week = today - timedelta(days=today.weekday())
-            end_of_week = start_of_week + timedelta(days=4)  # 금요일까지
-
-            disclosures = []
-            rows = table.find_all('tr')
-            
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    company = cols[0].text.strip()
-                    date_str = cols[1].text.strip()
-                    
-                    try:
-                        disclosure_date = datetime.strptime(date_str, '%Y/%m/%d')
-                        if start_of_week <= disclosure_date <= end_of_week:
-                            disclosures.append({
-                                'company': company,
-                                'date': date_str
-                            })
-                    except ValueError as e:
-                        logging.error(f"날짜 파싱 에러: {e}")
-                        continue
-
-            return disclosures
-
-        except Exception as e:
-            logging.error(f"데이터 수집 중 에러 발생: {e}")
+    def parse_disclosures(self, html_content: str) -> List[Dict]:
+        """HTML 컨텐츠에서 공시 정보 파싱"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        table = soup.find('table', {'class': 'list'})
+        if not table:
+            logging.error("테이블을 찾을 수 없습니다.")
             return []
-            
-        finally:
-            driver.quit()
 
-    async def send_telegram_message(self, message):
+        # 최근 일주일 날짜 범위 계산
+        today = datetime.now()
+        week_ago = today - timedelta(days=7)
+
+        disclosures = []
+        rows = table.find('tbody').find_all('tr')
+        
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 4:  # 번호, 공시일자, 회사명, 공시제목 컬럼 확인
+                try:
+                    # 공시일자 파싱
+                    date_str = cols[1].text.strip()
+                    disclosure_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                    
+                    # 최근 일주일 데이터만 필터링
+                    if disclosure_date >= week_ago:
+                        company = cols[2].find('a').text.strip()  # 회사명에서 a 태그 내용만 추출
+                        title = cols[3].find('a').text.strip()
+                        
+                        disclosures.append({
+                            'date': date_str,
+                            'company': company,
+                            'title': title
+                        })
+                except (ValueError, AttributeError) as e:
+                    logging.error(f"데이터 파싱 에러: {e}")
+                    continue
+
+        return disclosures
+
+    async def send_telegram_message(self, message: str):
         """텔레그램으로 메시지 전송"""
         try:
-            await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode='HTML')
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
             logging.info("텔레그램 메시지 전송 성공")
         except Exception as e:
             logging.error(f"텔레그램 메시지 전송 실패: {e}")
+            raise
+
+    def format_message(self, disclosures: List[Dict]) -> str:
+        """공시 정보를 텔레그램 메시지 형식으로 변환"""
+        if not disclosures:
+            return "최근 일주일간 신규 기업가치 제고 계획 공시가 없습니다."
+
+        message = "<b>🔔 최근 일주일 기업가치 제고 계획 공시</b>\n\n"
+        
+        # 날짜별로 그룹화
+        from itertools import groupby
+        from operator import itemgetter
+        
+        # 날짜로 정렬
+        sorted_disclosures = sorted(disclosures, key=itemgetter('date'), reverse=True)
+        
+        for date, group in groupby(sorted_disclosures, key=itemgetter('date')):
+            message += f"📅 <b>{date}</b>\n"
+            for disc in group:
+                message += f"• {disc['company']}\n"
+                message += f"  └ {disc['title']}\n"
+            message += "\n"
+
+        return message
 
     async def run_weekly_check(self):
         """주간 모니터링 실행"""
-        logging.info("주간 모니터링 시작")
-        
-        disclosures = self.get_this_week_disclosures()
-        
-        if not disclosures:
-            message = "이번 주 신규 기업가치 제고 계획 공시가 없습니다."
-        else:
-            message = "<b>이번 주 신규 기업가치 제고 계획 공시</b>\n\n"
-            for disc in disclosures:
-                message += f"회사명: {disc['company']}\n"
-                message += f"공시일자: {disc['date']}\n\n"
-
-        await self.send_telegram_message(message)
-        logging.info("주간 모니터링 완료")
+        try:
+            # HTML 파일 읽기 (실제 운영 시에는 requests.get(self.url) 사용)
+            with open('sample.html', 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            disclosures = self.parse_disclosures(html_content)
+            message = self.format_message(disclosures)
+            await self.send_telegram_message(message)
+            
+        except Exception as e:
+            error_message = f"모니터링 중 에러 발생: {str(e)}"
+            logging.error(error_message)
+            await self.send_telegram_message(f"⚠️ {error_message}")
 
 def main():
     monitor = KRXMonitor()
