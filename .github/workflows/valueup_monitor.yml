@@ -28,4 +28,4 @@ jobs:
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python krx_monitor.py
+      run: python valueup_monitor.py
