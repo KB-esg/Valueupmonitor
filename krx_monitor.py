@@ -22,6 +22,22 @@ class KRXMonitor:
             
         self.url = "https://kind.krx.co.kr/valueup/disclsstat.do?method=valueupDisclsStatMain"
         self.bot = telegram.Bot(token=self.telegram_token)
+        
+        # 초기화 시 설정 로깅
+        logging.info(f"Chat ID: {self.chat_id}")
+
+    def fetch_krx_data(self) -> str:
+        """KRX 웹사이트에서 데이터 가져오기"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        try:
+            response = requests.get(self.url, headers=headers)
+            response.raise_for_status()  # 4XX, 5XX 에러 체크
+            return response.text
+        except requests.RequestException as e:
+            logging.error(f"KRX 데이터 요청 실패: {e}")
+            raise
 
     def parse_disclosures(self, html_content: str) -> List[Dict]:
         """HTML 컨텐츠에서 공시 정보 파싱"""
@@ -65,13 +81,19 @@ class KRXMonitor:
     async def send_telegram_message(self, message: str):
         """텔레그램으로 메시지 전송"""
         try:
+            # chat_id를 정수로 변환
+            chat_id = int(self.chat_id)
+            
             await self.bot.send_message(
-                chat_id=self.chat_id,
+                chat_id=chat_id,
                 text=message,
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
             logging.info("텔레그램 메시지 전송 성공")
+        except ValueError as e:
+            logging.error(f"잘못된 chat_id 형식: {self.chat_id}")
+            raise
         except Exception as e:
             logging.error(f"텔레그램 메시지 전송 실패: {e}")
             raise
@@ -102,10 +124,7 @@ class KRXMonitor:
     async def run_weekly_check(self):
         """주간 모니터링 실행"""
         try:
-            # HTML 파일 읽기 (실제 운영 시에는 requests.get(self.url) 사용)
-            with open('sample.html', 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
+            html_content = self.fetch_krx_data()
             disclosures = self.parse_disclosures(html_content)
             message = self.format_message(disclosures)
             await self.send_telegram_message(message)
@@ -113,7 +132,11 @@ class KRXMonitor:
         except Exception as e:
             error_message = f"모니터링 중 에러 발생: {str(e)}"
             logging.error(error_message)
-            await self.send_telegram_message(f"⚠️ {error_message}")
+            # 에러 발생 시에도 텔레그램으로 알림
+            try:
+                await self.send_telegram_message(f"⚠️ {error_message}")
+            except Exception as telegram_error:
+                logging.error(f"에러 메시지 전송 실패: {telegram_error}")
 
 def main():
     monitor = KRXMonitor()
