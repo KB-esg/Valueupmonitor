@@ -11,8 +11,8 @@ import asyncio
 import logging
 from typing import List, Dict
 import traceback
+import re
 
-# 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -40,23 +40,26 @@ class KRXMonitor:
         service = Service('/usr/bin/chromedriver')
         return webdriver.Chrome(service=service, options=chrome_options)
 
-    def parse_page(self, driver, week_ago: datetime) -> List[Dict]:
+    def extract_rcp_no(self, onclick_attr: str) -> str:
+        """공시 상세보기 링크에서 rcpNo 추출"""
+        match = re.search(r"openDisclsViewer\('(\d+)'", onclick_attr)
+        return match.group(1) if match else None
+
+    def parse_page(self, driver, week_ago: datetime) -> tuple[List[Dict], bool]:
         """현재 페이지의 공시 정보 파싱"""
         disclosures = []
         
         try:
-            # 테이블이 로드될 때까지 대기
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "list"))
             )
             
-            # BeautifulSoup으로 파싱
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             table = soup.find('table', {'class': 'list'})
             
             if not table:
                 logging.error("테이블을 찾을 수 없습니다.")
-                return []
+                return [], False
 
             rows = table.find('tbody').find_all('tr')
             for row in rows:
@@ -65,7 +68,12 @@ class KRXMonitor:
                     if len(cols) >= 4:
                         date_str = cols[1].text.strip()
                         company = cols[2].find('a', {'id': 'companysum'}).text.strip()
-                        title = cols[3].find('a').text.strip()
+                        title_link = cols[3].find('a')
+                        title = title_link.text.strip()
+                        
+                        # rcpNo 추출
+                        rcp_no = self.extract_rcp_no(title_link['onclick'])
+                        disclosure_url = f"https://kind.krx.co.kr/common/disclsviewer.do?method=search&rcpNo={rcp_no}"
                         
                         disclosure_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
                         
@@ -73,17 +81,17 @@ class KRXMonitor:
                             disclosures.append({
                                 'date': date_str,
                                 'company': company,
-                                'title': title
+                                'title': title,
+                                'url': disclosure_url
                             })
                             logging.info(f"파싱 성공: {date_str} - {company}")
                         else:
-                            return disclosures, False  # 일주일 이전 데이터면 중단
+                            return disclosures, False
                             
                 except Exception as e:
                     logging.error(f"행 파싱 중 에러: {str(e)}")
                     continue
 
-            # 마지막 행까지 일주일 이내면 다음 페이지 필요
             return disclosures, True
             
         except Exception as e:
@@ -121,7 +129,7 @@ class KRXMonitor:
             message += f"📅 {date}\n"
             for disc in list(group):
                 message += f"• {disc['company']}\n"
-                message += f"  └ {disc['title']}\n"
+                message += f"  └ <a href='{disc['url']}'>{disc['title']}</a>\n"
             message += "\n"
 
         message += f"총 {len(disclosures)}건의 공시가 있습니다."
