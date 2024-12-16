@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 import telegram
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 logging.basicConfig(
@@ -42,8 +42,8 @@ class MSITMonitor:
         """통신 서비스 가입 현황 관련 뉴스인지 확인"""
         return "통신 서비스 가입 현황" in title
 
-    def is_today(self, date_str: str) -> bool:
-        """게시물이 오늘 날짜인지 확인"""
+    def is_yesterday(self, date_str: str) -> bool:
+        """게시물이 어제 날짜인지 확인"""
         try:
             # 날짜 형식 정규화
             date_str = date_str.replace(',', ' ').strip()
@@ -58,9 +58,9 @@ class MSITMonitor:
                     # "YYYY-MM-DD" 형식 시도
                     post_date = datetime.strptime(date_str, '%Y-%m-%d').date()
             
-            today = datetime.now().date()
-            logging.info(f"게시물 날짜 확인: {post_date} vs {today}")
-            return post_date == today
+            yesterday = datetime.now().date() - timedelta(days=1)
+            logging.info(f"게시물 날짜 확인: {post_date} vs {yesterday} (어제)")
+            return post_date == yesterday
         except Exception as e:
             logging.error(f"날짜 파싱 에러: {str(e)}")
             return False
@@ -106,7 +106,7 @@ class MSITMonitor:
                 # thead는 건너뛰기
                 if 'thead' in item.get('class', []):
                     continue
-                    
+
                 try:
                     date_elem = item.find('div', {'class': 'date', 'aria-label': '등록일'})
                     if not date_elem:
@@ -120,19 +120,25 @@ class MSITMonitor:
                         
                     logging.info(f"Found date string: {date_str}")
                     
-                if not self.is_today(date_str):
-                    continue_search = False
-                    break
-                
-                title_elem = item.find('p', {'class': 'title'})
-                if title_elem and self.check_telco_news(title_elem.text.strip()):
-                    title = title_elem.text.strip()
-                    dept = item.find('dd', {'id': lambda x: x and 'td_CHRG_DEPT_NM' in x}).text.strip()
-                    telco_news.append({
-                        'title': title,
-                        'date': date_str,
-                        'department': dept
-                    })
+                    if not self.is_yesterday(date_str):
+                        continue_search = False
+                        break
+                    
+                    title_elem = item.find('p', {'class': 'title'})
+                    if title_elem and self.check_telco_news(title_elem.text.strip()):
+                        title = title_elem.text.strip()
+                        dept = item.find('dd', {'id': lambda x: x and 'td_CHRG_DEPT_NM' in x})
+                        dept_text = dept.text.strip() if dept else "부서 정보 없음"
+                        
+                        telco_news.append({
+                            'title': title,
+                            'date': date_str,
+                            'department': dept_text
+                        })
+                        logging.info(f"Found telco news: {title}")
+                except Exception as e:
+                    logging.error(f"게시물 파싱 중 에러: {str(e)}")
+                    continue
             
             return telco_news, continue_search
             
@@ -143,6 +149,7 @@ class MSITMonitor:
     async def send_telegram_message(self, news_items: list):
         """텔레그램으로 메시지 전송"""
         if not news_items:
+            logging.info("전송할 뉴스가 없습니다.")
             return
             
         try:
@@ -192,6 +199,8 @@ class MSITMonitor:
             
             if all_news:
                 await self.send_telegram_message(all_news)
+            else:
+                logging.info("오늘 해당하는 새로운 공시가 없습니다.")
             
         except Exception as e:
             error_message = f"에러 발생: {str(e)}"
