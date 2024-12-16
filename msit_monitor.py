@@ -58,7 +58,7 @@ class MSITMonitor:
                     # "YYYY-MM-DD" 형식 시도
                     post_date = datetime.strptime(date_str, '%Y-%m-%d').date()
             
-            yesterday = datetime.now().date() - timedelta(days=4)
+            yesterday = datetime.now().date() - timedelta(days=1)
             logging.info(f"게시물 날짜 확인: {post_date} vs {yesterday} (어제)")
             return post_date == yesterday
         except Exception as e:
@@ -130,10 +130,15 @@ class MSITMonitor:
                         dept = item.find('dd', {'id': lambda x: x and 'td_CHRG_DEPT_NM' in x})
                         dept_text = dept.text.strip() if dept else "부서 정보 없음"
                         
+                        # 게시물 ID와 URL 추출
+                        post_id = self.extract_post_id(item)
+                        post_url = self.get_post_url(post_id) if post_id else None
+                        
                         telco_news.append({
                             'title': title,
                             'date': date_str,
-                            'department': dept_text
+                            'department': dept_text,
+                            'url': post_url
                         })
                         logging.info(f"Found telco news: {title}")
                 except Exception as e:
@@ -158,7 +163,10 @@ class MSITMonitor:
             for news in news_items:
                 message += f"📅 {news['date']}\n"
                 message += f"📑 {news['title']}\n"
-                message += f"🏢 {news['department']}\n\n"
+                message += f"🏢 {news['department']}\n"
+                if news.get('url'):
+                    message += f"🔗 <a href='{news['url']}'>게시물 바로가기</a>\n"
+                message += "\n"
 
             chat_id = int(self.chat_id)
             await self.bot.send_message(
