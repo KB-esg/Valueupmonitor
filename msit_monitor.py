@@ -41,9 +41,31 @@ class MSITMonitor:
     def check_telco_news(self, title: str) -> bool:
         """통신 서비스 가입 현황 관련 뉴스인지 확인"""
         return "통신 서비스 가입 현황" in title
+        
+    def extract_post_id(self, item):
+        """게시물의 ID를 추출"""
+        try:
+            link_elem = item.find('a')
+            if not link_elem:
+                return None
+                
+            onclick_attr = link_elem.get('onclick', '')
+            match = re.search(r"fn_detail\((\d+)\)", onclick_attr)
+            if match:
+                return match.group(1)
+            return None
+        except Exception as e:
+            logging.error(f"게시물 ID 추출 중 에러: {str(e)}")
+            return None
 
-    def is_yesterday(self, date_str: str) -> bool:
-        """게시물이 어제 날짜인지 확인"""
+    def get_post_url(self, post_id):
+        """게시물의 URL 생성"""
+        if not post_id:
+            return None
+        return f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post_id}"
+
+    def is_in_date_range(self, date_str: str) -> bool:
+        """게시물이 날짜 범위 내인지 확인"""
         try:
             # 날짜 형식 정규화
             date_str = date_str.replace(',', ' ').strip()
@@ -58,9 +80,13 @@ class MSITMonitor:
                     # "YYYY-MM-DD" 형식 시도
                     post_date = datetime.strptime(date_str, '%Y-%m-%d').date()
             
-            yesterday = datetime.now().date() - timedelta(days=1)
-            logging.info(f"게시물 날짜 확인: {post_date} vs {yesterday} (어제)")
-            return post_date == yesterday
+            # 한국 시간 기준으로 날짜 계산
+            korea_tz = datetime.now() + timedelta(hours=9)  # UTC to KST
+            days_ago = (korea_tz - timedelta(days=4)).date()  # 테스트용 4일
+            
+            logging.info(f"게시물 날짜 확인: {post_date} vs {days_ago} (4일 전, 한국 시간 기준)")
+            return post_date >= days_ago
+            
         except Exception as e:
             logging.error(f"날짜 파싱 에러: {str(e)}")
             return False
@@ -103,7 +129,6 @@ class MSITMonitor:
             news_items = soup.find_all('div', {'class': 'toggle'})
             
             for item in news_items:
-                # thead는 건너뛰기
                 if 'thead' in item.get('class', []):
                     continue
 
@@ -120,7 +145,7 @@ class MSITMonitor:
                         
                     logging.info(f"Found date string: {date_str}")
                     
-                    if not self.is_within_last_two_days(date_str):
+                    if not self.is_in_date_range(date_str):
                         continue_search = False
                         break
                     
@@ -132,7 +157,7 @@ class MSITMonitor:
                         
                         # 게시물 ID와 URL 추출
                         post_id = self.extract_post_id(item)
-                        post_url = self.get_post_url(post_id) if post_id else None
+                        post_url = self.get_post_url(post_id)
                         
                         telco_news.append({
                             'title': title,
@@ -208,7 +233,7 @@ class MSITMonitor:
             if all_news:
                 await self.send_telegram_message(all_news)
             else:
-                logging.info("최근 48시간 내에 해당하는 새로운 공시가 없습니다.")
+                logging.info("최근 4일 내에 해당하는 새로운 공시가 없습니다.")
             
         except Exception as e:
             error_message = f"에러 발생: {str(e)}"
