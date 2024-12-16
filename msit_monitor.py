@@ -58,7 +58,7 @@ class MSITMonitor:
                     # "YYYY-MM-DD" 형식 시도
                     post_date = datetime.strptime(date_str, '%Y-%m-%d').date()
             
-            yesterday = datetime.now().date() - timedelta(days=1)
+            yesterday = datetime.now().date() - timedelta(days=4)
             logging.info(f"게시물 날짜 확인: {post_date} vs {yesterday} (어제)")
             return post_date == yesterday
         except Exception as e:
