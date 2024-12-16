@@ -45,8 +45,11 @@ class MSITMonitor:
     def is_today(self, date_str: str) -> bool:
         """게시물이 오늘 날짜인지 확인"""
         try:
-            post_date = datetime.strptime(date_str, '%Y. %m. %d').date()
+            # 날짜 형식: "2024. 12. 16" 처리
+            date_str = date_str.replace(' ', '')  # 공백 제거
+            post_date = datetime.strptime(date_str, '%Y.%m.%d').date()
             today = datetime.now().date()
+            logging.info(f"게시물 날짜 확인: {post_date} vs {today}")
             return post_date == today
         except Exception as e:
             logging.error(f"날짜 파싱 에러: {str(e)}")
@@ -90,11 +93,18 @@ class MSITMonitor:
             news_items = soup.find_all('div', {'class': 'toggle'})
             
             for item in news_items:
-                date_elem = item.find('div', {'class': 'date'})
+                # thead는 건너뛰기
+                if 'thead' in item.get('class', []):
+                    continue
+                    
+                date_elem = item.find('div', {'class': 'date', 'aria-label': '등록일'})
                 if not date_elem:
                     continue
                     
                 date_str = date_elem.text.strip()
+                if not date_str or date_str == '등록일':
+                    continue
+                    
                 if not self.is_today(date_str):
                     continue_search = False
                     break
