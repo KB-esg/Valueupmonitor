@@ -120,7 +120,7 @@ class MSITMonitor:
                         
                     logging.info(f"Found date string: {date_str}")
                     
-                    if not self.is_yesterday(date_str):
+                    if not self.is_within_last_two_days(date_str):
                         continue_search = False
                         break
                     
@@ -200,7 +200,7 @@ class MSITMonitor:
             if all_news:
                 await self.send_telegram_message(all_news)
             else:
-                logging.info("오늘 해당하는 새로운 공시가 없습니다.")
+                logging.info("최근 48시간 내에 해당하는 새로운 공시가 없습니다.")
             
         except Exception as e:
             error_message = f"에러 발생: {str(e)}"
