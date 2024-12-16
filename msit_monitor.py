@@ -45,9 +45,19 @@ class MSITMonitor:
     def is_today(self, date_str: str) -> bool:
         """게시물이 오늘 날짜인지 확인"""
         try:
-            # 날짜 형식: "2024. 12. 16" 처리
-            date_str = date_str.replace(' ', '')  # 공백 제거
-            post_date = datetime.strptime(date_str, '%Y.%m.%d').date()
+            # 날짜 형식 정규화
+            date_str = date_str.replace(',', ' ').strip()
+            try:
+                # "YYYY. MM. DD" 형식 시도
+                post_date = datetime.strptime(date_str, '%Y. %m. %d').date()
+            except ValueError:
+                try:
+                    # "MMM DD YYYY" 형식 시도
+                    post_date = datetime.strptime(date_str, '%b %d %Y').date()
+                except ValueError:
+                    # "YYYY-MM-DD" 형식 시도
+                    post_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            
             today = datetime.now().date()
             logging.info(f"게시물 날짜 확인: {post_date} vs {today}")
             return post_date == today
@@ -97,13 +107,18 @@ class MSITMonitor:
                 if 'thead' in item.get('class', []):
                     continue
                     
-                date_elem = item.find('div', {'class': 'date', 'aria-label': '등록일'})
-                if not date_elem:
-                    continue
-                    
-                date_str = date_elem.text.strip()
-                if not date_str or date_str == '등록일':
-                    continue
+                try:
+                    date_elem = item.find('div', {'class': 'date', 'aria-label': '등록일'})
+                    if not date_elem:
+                        date_elem = item.find('div', {'class': 'date'})
+                    if not date_elem:
+                        continue
+                        
+                    date_str = date_elem.text.strip()
+                    if not date_str or date_str == '등록일':
+                        continue
+                        
+                    logging.info(f"Found date string: {date_str}")
                     
                 if not self.is_today(date_str):
                     continue_search = False
