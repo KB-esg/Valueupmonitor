@@ -50,25 +50,18 @@ class TelcoNewsForwarder:
     async def process_updates(self):
         """메시지 업데이트를 처리하는 함수"""
         try:
-            # 100개의 최근 업데이트 가져오기
-            updates = await self.bot.get_updates(limit=100, allowed_updates=['channel_post', 'message'])
+            updates = await self.bot.get_updates(limit=100)
             logger.info(f"총 {len(updates)}개의 업데이트를 받았습니다.")
             
-            # 채널 메시지 필터링
             relevant_messages = []
             for update in updates:
-                # 채널 메시지 확인
+                # 메시지 추출 (channel_post 또는 일반 message)
                 message = update.channel_post or update.message
                 if not message or not message.text:
                     continue
 
                 logger.info(f"메시지 검사 중: chat_id={message.chat.id}, message_id={message.message_id}")
-                logger.info(f"채팅 타입: {message.chat.type}")
-
-                # 지정된 채널의 메시지인지 확인
-                if str(message.chat.id) != str(self.receive_chat_id):
-                    logger.info(f"다른 채널의 메시지입니다: {message.chat.id}")
-                    continue
+                logger.info(f"메시지 내용: {message.text[:100]}...")  # 처음 100자만 로깅
 
                 # 24시간 이내 메시지인지 확인
                 message_time = message.date.replace(tzinfo=None)
@@ -84,6 +77,7 @@ class TelcoNewsForwarder:
                 cleaned_text = self.clean_message(original_text)
                 
                 if original_text != cleaned_text:
+                    # 채널 메시지가 아니더라도 내용이 맞으면 처리
                     relevant_messages.append((message, cleaned_text))
                     logger.info(f"처리 대상 메시지 발견: {message.message_id}")
                     logger.info(f"원본 텍스트: {original_text[:100]}...")
@@ -115,10 +109,10 @@ class TelcoNewsForwarder:
                 
             original_message, cleaned_text = result
             
-            # 원본 메시지 수정
+            # 원본 메시지 수정 먼저 시도
             try:
                 await self.bot.edit_message_text(
-                    chat_id=self.receive_chat_id,
+                    chat_id=original_message.chat.id,
                     message_id=original_message.message_id,
                     text=cleaned_text
                 )
@@ -129,17 +123,13 @@ class TelcoNewsForwarder:
             # 브로드캐스트 채널로 전달
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    if cleaned_text:  # 비어있지 않은 텍스트만 전송
-                        sent_msg = await self.bot.send_message(
-                            chat_id=int(chat_id),
-                            text=cleaned_text
-                        )
-                        logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
-                    else:
-                        logger.warning("정제된 텍스트가 비어있어 메시지를 전송하지 않습니다.")
+                    sent_msg = await self.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=cleaned_text
+                    )
+                    logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
                 except Exception as e:
-                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
-                    
+                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")                    
         except Exception as e:
             logger.error(f"전체 프로세스 중 에러 발생: {str(e)}")
             raise
