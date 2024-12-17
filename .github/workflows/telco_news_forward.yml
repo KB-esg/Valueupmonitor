@@ -45,8 +45,8 @@ jobs:
     - name: Run forwarder script
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELCO_NEWS_RECEIVE: ${{ secrets.TELCO_NEWS_TESTER }}
-        TELCO_NEWS_BROADCAST_1: ${{ secrets.TELCO_NEWS_TESTER }}
-        TELCO_NEWS_BROADCAST_2: ${{ secrets.TELCO_NEWS_TESTER }}
+        TELCO_NEWS_RECEIVE: ${{ secrets.TELCO_NEWS_RECEIVE }}
+        TELCO_NEWS_BROADCAST_1: ${{ secrets.TELCO_NEWS_BROADCAST_1 }}
+        TELCO_NEWS_BROADCAST_2: ${{ secrets.TELCO_NEWS_BROADCAST_2 }}
       run: |
         python telco_news_forwarder.py
