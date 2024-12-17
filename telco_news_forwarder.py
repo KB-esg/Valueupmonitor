@@ -50,34 +50,44 @@ class TelcoNewsForwarder:
     async def process_updates(self):
         """메시지 업데이트를 처리하는 함수"""
         try:
-            # 최근 100개의 업데이트를 가져옵니다
-            updates = await self.bot.get_updates(limit=100)
+            # offset 없이 모든 업데이트 가져오기
+            updates = await self.bot.get_updates(limit=100, timeout=30, allowed_updates=['message'])
             logger.info(f"총 {len(updates)}개의 업데이트를 받았습니다.")
-
-            # 수신 채널 ID와 일치하는 메시지만 필터링
+            
+            # 관련 메시지 필터링
             relevant_messages = []
             for update in updates:
                 if not update.message or not update.message.text:
                     continue
-
-                if str(update.message.chat.id) == self.receive_chat_id:
-                    # 24시간 이내의 메시지만 처리
-                    if datetime.utcnow() - update.message.date.replace(tzinfo=None) <= timedelta(hours=24):
-                        relevant_messages.append(update.message)
-                        logger.info(f"관련 메시지 발견: {update.message.message_id}")
-
-            # 가장 최근 메시지부터 처리
-            for message in sorted(relevant_messages, key=lambda x: x.date, reverse=True):
-                original_text = message.text
+                    
+                logger.info(f"메시지 검사 중: chat_id={update.message.chat.id}, message_id={update.message.message_id}")
+                
+                # 원하는 채널의 메시지인지 확인
+                if str(update.message.chat.id) != str(self.receive_chat_id):
+                    continue
+                
+                # 24시간 이내 메시지인지 확인
+                message_time = update.message.date.replace(tzinfo=None)
+                if datetime.utcnow() - message_time > timedelta(hours=24):
+                    continue
+                
+                # 제거할 문자열이 있는지 확인
+                original_text = update.message.text
                 cleaned_text = self.clean_message(original_text)
-
-                # 제거할 문자열이 있는 경우만 처리
                 if original_text != cleaned_text:
-                    logger.info(f"메시지 {message.message_id}에서 제거할 문자열 발견")
-                    return message, cleaned_text
-
-            return None, None
-
+                    relevant_messages.append((update.message, cleaned_text))
+                    logger.info(f"처리 대상 메시지 발견: {update.message.message_id}")
+            
+            if not relevant_messages:
+                logger.info("처리할 메시지를 찾지 못했습니다.")
+                return None, None
+            
+            # 가장 최근 메시지 선택
+            latest_message = max(relevant_messages, key=lambda x: x[0].date)
+            logger.info(f"가장 최근 메시지 선택: {latest_message[0].message_id}")
+            
+            return latest_message
+            
         except Exception as e:
             logger.error(f"업데이트 처리 중 에러: {str(e)}")
             return None, None
@@ -86,11 +96,13 @@ class TelcoNewsForwarder:
         """메시지를 수신하고 수정하여 다른 채널에 전달"""
         try:
             logger.info("메시지 업데이트 확인 중...")
-            original_message, cleaned_text = await self.process_updates()
+            result = await self.process_updates()
             
-            if not original_message or not cleaned_text:
+            if not result:
                 logger.info("처리할 메시지가 없습니다.")
                 return
+                
+            original_message, cleaned_text = result
             
             # 원본 메시지 수정
             try:
