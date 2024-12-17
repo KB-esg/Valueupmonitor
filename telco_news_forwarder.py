@@ -47,6 +47,23 @@ class TelcoNewsForwarder:
             cleaned = cleaned.replace(remove_str, '').strip()
         return cleaned
 
+    async def check_bot_permissions(self, chat_id):
+        """봇의 채널 권한을 확인하는 함수"""
+        try:
+            chat = await self.bot.get_chat(chat_id)
+            bot = await self.bot.get_me()
+            member = await self.bot.get_chat_member(chat_id, bot.id)
+            
+            logger.info(f"채널 정보: {chat.title} (type: {chat.type})")
+            logger.info(f"봇 권한: {member.status}")
+            logger.info(f"can_edit_messages: {getattr(member, 'can_edit_messages', False)}")
+            logger.info(f"can_post_messages: {getattr(member, 'can_post_messages', False)}")
+            
+            return member
+        except Exception as e:
+            logger.error(f"권한 확인 중 에러: {str(e)}")
+            return None
+
     async def process_updates(self):
         """메시지 업데이트를 처리하는 함수"""
         try:
@@ -109,27 +126,40 @@ class TelcoNewsForwarder:
                 
             original_message, cleaned_text = result
             
+            # 권한 확인
+            logger.info("채널 권한 확인 중...")
+            member = await self.check_bot_permissions(original_message.chat.id)
+            if not member or not getattr(member, 'can_edit_messages', False):
+                logger.warning("봇이 메시지를 수정할 권한이 없습니다!")
+            
             # 원본 메시지 수정 먼저 시도
             try:
-                await self.bot.edit_message_text(
+                logger.info(f"메시지 수정 시도: chat_id={original_message.chat.id}, message_id={original_message.message_id}")
+                edited_msg = await self.bot.edit_message_text(
                     chat_id=original_message.chat.id,
                     message_id=original_message.message_id,
-                    text=cleaned_text
+                    text=cleaned_text,
+                    parse_mode=None  # 포맷팅 오류 방지
                 )
                 logger.info(f"원본 메시지 {original_message.message_id} 수정 완료")
+                logger.info(f"수정된 메시지 내용: {edited_msg.text[:100]}...")
             except Exception as e:
                 logger.error(f"메시지 수정 중 에러: {str(e)}")
+                logger.error(f"채팅 타입: {original_message.chat.type}")
+                logger.error(f"메시지 ID: {original_message.message_id}")
             
             # 브로드캐스트 채널로 전달
             for chat_id in self.broadcast_chat_ids:
                 try:
                     sent_msg = await self.bot.send_message(
                         chat_id=int(chat_id),
-                        text=cleaned_text
+                        text=cleaned_text,
+                        parse_mode=None  # 포맷팅 오류 방지
                     )
                     logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
                 except Exception as e:
-                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")                    
+                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
+                    
         except Exception as e:
             logger.error(f"전체 프로세스 중 에러 발생: {str(e)}")
             raise
