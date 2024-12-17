@@ -19,7 +19,7 @@ REMOVE_STRINGS = [
 
 class TelcoNewsForwarder:
     def __init__(self):
-        self.token = os.getenv('TELEGRAM_TOKEN')
+        self.token = os.getenv('TELCO_NEWS_TOKEN')
         self.receive_chat_id = os.getenv('TELCO_NEWS_RECEIVE')
         self.broadcast_chat_ids = [
             os.getenv('TELCO_NEWS_BROADCAST_1'),
