@@ -1,6 +1,5 @@
 import os
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Bot
 import asyncio
 import logging
 from datetime import datetime
@@ -20,20 +19,34 @@ REMOVE_STRINGS = [
 
 class TelcoNewsForwarder:
     def __init__(self):
-        self.token = os.environ.get('TELCO_NEWS_TOKEN')
-        self.receive_chat_id = os.environ.get('TELCO_NEWS_TESTER')
+        # 환경 변수 가져오기
+        self.token = os.getenv('TELEGRAM_TOKEN')
+        self.receive_chat_id = os.getenv('TELCO_NEWS_RECEIVE')
         self.broadcast_chat_ids = [
-            os.environ.get('TELCO_NEWS_TESTER'),
-            os.environ.get('TELCO_NEWS_TESTER')
+            os.getenv('TELCO_NEWS_BROADCAST_1'),
+            os.getenv('TELCO_NEWS_BROADCAST_2')
         ]
         
-        if not all([self.token, self.receive_chat_id] + self.broadcast_chat_ids):
-            raise ValueError("필요한 환경 변수가 설정되지 않았습니다.")
+        # 환경 변수 확인 및 로깅
+        logger.info(f"Token 존재 여부: {bool(self.token)}")
+        logger.info(f"수신 채널 ID 존재 여부: {bool(self.receive_chat_id)}")
+        logger.info(f"브로드캐스트 채널 1 존재 여부: {bool(self.broadcast_chat_ids[0])}")
+        logger.info(f"브로드캐스트 채널 2 존재 여부: {bool(self.broadcast_chat_ids[1])}")
+        
+        if not self.token:
+            raise ValueError("TELEGRAM_TOKEN이 설정되지 않았습니다.")
+        if not self.receive_chat_id:
+            raise ValueError("TELCO_NEWS_RECEIVE가 설정되지 않았습니다.")
+        if not all(self.broadcast_chat_ids):
+            raise ValueError("TELCO_NEWS_BROADCAST_1 또는 TELCO_NEWS_BROADCAST_2가 설정되지 않았습니다.")
             
         self.bot = Bot(token=self.token)
 
     def clean_message(self, message: str) -> str:
         """지정된 문자열을 제거하는 함수"""
+        if not message:
+            return ""
+        
         for remove_str in REMOVE_STRINGS:
             message = message.replace(remove_str, '').strip()
         return message
@@ -42,40 +55,64 @@ class TelcoNewsForwarder:
         """메시지를 수신하고 수정하여 다른 채널에 전달"""
         try:
             # 최근 메시지 가져오기
-            async with self.bot:
-                messages = await self.bot.get_updates()
-                if messages:
-                    latest_message = messages[-1].message
-                    if latest_message and latest_message.chat.id == int(self.receive_chat_id):
-                        # 메시지 정제
-                        cleaned_message = self.clean_message(latest_message.text)
-                        
-                        # 원본 메시지 수정
-                        await self.bot.edit_message_text(
-                            chat_id=self.receive_chat_id,
-                            message_id=latest_message.message_id,
-                            text=cleaned_message
-                        )
-                        
-                        # 브로드캐스트 채널로 전달
-                        for chat_id in self.broadcast_chat_ids:
-                            await self.bot.send_message(
-                                chat_id=int(chat_id),
-                                text=cleaned_message,
-                                parse_mode='HTML'
-                            )
-                        
-                        logger.info("메시지 전달 및 수정 완료")
-                    else:
-                        logger.info("처리할 새 메시지가 없습니다.")
-                        
+            updates = await self.bot.get_updates()
+            
+            if not updates:
+                logger.info("처리할 메시지가 없습니다.")
+                return
+                
+            latest_message = updates[-1].message
+            if not latest_message:
+                logger.info("최근 메시지를 찾을 수 없습니다.")
+                return
+                
+            if str(latest_message.chat.id) != self.receive_chat_id:
+                logger.info(f"메시지가 지정된 채널({self.receive_chat_id})에서 오지 않았습니다.")
+                return
+                
+            # 메시지 정제
+            original_text = latest_message.text
+            cleaned_message = self.clean_message(original_text)
+            
+            if original_text == cleaned_message:
+                logger.info("제거할 문자열이 없습니다.")
+                return
+                
+            logger.info("원본 메시지 수정 시도...")
+            
+            # 원본 메시지 수정
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.receive_chat_id,
+                    message_id=latest_message.message_id,
+                    text=cleaned_message
+                )
+                logger.info("원본 메시지 수정 완료")
+            except Exception as e:
+                logger.error(f"메시지 수정 중 에러: {str(e)}")
+            
+            # 브로드캐스트 채널로 전달
+            for chat_id in self.broadcast_chat_ids:
+                try:
+                    await self.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=cleaned_message
+                    )
+                    logger.info(f"채널 {chat_id}로 메시지 전달 완료")
+                except Exception as e:
+                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
+                    
         except Exception as e:
-            logger.error(f"에러 발생: {str(e)}")
+            logger.error(f"전체 프로세스 중 에러 발생: {str(e)}")
             raise
 
 async def main():
-    forwarder = TelcoNewsForwarder()
-    await forwarder.forward_messages()
+    try:
+        forwarder = TelcoNewsForwarder()
+        await forwarder.forward_messages()
+    except Exception as e:
+        logger.error(f"메인 함수 실행 중 에러: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
