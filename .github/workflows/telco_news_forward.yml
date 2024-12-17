@@ -26,7 +26,7 @@ jobs:
     - name: Check environment variables
       run: |
         if [ -z "${{ secrets.TELCO_NEWS_TOKEN }}" ]; then
-          echo "Error: TELEGRAM_TOKEN is not set"
+          echo "Error: TELCO_NEWS_TOKEN is not set"
           exit 1
         fi
         if [ -z "${{ secrets.TELCO_NEWS_RECEIVE }}" ]; then
@@ -44,7 +44,7 @@ jobs:
 
     - name: Run forwarder script
       env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_RECEIVE: ${{ secrets.TELCO_NEWS_RECEIVE }}
         TELCO_NEWS_BROADCAST_1: ${{ secrets.TELCO_NEWS_BROADCAST_1 }}
         TELCO_NEWS_BROADCAST_2: ${{ secrets.TELCO_NEWS_BROADCAST_2 }}
