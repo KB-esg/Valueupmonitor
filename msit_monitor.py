@@ -83,7 +83,7 @@ class MSITMonitor:
             
             # 한국 시간 기준으로 날짜 계산
             korea_tz = datetime.now() + timedelta(hours=9)  # UTC to KST
-            days_ago = (korea_tz - timedelta(days=4)).date()  # 테스트용 4일
+            days_ago = (korea_tz - timedelta(days=2)).date()  # 테스트용 4일
             
             logging.info(f"게시물 날짜 확인: {post_date} vs {days_ago} (4일 전, 한국 시간 기준)")
             return post_date >= days_ago
