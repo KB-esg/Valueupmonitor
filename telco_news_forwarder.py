@@ -21,10 +21,10 @@ REMOVE_STRINGS = [
 class TelcoNewsForwarder:
     def __init__(self):
         self.token = os.environ.get('TELCO_NEWS_TOKEN')
-        self.receive_chat_id = os.environ.get('TELCO_NEWS_RECEIVE')
+        self.receive_chat_id = os.environ.get('TELCO_NEWS_TESTER')
         self.broadcast_chat_ids = [
-            os.environ.get('TELCO_NEWS_BROADCAST_1'),
-            os.environ.get('TELCO_NEWS_BROADCAST_2')
+            os.environ.get('TELCO_NEWS_TESTER'),
+            os.environ.get('TELCO_NEWS_TESTER')
         ]
         
         if not all([self.token, self.receive_chat_id] + self.broadcast_chat_ids):
