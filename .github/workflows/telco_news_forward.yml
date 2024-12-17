@@ -25,7 +25,7 @@ jobs:
 
     - name: Check environment variables
       run: |
-        if [ -z "${{ secrets.TELEGRAM_TOKEN }}" ]; then
+        if [ -z "${{ secrets.TELCO_NEWS_TOKEN }}" ]; then
           echo "Error: TELEGRAM_TOKEN is not set"
           exit 1
         fi
