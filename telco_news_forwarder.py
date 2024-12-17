@@ -4,14 +4,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-# 로깅 설정
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 제거할 문자열
 REMOVE_STRINGS = [
     "☞ KB증권 통신 텔레그램 채널 바로가기 < https://bit.ly/BaseStation >",
     "☞무료수신거부 0808886611"
@@ -19,7 +17,6 @@ REMOVE_STRINGS = [
 
 class TelcoNewsForwarder:
     def __init__(self):
-        # TELCO_NEWS_TOKEN으로 환경 변수 이름 통일
         self.token = os.getenv('TELCO_NEWS_TOKEN')
         self.receive_chat_id = os.getenv('TELCO_NEWS_RECEIVE')
         self.broadcast_chat_ids = [
@@ -32,7 +29,7 @@ class TelcoNewsForwarder:
         logger.info(f"브로드캐스트 채널 IDs: {self.broadcast_chat_ids}")
         
         if not self.token:
-            raise ValueError("TELCO_NEWS_TOKEN이 설정되지 않았습니다.") # 에러 메시지도 수정
+            raise ValueError("TELCO_NEWS_TOKEN이 설정되지 않았습니다.")
         if not self.receive_chat_id:
             raise ValueError("TELCO_NEWS_RECEIVE가 설정되지 않았습니다.")
         if not all(self.broadcast_chat_ids):
@@ -45,98 +42,78 @@ class TelcoNewsForwarder:
         if not message:
             return ""
         
+        cleaned = message
         for remove_str in REMOVE_STRINGS:
-            message = message.replace(remove_str, '').strip()
-        return message
+            cleaned = cleaned.replace(remove_str, '').strip()
+        return cleaned
 
-    async def check_bot_permissions(self):
-        """봇의 권한을 확인하는 함수"""
+    async def process_updates(self):
+        """메시지 업데이트를 처리하는 함수"""
         try:
-            # 봇 정보 가져오기
-            bot_info = await self.bot.get_me()
-            logger.info(f"봇 정보: {bot_info.first_name} (@{bot_info.username})")
-            
-            # 수신 채널 정보 확인
-            try:
-                chat = await self.bot.get_chat(self.receive_chat_id)
-                logger.info(f"수신 채널 정보: {chat.title} (type: {chat.type})")
-            except Exception as e:
-                logger.error(f"수신 채널 접근 실패: {str(e)}")
-            
-            # 브로드캐스트 채널 정보 확인
-            for chat_id in self.broadcast_chat_ids:
-                try:
-                    chat = await self.bot.get_chat(chat_id)
-                    logger.info(f"브로드캐스트 채널 정보: {chat.title} (type: {chat.type})")
-                except Exception as e:
-                    logger.error(f"브로드캐스트 채널 {chat_id} 접근 실패: {str(e)}")
-                    
+            # 최근 100개의 업데이트를 가져옵니다
+            updates = await self.bot.get_updates(limit=100)
+            logger.info(f"총 {len(updates)}개의 업데이트를 받았습니다.")
+
+            # 수신 채널 ID와 일치하는 메시지만 필터링
+            relevant_messages = []
+            for update in updates:
+                if not update.message or not update.message.text:
+                    continue
+
+                if str(update.message.chat.id) == self.receive_chat_id:
+                    # 24시간 이내의 메시지만 처리
+                    if datetime.utcnow() - update.message.date.replace(tzinfo=None) <= timedelta(hours=24):
+                        relevant_messages.append(update.message)
+                        logger.info(f"관련 메시지 발견: {update.message.message_id}")
+
+            # 가장 최근 메시지부터 처리
+            for message in sorted(relevant_messages, key=lambda x: x.date, reverse=True):
+                original_text = message.text
+                cleaned_text = self.clean_message(original_text)
+
+                # 제거할 문자열이 있는 경우만 처리
+                if original_text != cleaned_text:
+                    logger.info(f"메시지 {message.message_id}에서 제거할 문자열 발견")
+                    return message, cleaned_text
+
+            return None, None
+
         except Exception as e:
-            logger.error(f"봇 권한 확인 중 에러: {str(e)}")
+            logger.error(f"업데이트 처리 중 에러: {str(e)}")
+            return None, None
 
     async def forward_messages(self):
         """메시지를 수신하고 수정하여 다른 채널에 전달"""
         try:
-            # 봇 권한 확인
-            await self.check_bot_permissions()
-            
-            # 최근 메시지 가져오기 (offset과 limit 설정)
             logger.info("메시지 업데이트 확인 중...")
-            updates = await self.bot.get_updates(offset=-1, limit=1, timeout=30)
-            logger.info(f"받은 업데이트 수: {len(updates)}")
+            original_message, cleaned_text = await self.process_updates()
             
-            if not updates:
-                logger.info("처리할 업데이트가 없습니다.")
+            if not original_message or not cleaned_text:
+                logger.info("처리할 메시지가 없습니다.")
                 return
-                
-            for update in updates:
-                logger.info(f"업데이트 타입: {update.message and 'message' or 'other'}")
-                if not update.message:
-                    continue
-                    
-                message = update.message
-                logger.info(f"메시지 정보: chat_id={message.chat.id}, message_id={message.message_id}")
-                
-                if str(message.chat.id) != self.receive_chat_id:
-                    logger.info(f"다른 채널의 메시지입니다: {message.chat.id}")
-                    continue
-                
-                # 메시지가 24시간 이내인지 확인
-                message_time = message.date.replace(tzinfo=None)
-                if datetime.utcnow() - message_time > timedelta(hours=24):
-                    logger.info("24시간이 지난 메시지입니다.")
-                    continue
-                
-                # 메시지 정제
-                original_text = message.text
-                cleaned_message = self.clean_message(original_text)
-                
-                if original_text == cleaned_message:
-                    logger.info("제거할 문자열이 없습니다.")
-                    continue
-                
-                # 원본 메시지 수정
+            
+            # 원본 메시지 수정
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.receive_chat_id,
+                    message_id=original_message.message_id,
+                    text=cleaned_text
+                )
+                logger.info(f"원본 메시지 {original_message.message_id} 수정 완료")
+            except Exception as e:
+                logger.error(f"메시지 수정 중 에러: {str(e)}")
+            
+            # 브로드캐스트 채널로 전달
+            for chat_id in self.broadcast_chat_ids:
                 try:
-                    await self.bot.edit_message_text(
-                        chat_id=self.receive_chat_id,
-                        message_id=message.message_id,
-                        text=cleaned_message
+                    sent_msg = await self.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=cleaned_text
                     )
-                    logger.info("원본 메시지 수정 완료")
+                    logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
                 except Exception as e:
-                    logger.error(f"메시지 수정 중 에러: {str(e)}")
-                
-                # 브로드캐스트 채널로 전달
-                for chat_id in self.broadcast_chat_ids:
-                    try:
-                        sent_msg = await self.bot.send_message(
-                            chat_id=int(chat_id),
-                            text=cleaned_message
-                        )
-                        logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
-                    except Exception as e:
-                        logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
-                        
+                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
+                    
         except Exception as e:
             logger.error(f"전체 프로세스 중 에러 발생: {str(e)}")
             raise
