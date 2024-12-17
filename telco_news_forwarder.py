@@ -19,6 +19,7 @@ REMOVE_STRINGS = [
 
 class TelcoNewsForwarder:
     def __init__(self):
+        # TELCO_NEWS_TOKEN으로 환경 변수 이름 통일
         self.token = os.getenv('TELCO_NEWS_TOKEN')
         self.receive_chat_id = os.getenv('TELCO_NEWS_RECEIVE')
         self.broadcast_chat_ids = [
@@ -31,7 +32,7 @@ class TelcoNewsForwarder:
         logger.info(f"브로드캐스트 채널 IDs: {self.broadcast_chat_ids}")
         
         if not self.token:
-            raise ValueError("TELEGRAM_TOKEN이 설정되지 않았습니다.")
+            raise ValueError("TELCO_NEWS_TOKEN이 설정되지 않았습니다.") # 에러 메시지도 수정
         if not self.receive_chat_id:
             raise ValueError("TELCO_NEWS_RECEIVE가 설정되지 않았습니다.")
         if not all(self.broadcast_chat_ids):
