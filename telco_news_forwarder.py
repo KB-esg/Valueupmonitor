@@ -47,67 +47,67 @@ class TelcoNewsForwarder:
             cleaned = cleaned.replace(remove_str, '').strip()
         return cleaned
 
-    async def get_channel_messages(self):
-        """채널의 최근 메시지를 직접 가져오는 함수"""
+    async def process_updates(self):
+        """메시지 업데이트를 처리하는 함수"""
         try:
-            messages = await self.bot.get_chat_history(
-                chat_id=self.receive_chat_id,
-                limit=10  # 최근 10개 메시지 확인
-            )
-            logger.info(f"채널에서 {len(messages) if messages else 0}개의 메시지를 가져왔습니다.")
-            return messages
-        except Exception as e:
-            logger.error(f"채널 메시지 가져오기 실패: {str(e)}")
-            return []
-
-    async def process_messages(self):
-        """메시지 처리 함수"""
-        try:
-            # 채널에서 직접 메시지 가져오기
-            messages = await self.get_channel_messages()
-            if not messages:
-                logger.info("채널에서 메시지를 가져오지 못했습니다.")
-                return None, None
+            # 100개의 최근 업데이트 가져오기
+            updates = await self.bot.get_updates(limit=100, allowed_updates=['channel_post', 'message'])
+            logger.info(f"총 {len(updates)}개의 업데이트를 받았습니다.")
             
-            # 관련 메시지 필터링
+            # 채널 메시지 필터링
             relevant_messages = []
-            for message in messages:
-                if not message.text:
+            for update in updates:
+                # 채널 메시지 확인
+                message = update.channel_post or update.message
+                if not message or not message.text:
                     continue
-                    
-                logger.info(f"메시지 검사 중: message_id={message.message_id}")
-                
+
+                logger.info(f"메시지 검사 중: chat_id={message.chat.id}, message_id={message.message_id}")
+                logger.info(f"채팅 타입: {message.chat.type}")
+
+                # 지정된 채널의 메시지인지 확인
+                if str(message.chat.id) != str(self.receive_chat_id):
+                    logger.info(f"다른 채널의 메시지입니다: {message.chat.id}")
+                    continue
+
                 # 24시간 이내 메시지인지 확인
                 message_time = message.date.replace(tzinfo=None)
-                if datetime.utcnow() - message_time > timedelta(hours=24):
-                    continue
+                time_diff = datetime.utcnow() - message_time
+                logger.info(f"메시지 시간: {message_time}, 경과 시간: {time_diff}")
                 
+                if time_diff > timedelta(hours=24):
+                    logger.info("24시간이 지난 메시지입니다.")
+                    continue
+
                 # 제거할 문자열이 있는지 확인
                 original_text = message.text
                 cleaned_text = self.clean_message(original_text)
+                
                 if original_text != cleaned_text:
                     relevant_messages.append((message, cleaned_text))
                     logger.info(f"처리 대상 메시지 발견: {message.message_id}")
+                    logger.info(f"원본 텍스트: {original_text[:100]}...")
+                    logger.info(f"정제된 텍스트: {cleaned_text[:100]}...")
             
             if not relevant_messages:
                 logger.info("처리할 메시지를 찾지 못했습니다.")
                 return None, None
-            
+
             # 가장 최근 메시지 선택
             latest_message = max(relevant_messages, key=lambda x: x[0].date)
             logger.info(f"가장 최근 메시지 선택: {latest_message[0].message_id}")
             
             return latest_message
-            
+
         except Exception as e:
-            logger.error(f"메시지 처리 중 에러: {str(e)}")
+            logger.error(f"업데이트 처리 중 에러: {str(e)}")
             return None, None
 
     async def forward_messages(self):
         """메시지를 수신하고 수정하여 다른 채널에 전달"""
         try:
-            logger.info("채널 메시지 확인 중...")
-            result = await self.process_messages()
+            logger.info("메시지 업데이트 확인 중...")
+            result = await self.process_updates()
             
             if not result:
                 logger.info("처리할 메시지가 없습니다.")
@@ -129,11 +129,14 @@ class TelcoNewsForwarder:
             # 브로드캐스트 채널로 전달
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    sent_msg = await self.bot.send_message(
-                        chat_id=int(chat_id),
-                        text=cleaned_text
-                    )
-                    logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
+                    if cleaned_text:  # 비어있지 않은 텍스트만 전송
+                        sent_msg = await self.bot.send_message(
+                            chat_id=int(chat_id),
+                            text=cleaned_text
+                        )
+                        logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
+                    else:
+                        logger.warning("정제된 텍스트가 비어있어 메시지를 전송하지 않습니다.")
                 except Exception as e:
                     logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
                     
