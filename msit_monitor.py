@@ -40,7 +40,7 @@ class MSITMonitor:
 
     def check_telco_news(self, title: str) -> bool:
         """통신 서비스 가입 현황 관련 뉴스인지 확인"""
-        keywords = ["통신서비스 가입 현황", "유·무선통신서비스 가입"]
+        keywords = ["통신서비스 가입 현황", "유·무선통신서비스 가입", "실태조사"]
         return any(keyword in title for keyword in keywords)
         
     def extract_post_id(self, item):
