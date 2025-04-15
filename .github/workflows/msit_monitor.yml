@@ -35,12 +35,8 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y chromium-browser chromium-chromedriver
-        echo "Chrome version:"
-        chromium-browser --version
-        echo "ChromeDriver version:"
-        chromedriver --version
-        echo "ChromeDriver location:"
-        which chromedriver
+        echo "Chrome location: $(which chromium-browser)"
+        echo "ChromeDriver location: $(which chromedriver)"
         
     - name: Install Python dependencies
       run: |
