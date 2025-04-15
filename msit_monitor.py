@@ -28,6 +28,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger('msit_monitor')
 
+def take_screenshot(self, driver, name):
+    """특정 페이지의 스크린샷 저장"""
+    try:
+        screenshot_path = f"screenshots/{name}_{int(time.time())}.png"
+        driver.save_screenshot(screenshot_path)
+        logger.info(f"스크린샷 저장: {screenshot_path}")
+        return screenshot_path
+    except Exception as e:
+        logger.error(f"스크린샷 저장 중 오류: {str(e)}")
+        return None
+
 class MSITMonitor:
     def __init__(self):
         # 필수 환경 변수 검증
@@ -143,7 +154,11 @@ class MSITMonitor:
             logger.info("Selenium Stealth 적용 완료")
         except ImportError:
             logger.warning("selenium-stealth 라이브러리를 찾을 수 없습니다. 기본 모드로 계속합니다.")
-        
+
+        # 스크린샷 디렉토리 생성
+        screenshots_dir = Path("./screenshots")
+        screenshots_dir.mkdir(exist_ok=True)
+
         return driver
 
     def setup_gspread_client(self):
@@ -441,7 +456,12 @@ class MSITMonitor:
             except Exception as save_err:
                 logger.warning(f"페이지 소스 저장 중 오류: {str(save_err)}")
             
-            # 스크린샷 저장 (디버깅용)
+            
+            # 스크린샷 저장
+            self.take_screenshot(driver, f"parsed_page_{page_num}")
+		
+		
+		# 스크린샷 저장 (디버깅용)
             try:
                 driver.save_screenshot('last_parsed_page.png')
                 logger.info("현재 페이지 스크린샷 저장 완료: last_parsed_page.png")
@@ -591,7 +611,12 @@ class MSITMonitor:
                 detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
                 driver.get(detail_url)
                 time.sleep(retry_delay)
-                
+
+		      
+                # 스크린샷 저장
+                self.take_screenshot(driver, f"post_view_{post['post_id']}_attempt_{attempt}")
+            
+    
                 # 시스템 점검 오버레이 제거 시도
                 try:
                     driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
@@ -837,7 +862,13 @@ class MSITMonitor:
                 # 현재 URL 확인
                 current_url = driver.current_url
                 logger.info(f"현재 URL: {current_url}")
+
+		   
+                # 스크린샷 저장
+                self.take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
                 
+
+		    
                 # 현재 페이지 스크린샷 저장 (디버깅용)
                 try:
                     driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
@@ -1633,7 +1664,12 @@ class MSITMonitor:
             # 시작 시간 기록
             start_time = time.time()
             logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
-            
+
+            # 스크린샷 디렉토리 생성
+            screenshots_dir = Path("./screenshots")
+            screenshots_dir.mkdir(exist_ok=True)
+
+		
             # WebDriver 초기화
             driver = self.setup_driver()
             logger.info("WebDriver 초기화 완료")
