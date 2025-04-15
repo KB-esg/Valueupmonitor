@@ -482,11 +482,11 @@ class MSITMonitor:
                                 df = self.extract_table_from_html(html_content)
                                 driver.switch_to.default_content()
                         if df is not None and not df.empty:
-                                        logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-                                        return {"기본 시트": df}
-                                else:
-                                        logger.warning("단일 iframe에서 테이블 추출 실패")
-                                        return None
+                            logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            return {"기본 시트": df}
+                        else:
+                            logger.warning("단일 iframe에서 테이블 추출 실패")
+                            return None
                 else:
                         # SynapDocViewServer 미감지 시: 일반 HTML 페이지에서 테이블 추출
                         logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
