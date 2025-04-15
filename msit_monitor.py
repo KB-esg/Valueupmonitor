@@ -412,7 +412,7 @@ class MSITMonitor:
             return None
 
 def access_iframe_direct(self, driver, file_params):
-	"""iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함)"""
+	"""iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함, 오류 발생 시 HTML 미리보기 로그 출력)"""
 	if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
 		logger.error("파일 파라미터가 없습니다.")
 		return None
@@ -423,24 +423,21 @@ def access_iframe_direct(self, driver, file_params):
 	logger.info(f"바로보기 URL: {view_url}")
 
 	try:
-		# 페이지로 이동
+		# 페이지로 이동 후 잠시 대기하여 페이지가 로드되도록 함
 		driver.get(view_url)
-		# 잠시 대기하여 페이지가 로드될 시간을 확보 (기본적인 안정성을 위해)
 		time.sleep(3)
 		current_url = driver.current_url
 		logger.info(f"현재 URL: {current_url}")
 		
-		# SynapDocViewServer 여부에 따라 분기 처리
+		# SynapDocViewServer 처리: URL에 관련 문자열이 포함되면 시트 탭을 이용해 처리
 		if 'SynapDocViewServer' in current_url:
 			logger.info("SynapDocViewServer 감지됨")
-			# 시트 탭이 있는 경우 처리 (여러 시트)
 			sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
 			if sheet_tabs:
 				logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
 				all_sheets = {}
 				for i, tab in enumerate(sheet_tabs):
 					sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
-					# 첫 번째 시트는 기본값, 두 번째 시트부터 클릭을 통한 전환
 					if i > 0:
 						try:
 							tab.click()
@@ -449,7 +446,6 @@ def access_iframe_direct(self, driver, file_params):
 							logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
 							continue
 					try:
-						# iframe 요소 대기 및 전환
 						iframe = WebDriverWait(driver, 20).until(
 							EC.presence_of_element_located((By.ID, "innerWrap"))
 						)
@@ -464,7 +460,10 @@ def access_iframe_direct(self, driver, file_params):
 							logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
 					except Exception as iframe_err:
 						logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
-						driver.switch_to.default_content()
+						try:
+							driver.switch_to.default_content()
+						except Exception:
+							pass
 				if all_sheets:
 					logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
 					return all_sheets
@@ -488,7 +487,7 @@ def access_iframe_direct(self, driver, file_params):
 					logger.warning("단일 iframe에서 테이블 추출 실패")
 					return None
 		else:
-			# SynapDocViewServer 미감지 시 일반 HTML 페이지로 간주하고 테이블 직접 추출
+			# SynapDocViewServer 미감지 시: 일반 HTML 페이지에서 테이블 추출
 			logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
 			tables = pd.read_html(driver.page_source)
 			if tables:
@@ -500,12 +499,16 @@ def access_iframe_direct(self, driver, file_params):
 				return None
 
 	except Exception as e:
+		# 오류 발생 시, 현재 페이지의 HTML을 로그에 출력하여 디버그 지원
 		logger.error(f"iframe 전환 및 데이터 추출 중 오류 발생: {str(e)}")
 		try:
+			html_debug = driver.page_source
+			logger.error("오류 발생 시 페이지 HTML:\n" + html_debug)
 			driver.switch_to.default_content()
 		except Exception:
 			pass
 		return None
+
 
 def extract_table_from_html(self, html_content):
 	"""HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
