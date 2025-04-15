@@ -41,7 +41,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client
+        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client selenium-stealth
         
     - name: Create downloads directory
       run: mkdir -p downloads
