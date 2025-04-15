@@ -546,7 +546,12 @@ class MSITMonitor:
                 logger.info(f"Added new column for {date_str} at position {col_idx}")
         
             # Process data based on file type
-            if data['type'] == 'excel':
+            if data['type'] == 'dataframe':
+                # 바로보기에서 직접 추출한 데이터프레임
+                df = data['data']
+                self.update_sheet_from_dataframe(worksheet, df, col_idx)
+            
+            elif data['type'] == 'excel':
                 # Determine which sheet to use
                 if len(data['sheets']) == 1:
                     # If only one sheet, use it
@@ -719,30 +724,49 @@ class MSITMonitor:
                     break
         
             # Process telecom stats posts if Google Sheets client is available
+            
             data_updates = []
             if gs_client and telecom_stats_posts and check_sheets:
                 logger.info(f"Processing {len(telecom_stats_posts)} telecom stats posts")
-            
+    
                 for post in telecom_stats_posts:
-                    # Extract file info
+                    # 1. 파일 정보 추출 (바로보기 링크 정보)
                     file_info = self.extract_file_info(driver, post)
                     if not file_info:
                         logger.warning(f"No file information found for post: {post['title']}")
                         continue
-                
-                    # Download the file
-                    file_path = self.download_file(driver, file_info)
-                    if not file_path:
-                        logger.warning(f"Failed to download file for post: {post['title']}")
+        
+                    # 2. 바로보기 페이지 접근
+                    success = self.access_view_page(driver, file_info)
+                    if not success:
+                        logger.warning(f"Failed to access view page for post: {post['title']}")
                         continue
-                
-                    # Process the file
-                    data = self.process_excel_file(file_path, post)
-                    if not data:
-                        logger.warning(f"Failed to process file for post: {post['title']}")
+        
+                    # 3. 데이터 추출
+                    df = self.extract_data_from_view(driver)
+                    if df is None:
+                        logger.warning(f"Failed to extract data from view for post: {post['title']}")
                         continue
-                
-                    # Update Google Sheets
+        
+                    # 4. 데이터 처리 및 저장
+                    # 날짜 정보 추출
+                    date_match = re.search(r'\((\d{4})년\s+(\d{1,2})월말\s+기준\)', post['title'])
+                    if not date_match:
+                        logger.warning(f"Could not extract date from title: {post['title']}")
+                        continue
+        
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+        
+                    # 데이터 객체 생성
+                    data = {
+                        'type': 'dataframe',
+                        'data': df,
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+        
+                    # 5. Google Sheets 업데이트
                     success = self.update_google_sheets(gs_client, data)
                     if success:
                         logger.info(f"Successfully updated Google Sheets for: {post['title']}")
@@ -772,6 +796,270 @@ class MSITMonitor:
             if driver:
                 driver.quit()
                 logger.info("WebDriver closed")
+
+def extract_file_info(self, driver, post):
+    """Extract file information using the 'View' button instead of download"""
+    if not post.get('post_id'):
+        logger.error(f"Cannot access post {post['title']} - missing post ID")
+        return None
+    
+    logger.info(f"Opening post: {post['title']}")
+    
+    # 게시물 상세 페이지로 이동
+    detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+    driver.get(detail_url)
+    time.sleep(3)  # 페이지 로드 대기
+    
+    # 현재 페이지 URL 확인
+    current_url = driver.current_url
+    logger.info(f"Current page URL: {current_url}")
+    
+    # 바로보기 링크 찾기
+    try:
+        # 1. 클래스로 찾기
+        view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
+        
+        # 2. 다른 방법: onclick 속성에 getExtension_path가 포함된 링크 찾기
+        if not view_links:
+            all_links = driver.find_elements(By.TAG_NAME, "a")
+            view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
+        
+        # 3. 텍스트로 찾기
+        if not view_links:
+            all_links = driver.find_elements(By.TAG_NAME, "a")
+            view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+        
+        # 적절한 링크 발견
+        if view_links:
+            view_link = view_links[0]
+            onclick_attr = view_link.get_attribute('onclick')
+            logger.info(f"Found view link with onclick: {onclick_attr}")
+            
+            # getExtension_path('49234', '1')에서 매개변수 추출
+            match = re.search(r"getExtension_path\('(\d+)',\s*'(\d+)'\)", onclick_attr)
+            if match:
+                atch_file_no = match.group(1)
+                file_ord = match.group(2)
+                
+                # 파일 이름은 부모 요소에서 추출할 수 있음
+                try:
+                    parent_li = view_link.find_element(By.XPATH, "./ancestor::li")
+                    file_name_element = parent_li.find_element(By.TAG_NAME, "a")
+                    file_name = file_name_element.text.strip()
+                except:
+                    # 파일 이름을 찾을 수 없는 경우, 게시물 제목에서 유추
+                    date_match = re.search(r'\((\d{4})년\s+(\d{1,2})월말\s+기준\)', post['title'])
+                    if date_match:
+                        year = date_match.group(1)
+                        month = date_match.group(2).zfill(2)
+                        file_name = f"{year}년 {month}월말 기준 통계.xlsx"
+                    else:
+                        file_name = f"통계자료_{atch_file_no}.xlsx"
+                
+                file_info = {
+                    'file_name': file_name,
+                    'atch_file_no': atch_file_no,
+                    'file_ord': file_ord,
+                    'use_view': True  # 바로보기 사용 플래그
+                }
+                
+                logger.info(f"Successfully extracted file info for view: {file_name}")
+                return file_info
+            else:
+                logger.error(f"Could not extract file params from onclick: {onclick_attr}")
+        else:
+            logger.warning("No view links found")
+            
+            # 페이지 구조 로깅
+            logger.info("Available link elements:")
+            all_links = driver.find_elements(By.TAG_NAME, "a")
+            for i, link in enumerate(all_links[:10]):  # 처음 10개만 로깅
+                logger.info(f"Link {i+1}: text='{link.text}', onclick='{link.get_attribute('onclick')}'")
+    
+    except Exception as e:
+        logger.error(f"Error finding view link: {str(e)}")
+    
+    return None
+
+def access_view_page(self, driver, file_info):
+    """Access the view page instead of downloading the file"""
+    if not file_info or not file_info.get('use_view'):
+        return None
+    
+    logger.info(f"Accessing view page for file: {file_info['file_name']}")
+    
+    # 바로보기 URL 구성
+    view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_info['atch_file_no']}&fileOrdr={file_info['file_ord']}"
+    
+    logger.info(f"View URL: {view_url}")
+    driver.get(view_url)
+    
+    # 새 창에서 열리는 경우 핸들 전환
+    original_window = driver.current_window_handle
+    if len(driver.window_handles) > 1:
+        for window_handle in driver.window_handles:
+            if window_handle != original_window:
+                driver.switch_to.window(window_handle)
+                logger.info(f"Switched to new window: {driver.current_url}")
+                break
+    
+    # 뷰어 페이지 로드 대기
+    try:
+        # 몇 가지 가능한 요소 대기
+        WebDriverWait(driver, 20).until(
+            lambda x: (
+                len(x.find_elements(By.ID, "mainTable")) > 0 or  # 테이블 형식
+                len(x.find_elements(By.TAG_NAME, "table")) > 0 or  # 일반 테이블
+                len(x.find_elements(By.TAG_NAME, "iframe")) > 0  # iframe 내 콘텐츠
+            )
+        )
+        
+        logger.info("View page loaded successfully")
+        return True
+    except TimeoutException:
+        logger.error("Timeout waiting for view page to load")
+        
+        # 페이지 소스 로깅
+        logger.info("Current URL: " + driver.current_url)
+        logger.info("Page source snippet:")
+        logger.info(driver.page_source[:500])
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error accessing view page: {str(e)}")
+        return False
+
+def extract_data_from_view(self, driver):
+    """Extract data from the view page"""
+    try:
+        # 페이지에 iframe이 있는지 확인
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        if iframes:
+            logger.info(f"Found {len(iframes)} iframes on the page")
+            # iframe으로 전환
+            driver.switch_to.frame(iframes[0])
+            logger.info("Switched to iframe")
+        
+        # 데이터 추출 시도
+        tables = []
+        
+        # 1. mainTable 요소 확인 (MSIT 특화 구조)
+        main_table = driver.find_elements(By.ID, "mainTable")
+        if main_table:
+            logger.info("Found mainTable element")
+            
+            # mainTable 내의 모든 div 요소를 찾아 테이블 형태로 재구성
+            rows = []
+            current_row = []
+            row_count = 0
+            
+            divs = main_table[0].find_elements(By.TAG_NAME, "div")
+            for div in divs:
+                # 클래스 이름으로 셀 유형 구분
+                class_name = div.get_attribute("class") or ""
+                
+                # 셀 데이터 추출
+                cell_text = div.text.strip()
+                
+                # td 클래스가 있으면 데이터 셀
+                if "td" in class_name:
+                    current_row.append(cell_text)
+                
+                # tr 클래스가 있으면 행 구분
+                if "tr" in class_name or "row" in class_name:
+                    row_count += 1
+                    if current_row:
+                        rows.append(current_row)
+                        current_row = []
+            
+            # 마지막 행 추가
+            if current_row:
+                rows.append(current_row)
+            
+            # 데이터프레임 생성
+            if rows:
+                df = pd.DataFrame(rows)
+                tables.append(df)
+                logger.info(f"Extracted table with shape {df.shape}")
+        
+        # 2. 일반 HTML 테이블 확인
+        html_tables = driver.find_elements(By.TAG_NAME, "table")
+        if html_tables:
+            logger.info(f"Found {len(html_tables)} HTML tables")
+            
+            for i, table in enumerate(html_tables):
+                rows = []
+                
+                # 헤더 추출
+                headers = table.find_elements(By.TAG_NAME, "th")
+                if headers:
+                    header_row = [h.text.strip() for h in headers]
+                    rows.append(header_row)
+                
+                # 데이터 행 추출
+                tr_elements = table.find_elements(By.TAG_NAME, "tr")
+                for tr in tr_elements:
+                    # td 요소 추출
+                    cells = tr.find_elements(By.TAG_NAME, "td")
+                    if cells:
+                        row = [cell.text.strip() for cell in cells]
+                        rows.append(row)
+                
+                # 데이터프레임 생성
+                if rows:
+                    df = pd.DataFrame(rows[1:], columns=rows[0] if rows else None)
+                    tables.append(df)
+                    logger.info(f"Extracted HTML table {i+1} with shape {df.shape}")
+        
+        # 데이터프레임이 없는 경우 모든 텍스트를 추출하여 파싱 시도
+        if not tables:
+            logger.warning("No tables found, attempting to extract structured text")
+            
+            # 모든 텍스트 콘텐츠 가져오기
+            body_text = driver.find_element(By.TAG_NAME, "body").text
+            
+            # 줄 단위로 분할
+            lines = body_text.split('\n')
+            
+            # 데이터 행 인식 (숫자와 텍스트가 포함된 행)
+            data_rows = []
+            for line in lines:
+                # 숫자와 문자가 모두 포함된 행을 데이터로 가정
+                if re.search(r'\d', line) and re.search(r'[가-힣a-zA-Z]', line):
+                    # 공백이나 탭으로 분할
+                    cells = re.split(r'\s{2,}|\t', line)
+                    if len(cells) >= 2:  # 최소 2개 이상의 셀이 있어야 데이터 행
+                        data_rows.append(cells)
+            
+            if data_rows:
+                # 첫 번째 행을 헤더로 가정
+                df = pd.DataFrame(data_rows[1:], columns=data_rows[0] if data_rows else None)
+                tables.append(df)
+                logger.info(f"Extracted structured text as table with shape {df.shape}")
+        
+        # 추출된 테이블이 있는지 확인
+        if tables:
+            # 가장 큰 테이블 선택 (가장 많은 데이터를 포함)
+            largest_table = max(tables, key=lambda df: df.size)
+            
+            logger.info(f"Selected largest table with shape {largest_table.shape}")
+            logger.info(f"Table columns: {largest_table.columns.tolist()}")
+            logger.info(f"First few rows: {largest_table.head(3).to_dict()}")
+            
+            return largest_table
+        else:
+            logger.error("No data could be extracted from the view page")
+            return None
+        
+    except Exception as e:
+        logger.error(f"Error extracting data from view: {str(e)}")
+        return None
+    finally:
+        # iframe에서 빠져나옴
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
 
 
 async def main():
