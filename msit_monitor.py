@@ -304,113 +304,86 @@ class MSITMonitor:
         if not post.get('post_id'):
             logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
             return None
-        
+
         logger.info(f"게시물 열기: {post['title']}")
-        
-        # 최대 3번까지 재시도
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # 게시물 상세 페이지로 이동
                 detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
                 driver.get(detail_url)
-                
-                # 명시적인 대기 시간 추가
-                time.sleep(3)
-                
-                # 다양한 요소 중 하나라도 로드되면 성공으로 간주
-                WebDriverWait(driver, 20).until(
-                    lambda x: len(x.find_elements(By.CLASS_NAME, "view_head")) > 0 or 
-                             len(x.find_elements(By.CLASS_NAME, "view_file")) > 0
+                # sleep 시간을 줄여 빠르게 다음 로딩 단계를 시도 (1초)
+                time.sleep(1)
+                # 바로보기 페이지의 주요 요소(예: view_head 또는 view_file)가 등장하는지 10초 대기
+                WebDriverWait(driver, 10).until(
+                    lambda x: len(x.find_elements(By.CLASS_NAME, "view_head")) > 0 or
+                              len(x.find_elements(By.CLASS_NAME, "view_file")) > 0
                 )
-                break  # 성공하면 루프 종료
+                break  # 요소를 찾으면 루프 종료
             except TimeoutException:
                 if attempt < max_retries - 1:
                     logger.warning(f"페이지 로드 타임아웃, 재시도 {attempt+1}/{max_retries}")
-                    time.sleep(3)  # 재시도 전 3초 대기
+                    time.sleep(1)
                 else:
                     logger.error(f"{max_retries}번 시도 후 페이지 로드 실패")
-                    
-                    # 시스템 점검 페이지 확인
+                    # 최종 시도 후 현재 페이지의 일부 HTML 스니펫을 로그에 출력
+                    snippet = driver.page_source[:1000]
+                    logger.error("최종 시도 후 페이지 HTML 스니펫:\n" + snippet)
                     if "시스템 점검 안내" in driver.page_source:
                         logger.warning("시스템 점검 중입니다.")
                         return None
-                    
                     return None
             except Exception as e:
                 logger.error(f"게시물 상세 정보 접근 중 오류: {str(e)}")
                 return None
-        
-        # 바로보기 링크 찾기
+
         try:
-            # 여러 선택자로 바로보기 링크 찾기
+            # '새창 열림' 속성 등 다양한 방법으로 바로보기 링크 요소 검색
             view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
-            
             if not view_links:
-                # onclick 속성으로 찾기
                 all_links = driver.find_elements(By.TAG_NAME, "a")
                 view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
-            
             if not view_links:
-                # 텍스트로 찾기
                 all_links = driver.find_elements(By.TAG_NAME, "a")
                 view_links = [link for link in all_links if '바로보기' in (link.text or '')]
-            
             if view_links:
                 view_link = view_links[0]
                 onclick_attr = view_link.get_attribute('onclick')
                 logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}")
-                
-                # getExtension_path('49234', '1') 형식에서 매개변수 추출
                 match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
                 if match:
                     atch_file_no = match.group(1)
                     file_ord = match.group(2)
-                    
-                    # 날짜 정보 추출
                     date_match = re.search(r'\((\d{4})년\s+(\d{1,2})월말\s+기준\)', post['title'])
                     if date_match:
                         year = int(date_match.group(1))
                         month = int(date_match.group(2))
-                        
                         return {
                             'atch_file_no': atch_file_no,
                             'file_ord': file_ord,
                             'date': {'year': year, 'month': month},
                             'post_info': post
                         }
-                    
                     return {
                         'atch_file_no': atch_file_no,
                         'file_ord': file_ord,
                         'post_info': post
                     }
-            
-            # 바로보기 링크를 찾을 수 없는 경우
             logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
-            
-            # 날짜 정보 추출
             date_match = re.search(r'\((\d{4})년\s+(\d{1,2})월말\s+기준\)', post['title'])
             if date_match:
                 year = int(date_match.group(1))
                 month = int(date_match.group(2))
-                
-                # 게시물 내용 추출
                 content_div = driver.find_element(By.CLASS_NAME, "view_cont")
                 content = content_div.text if content_div else ""
-                
                 return {
                     'content': content,
                     'date': {'year': year, 'month': month},
                     'post_info': post
                 }
-            
             return None
-            
         except Exception as e:
             logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
             return None
-
 
     def access_iframe_direct(self, driver, file_params):
         """iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함, 오류 발생 시 HTML 미리보기 로그 출력)"""
