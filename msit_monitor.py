@@ -411,7 +411,7 @@ class MSITMonitor:
             logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
             return None
 
-def access_iframe_direct(self, driver, file_params):
+    def access_iframe_direct(self, driver, file_params):
 	"""iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함, 오류 발생 시 HTML 미리보기 로그 출력)"""
 	if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
 		logger.error("파일 파라미터가 없습니다.")
