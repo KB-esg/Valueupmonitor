@@ -294,27 +294,42 @@ class MSITMonitor:
         if not post.get('post_id'):
             logger.error(f"Cannot access post {post['title']} - missing post ID")
             return None
-        
+    
         logger.info(f"Opening post: {post['title']}")
-        
-        # Navigate to the post detail page
-        detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
-        driver.get(detail_url)
-        
-        # Wait for the detail page to load
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
-            )
-        except TimeoutException:
-            logger.error("Timeout waiting for detail page to load")
-            return None
-        
+    
+    # 최대 3번까지 재시도
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Navigate to the post detail page
+                detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+                driver.get(detail_url)
+            
+                # 명시적인 대기 시간 추가
+                time.sleep(3)
+            
+                # 여러 가능한 요소 중 하나라도 로드되면 성공으로 간주
+                WebDriverWait(driver, 20).until(
+                    lambda x: len(x.find_elements(By.CLASS_NAME, "view_head")) > 0 or 
+                             len(x.find_elements(By.CLASS_NAME, "view_file")) > 0
+                )
+                break  # 성공하면 루프 종료
+            except TimeoutException:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Timeout loading page, retry attempt {attempt+1}/{max_retries}")
+                    time.sleep(3)  # 재시도 전 3초 대기
+                else:
+                    logger.error(f"Failed to load page after {max_retries} attempts")
+                    return None
+            except Exception as e:
+                logger.error(f"Error accessing post detail: {str(e)}")
+                return None
+    
         # Look for Excel/CSV file attachments
         try:
             download_links = driver.find_elements(By.CSS_SELECTOR, ".down_file li a.down")
             excel_file_link = None
-            
+        
             for link in download_links:
                 if any(ext in link.text.lower() for ext in ['.xlsx', '.xls', '.csv']):
                     excel_file_link = link
@@ -325,33 +340,38 @@ class MSITMonitor:
                 parent_element = excel_file_link.find_element(By.XPATH, "./..")
                 file_link = parent_element.find_element(By.CSS_SELECTOR, "a:first-child")
                 file_name = file_link.text.strip()
-                
+            
                 # Get onclick attribute
                 onclick_attr = file_link.get_attribute("onclick")
-                
+            
                 # Extract atchFileNo and fileOrd
                 match = re.search(r"(?:fn_download|getExtension_path)\('(\d+)',\s*'(\d+)'", onclick_attr)
                 if match:
                     atch_file_no = match.group(1)
                     file_ord = match.group(2)
-                    
+                
                     file_info = {
                         'file_name': file_name,
                         'atch_file_no': atch_file_no,
                         'file_ord': file_ord
                     }
-                    
+                
                     logger.info(f"Found file: {file_name}")
                     return file_info
                 else:
                     logger.error("Could not extract file parameters from onclick attribute")
             else:
                 logger.warning("No Excel/CSV file found in attachments")
-                
+            
         except NoSuchElementException as e:
             logger.error(f"Error finding file attachment: {str(e)}")
-            
+        except Exception as e:
+            logger.error(f"Unexpected error processing file attachment: {str(e)}")
+        
         return None
+
+
+    
 
     def download_file(self, driver, file_info):
         """Download a file from MSIT website"""
