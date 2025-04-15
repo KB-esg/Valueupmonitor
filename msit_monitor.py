@@ -510,7 +510,7 @@ def access_iframe_direct(self, driver, file_params):
 		return None
 
 
-def extract_table_from_html(self, html_content):
+    def extract_table_from_html(self, html_content):
 	"""HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
 	try:
 		soup = BeautifulSoup(html_content, 'html.parser')
@@ -618,25 +618,26 @@ def extract_table_from_html(self, html_content):
             if date_match:
                 year = date_match.group(1)
                 month = date_match.group(2)
-                
+
                 # 보고서 유형 결정
                 report_type = self.determine_report_type(post_info['title'])
-                
+
                 # 기본 데이터프레임 생성
                 df = pd.DataFrame({
                     '구분': [f'{year}년 {month}월 통계'],
                     '값': ['데이터를 추출할 수 없습니다'],
                     '비고': [f'{post_info["title"]} - 접근 오류']
                 })
-                
+
                 logger.info(f"플레이스홀더 데이터프레임 생성: {year}년 {month}월 {report_type}")
                 return df
-                
+
             return pd.DataFrame()  # 날짜 정보가 없으면 빈 데이터프레임 반환
-            
+
         except Exception as e:
             logger.error(f"플레이스홀더 데이터프레임 생성 중 오류: {str(e)}")
             return pd.DataFrame()  # 오류 발생 시 빈 데이터프레임 반환
+
 
     def determine_report_type(self, title):
         """게시물 제목에서 보고서 유형 결정"""
