@@ -90,18 +90,31 @@ def send_maintenance_alert():
     send_telegram_message(message)
 
 def init_webdriver():
-    """웹드라이버 초기화"""
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
+    # chromium-browser 경로 명시적 설정
+    chrome_options.binary_location = "/usr/bin/chromium-browser"
+    
     driver = webdriver.Chrome(options=chrome_options)
-    driver.set_page_load_timeout(30)  # 페이지 로드 타임아웃 30초로 설정
+    driver.set_page_load_timeout(30)
     logger.info("WebDriver 초기화 완료")
     return driver
+
+# 시스템 점검 확인 함수 추가
+def is_system_maintenance(driver):
+    maintenance_texts = ["시스템 점검", "점검 중", "서비스 일시 중단"]
+    page_source = driver.page_source.lower()
+    return any(text.lower() in page_source for text in maintenance_texts)
+
+# 기존 코드에 아래 로직 추가 (바로보기 링크 클릭 전)
+if is_system_maintenance(driver):
+    logger.warning("시스템 점검 중입니다.")
+    send_telegram_message("⚠️ MSIT 시스템 점검 중입니다. 데이터 수집이 일시 중단되었습니다.")
+    return
 
 def init_gspread_client():
     """Google Sheets API 클라이언트 초기화"""
