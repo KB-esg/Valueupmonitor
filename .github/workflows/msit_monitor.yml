@@ -21,15 +21,14 @@ on:
         default: 'MSIT 통신 통계'
         type: string
 
-# 권한 설정
 permissions:
-  contents: write  # GitHub Release 생성을 위한 쓰기 권한 부여
+  contents: write
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 최대 실행 시간 제한 추가
-    
+    timeout-minutes: 30
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
@@ -39,41 +38,93 @@ jobs:
       with:
         python-version: '3.9'
         cache: 'pip'
-        
+
     - name: Install Chrome and ChromeDriver
       run: |
-        # Chrome 설치
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
-        
-        # Chrome 버전 확인 및 적합한 ChromeDriver 설치
         CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f 3 | cut -d '.' -f 1)
-        echo "Chrome version: $CHROME_VERSION"
-        
-        # ChromeDriver 설치
         wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION" -O chromedriver-version.txt
         CHROMEDRIVER_VERSION=$(cat chromedriver-version.txt)
-        echo "Installing ChromeDriver version: $CHROMEDRIVER_VERSION"
-        
         wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip" -O chromedriver.zip
         unzip -q chromedriver.zip
         chmod +x chromedriver
         sudo mv chromedriver /usr/local/bin/
-        
-        # 버전 확인
-        chromedriver --version
-        
+
     - name: Install Xvfb
       run: sudo apt-get install -y xvfb
-      
+
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth
-        
+
     - name: Create downloads directory
       run: mkdir -p downloads
-        
+
+    - name: Create screenshot script
+      run: |
+        cat > take_screenshot.py << 'EOF'
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+        import sys
+        import os
+
+        def take_screenshots(url=None, filename_prefix="screenshot"):
+            options = Options()
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
+            service = Service('/usr/local/bin/chromedriver')
+            driver = webdriver.Chrome(service=service, options=options)
+            try:
+                if url:
+                    driver.get(url)
+                    time.sleep(5)
+                    driver.save_screenshot(f"{filename_prefix}.png")
+                else:
+                    driver.get('https://www.msit.go.kr')
+                    time.sleep(5)
+                    driver.save_screenshot('main_page.png')
+                    try:
+                        stats_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '통계정보')]"))
+                        )
+                        stats_button.click()
+                        time.sleep(5)
+                        driver.save_screenshot('stats_page_after_click.png')
+                    except Exception as click_error:
+                        print(f"버튼 클릭 오류: {str(click_error)}")
+                    driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
+                    time.sleep(5)
+                    driver.save_screenshot('stats_page_direct.png')
+                    with open('page_source.html', 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    if "시스템 점검 안내" in driver.page_source:
+                        driver.save_screenshot('system_maintenance.png')
+                        try:
+                            driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
+                            driver.save_screenshot('after_overlay_removal.png')
+                        except Exception as overlay_err:
+                            print(f"오버레이 제거 오류: {str(overlay_err)}")
+            except Exception as e:
+                print(f'스크린샷 오류: {str(e)}')
+            finally:
+                driver.quit()
+        if __name__ == "__main__":
+            if len(sys.argv) > 1:
+                take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
+            else:
+                take_screenshots()
+        EOF
+
     - name: Run monitoring script
       env:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
@@ -85,136 +136,30 @@ jobs:
         SPREADSHEET_NAME: ${{ github.event.inputs.spreadsheet_name || 'MSIT 통신 통계' }}
         PYTHONIOENCODING: utf-8
       run: |
-        # Xvfb 설정 (가상 디스플레이)
         export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
         sleep 2
-        
-        # 디버깅 도구 스크립트 생성
-        cat > take_screenshot.py << 'EOF'
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        import time
-        import sys
-        import os
-        
-        def take_screenshots(url=None, filename_prefix="screenshot"):
-            options = Options()
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            options.add_experimental_option("useAutomationExtension", False)
-            
-            service = Service('/usr/local/bin/chromedriver')
-            driver = webdriver.Chrome(service=service, options=options)
-            
-            try:
-                if url:
-                    print(f"스크린샷 촬영 중: {url}")
-                    driver.get(url)
-                    time.sleep(5)
-                    driver.save_screenshot(f"{filename_prefix}.png")
-                    print(f"스크린샷 저장됨: {filename_prefix}.png")
-                else:
-                    # 메인 페이지 접속
-                    print("메인 페이지 접속 중...")
-                    driver.get('https://www.msit.go.kr')
-                    time.sleep(5)
-                    driver.save_screenshot('main_page.png')
-                    print("메인 페이지 스크린샷 저장됨")
-                    
-                    try:
-                        # 통계정보 버튼 찾기 및 클릭
-                        print("통계정보 버튼 찾는 중...")
-                        stats_button = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '통계정보')]"))
-                        )
-                        stats_button.click()
-                        time.sleep(5)
-                        driver.save_screenshot('stats_page_after_click.png')
-                        print("클릭 후 통계 페이지 스크린샷 저장됨")
-                    except Exception as click_error:
-                        print(f"버튼 클릭 오류: {str(click_error)}")
-                        
-                    # 직접 통계 페이지 접속
-                    print("직접 통계 페이지 접속 중...")
-                    driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
-                    time.sleep(5)
-                    driver.save_screenshot('stats_page_direct.png')
-                    print("직접 접속 통계 페이지 스크린샷 저장됨")
-                    
-                    # 페이지 소스 저장
-                    with open('page_source.html', 'w', encoding='utf-8') as f:
-                        f.write(driver.page_source)
-                    print("페이지 소스 저장됨")
-                    
-                    # 시스템 점검 페이지 확인
-                    if "시스템 점검 안내" in driver.page_source:
-                        print("시스템 점검 안내 페이지 감지됨")
-                        driver.save_screenshot('system_maintenance.png')
-                        print("시스템 점검 페이지 스크린샷 저장됨")
-                        
-                        # 오버레이 제거 시도
-                        try:
-                            driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
-                            driver.save_screenshot('after_overlay_removal.png')
-                            print("오버레이 제거 후 스크린샷 저장됨")
-                        except Exception as overlay_err:
-                            print(f"오버레이 제거 중 오류: {str(overlay_err)}")
-                
-            except Exception as e:
-                print(f'스크린샷 촬영 중 오류: {str(e)}')
-            finally:
-                driver.quit()
-                print("브라우저 종료됨")
-        
-        if __name__ == "__main__":
-            if len(sys.argv) > 1:
-                take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
-            else:
-                take_screenshots()
-        EOF
-        
-        # 실행
         python msit_monitor.py
-        
+
     - name: Take screenshots (always)
       if: always()
       run: |
         export DISPLAY=:99
         python take_screenshot.py
-        
+
     - name: Archive artifacts
       if: always()
       run: |
-        # 현재 날짜와 시간으로 타임스탬프 생성
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-        
-        # 아티팩트 디렉토리 생성
         mkdir -p artifacts
-        
-        # 로그 파일, 스크린샷, HTML 파일 복사
         cp -r *.log *.png *.html downloads/* artifacts/ 2>/dev/null || true
-        
-        # 디버그 정보 생성
         echo "실행 정보:" > artifacts/run_info.txt
         echo "실행 ID: ${{ github.run_id }}" >> artifacts/run_info.txt
         echo "실행 번호: ${{ github.run_number }}" >> artifacts/run_info.txt
         echo "타임스탬프: ${TIMESTAMP}" >> artifacts/run_info.txt
         echo "실행자: ${{ github.actor }}" >> artifacts/run_info.txt
         echo "워크플로우: ${{ github.workflow }}" >> artifacts/run_info.txt
-        
-        # TAR 아카이브 생성
         tar -czf monitoring-artifacts-${TIMESTAMP}.tar.gz artifacts/
-        
-        echo "생성된 아카이브: monitoring-artifacts-${TIMESTAMP}.tar.gz"
-        
-        # 환경 변수로 저장하여 다음 단계에서 사용
         echo "ARTIFACT_PATH=monitoring-artifacts-${TIMESTAMP}.tar.gz" >> $GITHUB_ENV
         echo "ARTIFACT_NAME=monitoring-artifacts-${TIMESTAMP}" >> $GITHUB_ENV
         echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
@@ -228,11 +173,9 @@ jobs:
         files: ${{ env.ARTIFACT_PATH }}
         body: |
           ## MSIT 통신 통계 모니터링 실행 결과
-          
           - **실행 ID**: ${{ github.run_id }}
           - **실행 번호**: ${{ github.run_number }}
           - **실행 시간**: ${{ env.TIMESTAMP }}
           - **실행 유형**: ${{ github.event_name }}
-          
           이 릴리스에는 모니터링 스크립트 실행 결과와 관련 로그 및 스크린샷이 포함되어 있습니다.
         token: ${{ secrets.GITHUB_TOKEN }}
