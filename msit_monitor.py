@@ -38,6 +38,9 @@ class MSITMonitor:
         
         # Google Sheets configuration
         self.gspread_creds = os.environ.get('MSIT_GSPREAD_ref')
+        self.spreadsheet_id = os.environ.get('MSIT_SPREADSHEET_ID')
+        self.spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
+    
         if not self.gspread_creds:
             logger.warning("환경 변수 MSIT_GSPREAD_ref가 설정되지 않았습니다. Google Sheets 업데이트는 비활성화됩니다.")
         
@@ -456,26 +459,44 @@ class MSITMonitor:
         if not client or not data:
             logger.error("Cannot update Google Sheets: missing client or data")
             return False
-        
+    
         try:
             # Extract information
             date_info = data['date']
             post_info = data['post_info']
             report_type = self.determine_report_type(post_info['title'])
-            
+        
             # Format date string
             date_str = f"{date_info['year']}년 {date_info['month']}월"
-            
+        
             # Open or create spreadsheet
             try:
-                spreadsheet = client.open("MSIT 통신 통계")
-                logger.info("Found existing spreadsheet: MSIT 통신 통계")
-            except gspread.exceptions.SpreadsheetNotFound:
-                spreadsheet = client.create("MSIT 통신 통계")
-                logger.info("Created new spreadsheet: MSIT 통신 통계")
-                
-                # Share with the service account email (if needed)
-                # spreadsheet.share('your-service-account@email.com', perm_type='user', role='writer')
+                # Try to open by ID first if provided
+                if self.spreadsheet_id:
+                    try:
+                        spreadsheet = client.open_by_key(self.spreadsheet_id)
+                        logger.info(f"Found existing spreadsheet by ID: {self.spreadsheet_id}")
+                    except gspread.exceptions.APIError:
+                        logger.warning(f"Could not open spreadsheet with ID: {self.spreadsheet_id}")
+                        spreadsheet = None
+                else:
+                    spreadsheet = None
+            
+                # If not found by ID, try by name
+                if not spreadsheet:
+                    try:
+                        spreadsheet = client.open(self.spreadsheet_name)
+                        logger.info(f"Found existing spreadsheet by name: {self.spreadsheet_name}")
+                    except gspread.exceptions.SpreadsheetNotFound:
+                        # Create new spreadsheet
+                        spreadsheet = client.create(self.spreadsheet_name)
+                        logger.info(f"Created new spreadsheet: {self.spreadsheet_name}")
+                    
+                        # Log the ID for future reference
+                        logger.info(f"New spreadsheet ID: {spreadsheet.id}")
+            except Exception as e:
+                logger.error(f"Error opening Google Sheets: {str(e)}")
+                return False
             
             # Find or create worksheet for this report type
             worksheet = None
@@ -483,14 +504,14 @@ class MSITMonitor:
                 if report_type in sheet.title:
                     worksheet = sheet
                     break
-                    
+                
             if not worksheet:
                 worksheet = spreadsheet.add_worksheet(title=report_type, rows="1000", cols="50")
                 logger.info(f"Created new worksheet: {report_type}")
-                
+            
                 # Add header row
                 worksheet.update_cell(1, 1, "항목")
-                
+            
             # Check if date column already exists
             headers = worksheet.row_values(1)
             if date_str in headers:
@@ -501,7 +522,7 @@ class MSITMonitor:
                 col_idx = len(headers) + 1
                 worksheet.update_cell(1, col_idx, date_str)
                 logger.info(f"Added new column for {date_str} at position {col_idx}")
-            
+        
             # Process data based on file type
             if data['type'] == 'excel':
                 # Determine which sheet to use
@@ -516,27 +537,29 @@ class MSITMonitor:
                         if report_type in name or any(term in name for term in report_type.split()):
                             best_sheet = name
                             break
-                    
+                
                     if not best_sheet:
                         # Use first sheet as fallback
                         best_sheet = list(data['sheets'].keys())[0]
-                        
-                    df = data['sheets'][best_sheet]
                     
+                    df = data['sheets'][best_sheet]
+                
                 # Update data from dataframe
                 self.update_sheet_from_dataframe(worksheet, df, col_idx)
-                
+            
             elif data['type'] == 'csv':
                 # Update from CSV data
                 df = data['data']
                 self.update_sheet_from_dataframe(worksheet, df, col_idx)
-                
+            
             logger.info(f"Successfully updated Google Sheets with {report_type} data for {date_str}")
             return True
-            
+        
         except Exception as e:
             logger.error(f"Error updating Google Sheets: {str(e)}")
             return False
+
+
 
     def update_sheet_from_dataframe(self, worksheet, df, col_idx):
         """Update worksheet with data from a dataframe"""
@@ -734,9 +757,12 @@ async def main():
     days_range = int(os.environ.get('DAYS_RANGE', '4'))
     check_sheets = os.environ.get('CHECK_SHEETS', 'true').lower() == 'true'
     
+
     # Create and run monitor
     try:
         logger.info(f"Starting MSIT Monitor with days_range={days_range}, check_sheets={check_sheets}")
+        logger.info(f"Spreadsheet name: {os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')}")
+        
         monitor = MSITMonitor()
         await monitor.run_monitor(days_range=days_range, check_sheets=check_sheets)
     except Exception as e:
