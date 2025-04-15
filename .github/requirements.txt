@@ -1,0 +1,11 @@
+selenium
+beautifulsoup4
+python-telegram-bot
+requests
+pandas
+gspread
+oauth2client
+lxml
+html5lib
+selenium-stealth
+webdriver-manager
