@@ -73,6 +73,13 @@ class MSITMonitor:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
+
+        # 사용자 에이전트 변경
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+        # 자동화 감지 우회를 위한 옵션 추가
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--disable-blink-features=AutomationControlled")
         
         # 성능 최적화 설정
         prefs = {
@@ -299,7 +306,7 @@ class MSITMonitor:
             logger.error(f"페이지 파싱 중 에러: {str(e)}")
             return [], [], False
 
-    def find_view_link_params(self, driver, post):
+ def find_view_link_params(self, driver, post):
         """게시물에서 바로보기 링크 파라미터 찾기"""
         if not post.get('post_id'):
             logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
@@ -311,21 +318,23 @@ class MSITMonitor:
             try:
                 detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
                 driver.get(detail_url)
-                time.sleep(1)  # 기본적으로 1초 대기
-                # 추가: 시스템 점검 안내 오버레이가 있으면 사라질 때까지 기다림
+                time.sleep(1)
+                # 시스템 점검 안내 오버레이 존재 여부 체크
                 try:
-                    maintenance_overlay = WebDriverWait(driver, 20).until(
-                        EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), '시스템 점검 안내')]"))
-                    )
-                    logger.info("시스템 점검 안내 메시지가 사라짐")
-                except Exception as wait_err:
-                    logger.warning("시스템 점검 안내 메시지가 여전히 표시 중입니다.")
-                # 바로보기 페이지의 주요 요소가 등장하는지 10초 대기
+                    maintenance_visible = driver.find_element(By.XPATH, "//*[contains(text(), '시스템 점검 안내')]")
+                    if maintenance_visible:
+                        logger.info("시스템 점검 안내 오버레이 감지됨. 오버레이 제거 시도 중...")
+                        driver.execute_script("var el = document.evaluate(\"//*[contains(text(), '시스템 점검 안내')]\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; if(el) el.parentNode.removeChild(el);")
+                        time.sleep(1)
+                except Exception:
+                    logger.info("시스템 점검 안내 오버레이 없음 또는 이미 제거됨.")
+                
+                # 주요 요소가 등장하는지 10초 대기
                 WebDriverWait(driver, 10).until(
                     lambda x: len(x.find_elements(By.CLASS_NAME, "view_head")) > 0 or
                               len(x.find_elements(By.CLASS_NAME, "view_file")) > 0
                 )
-                break  # 요소를 찾으면 루프 종료
+                break
             except TimeoutException:
                 if attempt < max_retries - 1:
                     logger.warning(f"페이지 로드 타임아웃, 재시도 {attempt+1}/{max_retries}")
