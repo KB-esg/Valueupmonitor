@@ -21,6 +21,10 @@ on:
         default: 'MSIT 통신 통계'
         type: string
 
+# 권한 설정
+permissions:
+  contents: write  # GitHub Release 생성을 위한 쓰기 권한 부여
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -185,14 +189,50 @@ jobs:
         export DISPLAY=:99
         python take_screenshot.py
         
-    - name: Upload logs and screenshots
+    - name: Archive artifacts
       if: always()
-      uses: actions/upload-artifact@v2
+      run: |
+        # 현재 날짜와 시간으로 타임스탬프 생성
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        
+        # 아티팩트 디렉토리 생성
+        mkdir -p artifacts
+        
+        # 로그 파일, 스크린샷, HTML 파일 복사
+        cp -r *.log *.png *.html downloads/* artifacts/ 2>/dev/null || true
+        
+        # 디버그 정보 생성
+        echo "실행 정보:" > artifacts/run_info.txt
+        echo "실행 ID: ${{ github.run_id }}" >> artifacts/run_info.txt
+        echo "실행 번호: ${{ github.run_number }}" >> artifacts/run_info.txt
+        echo "타임스탬프: ${TIMESTAMP}" >> artifacts/run_info.txt
+        echo "실행자: ${{ github.actor }}" >> artifacts/run_info.txt
+        echo "워크플로우: ${{ github.workflow }}" >> artifacts/run_info.txt
+        
+        # TAR 아카이브 생성
+        tar -czf monitoring-artifacts-${TIMESTAMP}.tar.gz artifacts/
+        
+        echo "생성된 아카이브: monitoring-artifacts-${TIMESTAMP}.tar.gz"
+        
+        # 환경 변수로 저장하여 다음 단계에서 사용
+        echo "ARTIFACT_PATH=monitoring-artifacts-${TIMESTAMP}.tar.gz" >> $GITHUB_ENV
+        echo "ARTIFACT_NAME=monitoring-artifacts-${TIMESTAMP}" >> $GITHUB_ENV
+        echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
+
+    - name: Create Release
+      if: always()
+      uses: softprops/action-gh-release@v1
       with:
-        name: msit-monitoring-artifacts
-        path: |
-          *.log
-          *.png
-          *.html
-          downloads/*
-        retention-days: 5
+        tag_name: monitoring-${{ env.TIMESTAMP }}
+        name: 모니터링 실행 ${{ github.run_number }} (${{ env.TIMESTAMP }})
+        files: ${{ env.ARTIFACT_PATH }}
+        body: |
+          ## MSIT 통신 통계 모니터링 실행 결과
+          
+          - **실행 ID**: ${{ github.run_id }}
+          - **실행 번호**: ${{ github.run_number }}
+          - **실행 시간**: ${{ env.TIMESTAMP }}
+          - **실행 유형**: ${{ github.event_name }}
+          
+          이 릴리스에는 모니터링 스크립트 실행 결과와 관련 로그 및 스크린샷이 포함되어 있습니다.
+        token: ${{ secrets.GITHUB_TOKEN }}
