@@ -1,4 +1,5 @@
 name: MSIT Telco Service Monitoring
+
 on:
   schedule:
     - cron: '40 23 1-31/2 * *'  # UTC 23:40 (KST 08:40) 홀수날마다 실행
@@ -8,6 +9,7 @@ on:
         description: '몇 일 전까지의 게시물을 확인할지 설정'
         required: false
         default: '4'
+        type: string
       check_sheets:
         description: 'Google Sheets 업데이트 여부'
         required: false
@@ -17,37 +19,75 @@ on:
         description: 'Google Sheets 스프레드시트 이름'
         required: false
         default: 'MSIT 통신 통계'
+        type: string
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # 최대 실행 시간 제한 추가
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v4
       with:
         python-version: '3.9'
+        cache: 'pip'
         
-    - name: Install Chrome
+    - name: Install Chrome and ChromeDriver
       run: |
+        # Chrome 설치
         sudo apt-get update
-        sudo apt-get install -y chromium-browser chromium-chromedriver
-        echo "Chrome location: $(which chromium-browser)"
-        echo "ChromeDriver location: $(which chromedriver)"
+        sudo apt-get install -y google-chrome-stable
         
+        # Chrome 버전 확인 및 적합한 ChromeDriver 설치
+        CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f 3 | cut -d '.' -f 1)
+        echo "Chrome version: $CHROME_VERSION"
+        
+        # ChromeDriver 설치
+        wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION" -O chromedriver-version.txt
+        CHROMEDRIVER_VERSION=$(cat chromedriver-version.txt)
+        echo "Installing ChromeDriver version: $CHROMEDRIVER_VERSION"
+        
+        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip" -O chromedriver.zip
+        unzip -q chromedriver.zip
+        chmod +x chromedriver
+        sudo mv chromedriver /usr/local/bin/
+        
+        # 버전 확인
+        chromedriver --version
+        
+    - name: Install Xvfb
+      run: sudo apt-get install -y xvfb
+      
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client selenium-stealth
+        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth
+        
+    - name: Create requirements.txt if not exists
+      run: |
+        if [ ! -f requirements.txt ]; then
+          cat > requirements.txt << 'EOF'
+        selenium>=4.1.0
+        beautifulsoup4>=4.10.0
+        python-telegram-bot>=13.11
+        pandas>=1.3.5
+        gspread>=5.3.2
+        oauth2client>=4.1.3
+        lxml>=4.8.0
+        html5lib>=1.1
+        selenium-stealth>=1.0.6
+        EOF
+          echo "Created requirements.txt file"
+        else
+          echo "requirements.txt already exists"
+        fi
         
     - name: Create downloads directory
       run: mkdir -p downloads
-
-    - name: Install Xvfb
-      run: sudo apt-get install -y xvfb
       
     - name: Run monitoring script
       env:
@@ -58,7 +98,105 @@ jobs:
         DAYS_RANGE: ${{ github.event.inputs.days_range || '4' }}
         CHECK_SHEETS: ${{ github.event.inputs.check_sheets || 'true' }}
         SPREADSHEET_NAME: ${{ github.event.inputs.spreadsheet_name || 'MSIT 통신 통계' }}
+        PYTHONIOENCODING: utf-8
+      run: |
+        # Xvfb 설정 (가상 디스플레이)
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+        sleep 2
+        
+        # 디버깅 도구 스크립트 생성
+        cat > take_screenshot.py << 'EOF'
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+        import sys
+        import os
+        
+        def take_screenshots(url=None, filename_prefix="screenshot"):
+            options = Options()
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
+            
+            service = Service('/usr/local/bin/chromedriver')
+            driver = webdriver.Chrome(service=service, options=options)
+            
+            try:
+                if url:
+                    print(f"스크린샷 촬영 중: {url}")
+                    driver.get(url)
+                    time.sleep(5)
+                    driver.save_screenshot(f"{filename_prefix}.png")
+                    print(f"스크린샷 저장됨: {filename_prefix}.png")
+                else:
+                    # 메인 페이지 접속
+                    print("메인 페이지 접속 중...")
+                    driver.get('https://www.msit.go.kr')
+                    time.sleep(5)
+                    driver.save_screenshot('main_page.png')
+                    print("메인 페이지 스크린샷 저장됨")
+                    
+                    try:
+                        # 통계정보 버튼 찾기 및 클릭
+                        print("통계정보 버튼 찾는 중...")
+                        stats_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable((By.LINK_TEXT, "통계정보"))
+                        )
+                        stats_button.click()
+                        time.sleep(5)
+                        driver.save_screenshot('stats_page_after_click.png')
+                        print("클릭 후 통계 페이지 스크린샷 저장됨")
+                    except Exception as click_error:
+                        print(f"버튼 클릭 오류: {str(click_error)}")
+                        
+                    # 직접 통계 페이지 접속
+                    print("직접 통계 페이지 접속 중...")
+                    driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
+                    time.sleep(5)
+                    driver.save_screenshot('stats_page_direct.png')
+                    print("직접 접속 통계 페이지 스크린샷 저장됨")
+                    
+                    # 페이지 소스 저장
+                    with open('page_source.html', 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    print("페이지 소스 저장됨")
+            except Exception as e:
+                print(f'스크린샷 촬영 중 오류: {str(e)}')
+            finally:
+                driver.quit()
+                print("브라우저 종료됨")
+        
+        if __name__ == "__main__":
+            if len(sys.argv) > 1:
+                take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
+            else:
+                take_screenshots()
+        EOF
+        
+        # 실행
+        python msit_monitor.py
+        
+    - name: Take screenshots (always)
+      if: always()
       run: |
         export DISPLAY=:99
-        Xvfb :99 -screen 0 1920x1080x24 &
-        python msit_monitor.py
+        python take_screenshot.py
+        
+    - name: Upload logs and screenshots
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: msit-monitoring-artifacts
+        path: |
+          *.log
+          *.png
+          *.html
+          downloads/*
+        retention-days: 5
