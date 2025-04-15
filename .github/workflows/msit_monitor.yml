@@ -1,9 +1,18 @@
 name: MSIT Telco Service Monitoring
-
 on:
   schedule:
     - cron: '40 23 1-31/2 * *'  # UTC 23:40 (KST 08:40) 홀수날마다 실행
   workflow_dispatch:
+    inputs:
+      days_range:
+        description: '몇 일 전까지의 게시물을 확인할지 설정'
+        required: false
+        default: '4'
+      check_sheets:
+        description: 'Google Sheets 업데이트 여부'
+        required: false
+        default: 'true'
+        type: boolean
 
 jobs:
   monitor:
@@ -26,12 +35,18 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium beautifulsoup4 python-telegram-bot requests
+        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client
         
+    - name: Create downloads directory
+      run: mkdir -p downloads
+      
     - name: Run monitoring script
       env:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+        MSIT_GSPREAD_ref: ${{ secrets.MSIT_GSPREAD_ref }}
+        DAYS_RANGE: ${{ github.event.inputs.days_range || '4' }}
+        CHECK_SHEETS: ${{ github.event.inputs.check_sheets || 'true' }}
       run: |
         export PYTHONPATH=$PYTHONPATH:$(pwd)
         python msit_monitor.py
