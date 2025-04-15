@@ -96,6 +96,8 @@ class MSITMonitor:
                 service = Service('/usr/bin/chromedriver')
         
         driver = webdriver.Chrome(service=service, options=chrome_options)
+            # 페이지 로드 타임아웃 설정 (초 단위)
+        driver.set_page_load_timeout(60)  # 60초로 설정
         return driver
 
     def setup_gspread_client(self):
