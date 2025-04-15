@@ -424,91 +424,94 @@ class MSITMonitor:
         logger.info(f"바로보기 URL: {view_url}")
 
         try:
-                # 페이지로 이동 후 잠시 대기하여 페이지가 로드되도록 함
-                driver.get(view_url)
-                time.sleep(3)
-                current_url = driver.current_url
-                logger.info(f"현재 URL: {current_url}")
-                
-                # SynapDocViewServer 처리: URL에 관련 문자열이 포함되면 시트 탭을 이용해 처리
-                if 'SynapDocViewServer' in current_url:
-                        logger.info("SynapDocViewServer 감지됨")
-                        sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
-                        if sheet_tabs:
-                                logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
-                                all_sheets = {}
-                                for i, tab in enumerate(sheet_tabs):
-                                        sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
-                                        if i > 0:
-                                                try:
-                                                        tab.click()
-                                                        time.sleep(3)
-                                                except Exception as click_err:
-                                                        logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
-                                                        continue
-                                        try:
-                                                iframe = WebDriverWait(driver, 20).until(
-                                                        EC.presence_of_element_located((By.ID, "innerWrap"))
-                                                )
-                                                driver.switch_to.frame(iframe)
-                                                iframe_html = driver.page_source
-                                                df = self.extract_table_from_html(iframe_html)
-                                                driver.switch_to.default_content()
-                                                if df is not None and not df.empty:
-                                                        all_sheets[sheet_name] = df
-                                                        logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-                                                else:
-                                                        logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
-                                        except Exception as iframe_err:
-                                                logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
-                                                try:
-                                                        driver.switch_to.default_content()
-                                                except Exception:
-                                                        pass
-                                if all_sheets:
-                                        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
-                                        return all_sheets
-                                else:
-                                        logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
-                                        return None
-                        else:
-                                # 시트 탭이 없는 경우 단일 iframe 처리
-                                logger.info("시트 탭 없음, 단일 iframe 처리 시도")
-                                iframe = WebDriverWait(driver, 20).until(
-                                        EC.presence_of_element_located((By.ID, "innerWrap"))
-                                )
-                                driver.switch_to.frame(iframe)
-                                html_content = driver.page_source
-                                df = self.extract_table_from_html(html_content)
+            # 페이지로 이동 후, redirection 및 로딩을 위해 충분한 시간(최대 40초) 대기
+            driver.get(view_url)
+            time.sleep(3)
+            # URL 변화 확인 (redirection 후)
+            current_url = driver.current_url
+            logger.info(f"현재 URL: {current_url}")
+            
+            # SynapDocViewServer가 포함된 URL이면, 문서뷰어 페이지임을 의미
+            if 'SynapDocViewServer' in current_url:
+                logger.info("SynapDocViewServer 감지됨")
+                # 페이지 로딩이 오래 걸릴 수 있으므로 타임아웃 40초 적용
+                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                if sheet_tabs:
+                    logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+                    all_sheets = {}
+                    for i, tab in enumerate(sheet_tabs):
+                        sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+                        if i > 0:
+                            try:
+                                tab.click()
+                                time.sleep(3)
+                            except Exception as click_err:
+                                logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
+                                continue
+                        try:
+                            iframe = WebDriverWait(driver, 40).until(
+                                EC.presence_of_element_located((By.ID, "innerWrap"))
+                            )
+                            driver.switch_to.frame(iframe)
+                            iframe_html = driver.page_source
+                            df = self.extract_table_from_html(iframe_html)
+                            driver.switch_to.default_content()
+                            if df is not None and not df.empty:
+                                all_sheets[sheet_name] = df
+                                logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            else:
+                                logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                        except Exception as iframe_err:
+                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                            try:
                                 driver.switch_to.default_content()
-                        if df is not None and not df.empty:
-                            logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-                            return {"기본 시트": df}
-                        else:
-                            logger.warning("단일 iframe에서 테이블 추출 실패")
-                            return None
+                            except Exception:
+                                pass
+                    if all_sheets:
+                        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
+                        return all_sheets
+                    else:
+                        logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
+                        return None
                 else:
-                        # SynapDocViewServer 미감지 시: 일반 HTML 페이지에서 테이블 추출
-                        logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
-                        tables = pd.read_html(driver.page_source)
-                        if tables:
-                                largest_table = max(tables, key=lambda t: t.size)
-                                logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
-                                return {"기본 테이블": largest_table}
-                        else:
-                                logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
-                                return None
+                    # 시트 탭이 없는 경우 단일 iframe 처리
+                    logger.info("시트 탭 없음, 단일 iframe 처리 시도 (SynapDocViewServer)")
+                    iframe = WebDriverWait(driver, 40).until(
+                        EC.presence_of_element_located((By.ID, "innerWrap"))
+                    )
+                    driver.switch_to.frame(iframe)
+                    html_content = driver.page_source
+                    df = self.extract_table_from_html(html_content)
+                    driver.switch_to.default_content()
+                    if df is not None and not df.empty:
+                        logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                        return {"기본 시트": df}
+                    else:
+                        logger.warning("단일 iframe에서 테이블 추출 실패")
+                        return None
+            else:
+                # SynapDocViewServer가 없는 경우(일반 HTML 페이지)
+                logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                tables = pd.read_html(driver.page_source)
+                if tables:
+                    largest_table = max(tables, key=lambda t: t.size)
+                    logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
+                    return {"기본 테이블": largest_table}
+                else:
+                    logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
+                    return None
 
         except Exception as e:
-                # 오류 발생 시, 현재 페이지의 HTML을 로그에 출력하여 디버그 지원
-                logger.error(f"iframe 전환 및 데이터 추출 중 오류 발생: {str(e)}")
-                try:
-                        html_debug = driver.page_source
-                        logger.error("오류 발생 시 페이지 HTML:\n" + html_debug)
-                        driver.switch_to.default_content()
-                except Exception:
-                        pass
-                return None
+            # 오류 발생 시, 현재 페이지의 HTML을 로그에 출력하여 디버그 지원
+            logger.error(f"iframe 전환 및 데이터 추출 중 오류 발생: {str(e)}")
+            try:
+                html_debug = driver.page_source
+                logger.error("오류 발생 시 페이지 HTML:\n" + html_debug)
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+            return None
+
 
 
     def extract_table_from_html(self, html_content):
