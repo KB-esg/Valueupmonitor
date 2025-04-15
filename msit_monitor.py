@@ -305,8 +305,8 @@ class MSITMonitor:
         except Exception as e:
             logger.error(f"페이지 파싱 중 에러: {str(e)}")
             return [], [], False
-
- def find_view_link_params(self, driver, post):
+            
+    def find_view_link_params(self, driver, post):
         """게시물에서 바로보기 링크 파라미터 찾기"""
         if not post.get('post_id'):
             logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
