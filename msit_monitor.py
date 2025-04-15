@@ -68,7 +68,7 @@ class MSITMonitor:
     def setup_driver(self):
         """Selenium WebDriver 설정"""
         options = Options()
-        options.add_argument('--headless')
+        #options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
@@ -103,6 +103,16 @@ class MSITMonitor:
         
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)
+        
+        # Selenium Stealth 적용
+        from selenium_stealth import stealth
+        stealth(driver,
+                languages=["ko-KR", "ko"],
+                vendor="Google Inc.",
+                platform="Win32",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True)
         return driver
 
     def setup_gspread_client(self):
