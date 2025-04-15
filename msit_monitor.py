@@ -66,29 +66,40 @@ class MSITMonitor:
         self.temp_dir.mkdir(exist_ok=True)
 
     def setup_driver(self):
-        """Selenium WebDriver 설정"""
+        """Selenium WebDriver 설정 (프록시, 쿠키/세션 유지, 추가 HTTP 헤더 적용)"""
         options = Options()
-        #options.add_argument('--headless')
+        # Headless 모드를 원하지 않는다면 주석 처리합니다.
+        # options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
-
-        # 사용자 에이전트 변경
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+        
+        # 일반 브라우저처럼 보이도록 사용자 에이전트 지정
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                             "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                             "Chrome/110.0.0.0 Safari/537.36")
+        
         # 자동화 감지 우회를 위한 옵션 추가
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--disable-blink-features=AutomationControlled")
         
-        # 성능 최적화 설정
-        prefs = {
-            "profile.default_content_setting_values.images": 2  # 이미지 로딩 비활성화
-        }
-        options.add_experimental_option("prefs", prefs)
+        # 프록시 사용 (필요한 경우 프록시 주소를 설정합니다)
+        proxy = os.environ.get("PROXY_SERVER")  # 예: "http://your-proxy-ip:port"
+        if proxy:
+            options.add_argument(f'--proxy-server={proxy}')
+            logger.info(f"프록시 서버 사용: {proxy}")
         
-        # 불필요한 로그 비활성화
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # 추가 HTTP 헤더 전송을 위한 방법 (ModHeader 확장 사용 예시)
+        # ModHeader 확장을 사용하면 특정 헤더를 강제로 추가할 수 있습니다.
+        # chrome 확장을 준비한 후 확장 파일(.crx 또는 폴더 경로)를 아래와 같이 추가하세요.
+        # 예: options.add_extension('/path/to/modheader.crx')
+        # 확장을 통한 헤더 설정은 ModHeader UI를 통해 미리 구성한 상태로 패키징해서 사용하는 방식입니다.
+        
+        # 성능 최적화: 이미지 로딩 비활성화
+        prefs = {"profile.default_content_setting_values.images": 2}
+        options.add_experimental_option("prefs", prefs)
         
         # 서비스 설정
         if os.path.exists('/usr/bin/chromium-browser'):
@@ -104,7 +115,7 @@ class MSITMonitor:
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)
         
-        # Selenium Stealth 적용
+        # Selenium Stealth 적용 (자동화 감지 우회 보조)
         from selenium_stealth import stealth
         stealth(driver,
                 languages=["ko-KR", "ko"],
@@ -113,8 +124,27 @@ class MSITMonitor:
                 webgl_vendor="Intel Inc.",
                 renderer="Intel Iris OpenGL Engine",
                 fix_hairline=True)
+        
+        # 쿠키/세션 유지 (필요시 기존 쿠키를 불러와 재설정)
+        # 예를 들어, 이전 세션의 쿠키를 파일에 저장한 후,
+        # 새로운 드라이버 세션에서 불러와 추가할 수 있습니다.
+        cookie_file = self.temp_dir / "cookies.json"
+        if cookie_file.exists():
+            try:
+                with open(cookie_file, 'r') as f:
+                    cookies = json.load(f)
+                # 먼저 기본 URL로 이동하여 도메인을 설정한 후에 쿠키를 추가
+                driver.get("https://www.msit.go.kr")
+                for cookie in cookies:
+                    # expiry 값은 int로 변환(필요 시)
+                    if "expiry" in cookie:
+                        cookie["expiry"] = int(cookie["expiry"])
+                    driver.add_cookie(cookie)
+                logger.info("저장된 쿠키를 불러와 추가함")
+            except Exception as ck_err:
+                logger.warning(f"쿠키 불러오기 실패: {str(ck_err)}")
+        
         return driver
-
     def setup_gspread_client(self):
         """Google Sheets 클라이언트 초기화"""
         if not self.gspread_creds:
