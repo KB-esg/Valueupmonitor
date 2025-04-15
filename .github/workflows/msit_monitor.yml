@@ -145,6 +145,76 @@ jobs:
       if: always()
       run: |
         export DISPLAY=:99
+        # 스크립트 존재 여부 확인
+        if [ ! -f take_screenshot.py ]; then
+          echo "스크린샷 스크립트가 없습니다. 다시 생성합니다."
+          cat > take_screenshot.py << 'EOF'
+          from selenium import webdriver
+          from selenium.webdriver.chrome.service import Service
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+          import time
+          import sys
+          import os
+
+          def take_screenshots(url=None, filename_prefix="screenshot"):
+              options = Options()
+              options.add_argument('--no-sandbox')
+              options.add_argument('--disable-dev-shm-usage')
+              options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+              options.add_experimental_option("excludeSwitches", ["enable-automation"])
+              options.add_experimental_option("useAutomationExtension", False)
+              service = Service('/usr/local/bin/chromedriver')
+              driver = webdriver.Chrome(service=service, options=options)
+              try:
+                  if url:
+                      driver.get(url)
+                      time.sleep(5)
+                      driver.save_screenshot(f"{filename_prefix}.png")
+                  else:
+                      driver.get('https://www.msit.go.kr')
+                      time.sleep(5)
+                      driver.save_screenshot('main_page.png')
+                      try:
+                          stats_button = WebDriverWait(driver, 10).until(
+                              EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '통계정보')]"))
+                          )
+                          stats_button.click()
+                          time.sleep(5)
+                          driver.save_screenshot('stats_page_after_click.png')
+                      except Exception as click_error:
+                          print(f"버튼 클릭 오류: {str(click_error)}")
+                      driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
+                      time.sleep(5)
+                      driver.save_screenshot('stats_page_direct.png')
+                      with open('page_source.html', 'w', encoding='utf-8') as f:
+                          f.write(driver.page_source)
+                      if "시스템 점검 안내" in driver.page_source:
+                          driver.save_screenshot('system_maintenance.png')
+                          try:
+                              driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
+                              driver.save_screenshot('after_overlay_removal.png')
+                          except Exception as overlay_err:
+                              print(f"오버레이 제거 오류: {str(overlay_err)}")
+              except Exception as e:
+                  print(f'스크린샷 오류: {str(e)}')
+              finally:
+                  driver.quit()
+          if __name__ == "__main__":
+              if len(sys.argv) > 1:
+                  take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
+              else:
+                  take_screenshots()
+          EOF
+        fi
+        
+        # 필요한 종속성 확인 및 설치
+        pip list | grep -q selenium || pip install selenium
+        pip list | grep -q webdriver-manager || pip install webdriver-manager
+        
+        # 스크립트 실행
         python take_screenshot.py
 
     - name: Archive artifacts
