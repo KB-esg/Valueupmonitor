@@ -13,6 +13,10 @@ on:
         required: false
         default: 'true'
         type: boolean
+      spreadsheet_name:
+        description: 'Google Sheets 스프레드시트 이름'
+        required: false
+        default: 'MSIT 통신 통계'
 
 jobs:
   monitor:
@@ -45,8 +49,10 @@ jobs:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
         MSIT_GSPREAD_ref: ${{ secrets.MSIT_GSPREAD_ref }}
+        MSIT_SPREADSHEET_ID: ${{ secrets.MSIT_SPREADSHEET_ID }}
         DAYS_RANGE: ${{ github.event.inputs.days_range || '4' }}
         CHECK_SHEETS: ${{ github.event.inputs.check_sheets || 'true' }}
+        SPREADSHEET_NAME: ${{ github.event.inputs.spreadsheet_name || 'MSIT 통신 통계' }}
       run: |
         export PYTHONPATH=$PYTHONPATH:$(pwd)
         python msit_monitor.py
