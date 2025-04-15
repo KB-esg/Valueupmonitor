@@ -45,6 +45,9 @@ jobs:
         
     - name: Create downloads directory
       run: mkdir -p downloads
+
+    - name: Install Xvfb
+      run: sudo apt-get install -y xvfb
       
     - name: Run monitoring script
       env:
@@ -56,5 +59,6 @@ jobs:
         CHECK_SHEETS: ${{ github.event.inputs.check_sheets || 'true' }}
         SPREADSHEET_NAME: ${{ github.event.inputs.spreadsheet_name || 'MSIT 통신 통계' }}
       run: |
-        export PYTHONPATH=$PYTHONPATH:$(pwd)
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 &
         python msit_monitor.py
