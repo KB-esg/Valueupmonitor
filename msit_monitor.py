@@ -311,9 +311,16 @@ class MSITMonitor:
             try:
                 detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
                 driver.get(detail_url)
-                # sleep 시간을 줄여 빠르게 다음 로딩 단계를 시도 (1초)
-                time.sleep(1)
-                # 바로보기 페이지의 주요 요소(예: view_head 또는 view_file)가 등장하는지 10초 대기
+                time.sleep(1)  # 기본적으로 1초 대기
+                # 추가: 시스템 점검 안내 오버레이가 있으면 사라질 때까지 기다림
+                try:
+                    maintenance_overlay = WebDriverWait(driver, 20).until(
+                        EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), '시스템 점검 안내')]"))
+                    )
+                    logger.info("시스템 점검 안내 메시지가 사라짐")
+                except Exception as wait_err:
+                    logger.warning("시스템 점검 안내 메시지가 여전히 표시 중입니다.")
+                # 바로보기 페이지의 주요 요소가 등장하는지 10초 대기
                 WebDriverWait(driver, 10).until(
                     lambda x: len(x.find_elements(By.CLASS_NAME, "view_head")) > 0 or
                               len(x.find_elements(By.CLASS_NAME, "view_file")) > 0
@@ -325,7 +332,6 @@ class MSITMonitor:
                     time.sleep(1)
                 else:
                     logger.error(f"{max_retries}번 시도 후 페이지 로드 실패")
-                    # 최종 시도 후 현재 페이지의 일부 HTML 스니펫을 로그에 출력
                     snippet = driver.page_source[:1000]
                     logger.error("최종 시도 후 페이지 HTML 스니펫:\n" + snippet)
                     if "시스템 점검 안내" in driver.page_source:
@@ -337,7 +343,6 @@ class MSITMonitor:
                 return None
 
         try:
-            # '새창 열림' 속성 등 다양한 방법으로 바로보기 링크 요소 검색
             view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
             if not view_links:
                 all_links = driver.find_elements(By.TAG_NAME, "a")
