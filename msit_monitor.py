@@ -411,203 +411,204 @@ class MSITMonitor:
             logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
             return None
 
+
     def access_iframe_direct(self, driver, file_params):
-	"""iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함, 오류 발생 시 HTML 미리보기 로그 출력)"""
-	if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
-		logger.error("파일 파라미터가 없습니다.")
-		return None
+        """iframe에 직접 접근하여 데이터 추출 (명시적 대기 활용 및 SynapDocViewServer 처리 포함, 오류 발생 시 HTML 미리보기 로그 출력)"""
+        if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
+            logger.error("파일 파라미터가 없습니다.")
+            return None
 
-	atch_file_no = file_params['atch_file_no']
-	file_ord = file_params['file_ord']
-	view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
-	logger.info(f"바로보기 URL: {view_url}")
+        atch_file_no = file_params['atch_file_no']
+        file_ord = file_params['file_ord']
+        view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
+        logger.info(f"바로보기 URL: {view_url}")
 
-	try:
-		# 페이지로 이동 후 잠시 대기하여 페이지가 로드되도록 함
-		driver.get(view_url)
-		time.sleep(3)
-		current_url = driver.current_url
-		logger.info(f"현재 URL: {current_url}")
-		
-		# SynapDocViewServer 처리: URL에 관련 문자열이 포함되면 시트 탭을 이용해 처리
-		if 'SynapDocViewServer' in current_url:
-			logger.info("SynapDocViewServer 감지됨")
-			sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
-			if sheet_tabs:
-				logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
-				all_sheets = {}
-				for i, tab in enumerate(sheet_tabs):
-					sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
-					if i > 0:
-						try:
-							tab.click()
-							time.sleep(3)
-						except Exception as click_err:
-							logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
-							continue
-					try:
-						iframe = WebDriverWait(driver, 20).until(
-							EC.presence_of_element_located((By.ID, "innerWrap"))
-						)
-						driver.switch_to.frame(iframe)
-						iframe_html = driver.page_source
-						df = self.extract_table_from_html(iframe_html)
-						driver.switch_to.default_content()
-						if df is not None and not df.empty:
-							all_sheets[sheet_name] = df
-							logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-						else:
-							logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
-					except Exception as iframe_err:
-						logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
-						try:
-							driver.switch_to.default_content()
-						except Exception:
-							pass
-				if all_sheets:
-					logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
-					return all_sheets
-				else:
-					logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
-					return None
-			else:
-				# 시트 탭이 없는 경우 단일 iframe 처리
-				logger.info("시트 탭 없음, 단일 iframe 처리 시도")
-				iframe = WebDriverWait(driver, 20).until(
-					EC.presence_of_element_located((By.ID, "innerWrap"))
-				)
-				driver.switch_to.frame(iframe)
-				html_content = driver.page_source
-				df = self.extract_table_from_html(html_content)
-				driver.switch_to.default_content()
-				if df is not None and not df.empty:
-					logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-					return {"기본 시트": df}
-				else:
-					logger.warning("단일 iframe에서 테이블 추출 실패")
-					return None
-		else:
-			# SynapDocViewServer 미감지 시: 일반 HTML 페이지에서 테이블 추출
-			logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
-			tables = pd.read_html(driver.page_source)
-			if tables:
-				largest_table = max(tables, key=lambda t: t.size)
-				logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
-				return {"기본 테이블": largest_table}
-			else:
-				logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
-				return None
+        try:
+                # 페이지로 이동 후 잠시 대기하여 페이지가 로드되도록 함
+                driver.get(view_url)
+                time.sleep(3)
+                current_url = driver.current_url
+                logger.info(f"현재 URL: {current_url}")
+                
+                # SynapDocViewServer 처리: URL에 관련 문자열이 포함되면 시트 탭을 이용해 처리
+                if 'SynapDocViewServer' in current_url:
+                        logger.info("SynapDocViewServer 감지됨")
+                        sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                        if sheet_tabs:
+                                logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+                                all_sheets = {}
+                                for i, tab in enumerate(sheet_tabs):
+                                        sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+                                        if i > 0:
+                                                try:
+                                                        tab.click()
+                                                        time.sleep(3)
+                                                except Exception as click_err:
+                                                        logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
+                                                        continue
+                                        try:
+                                                iframe = WebDriverWait(driver, 20).until(
+                                                        EC.presence_of_element_located((By.ID, "innerWrap"))
+                                                )
+                                                driver.switch_to.frame(iframe)
+                                                iframe_html = driver.page_source
+                                                df = self.extract_table_from_html(iframe_html)
+                                                driver.switch_to.default_content()
+                                                if df is not None and not df.empty:
+                                                        all_sheets[sheet_name] = df
+                                                        logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                                                else:
+                                                        logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                                        except Exception as iframe_err:
+                                                logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                                                try:
+                                                        driver.switch_to.default_content()
+                                                except Exception:
+                                                        pass
+                                if all_sheets:
+                                        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
+                                        return all_sheets
+                                else:
+                                        logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
+                                        return None
+                        else:
+                                # 시트 탭이 없는 경우 단일 iframe 처리
+                                logger.info("시트 탭 없음, 단일 iframe 처리 시도")
+                                iframe = WebDriverWait(driver, 20).until(
+                                        EC.presence_of_element_located((By.ID, "innerWrap"))
+                                )
+                                driver.switch_to.frame(iframe)
+                                html_content = driver.page_source
+                                df = self.extract_table_from_html(html_content)
+                                driver.switch_to.default_content()
+                        if df is not None and not df.empty:
+                                        logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                                        return {"기본 시트": df}
+                                else:
+                                        logger.warning("단일 iframe에서 테이블 추출 실패")
+                                        return None
+                else:
+                        # SynapDocViewServer 미감지 시: 일반 HTML 페이지에서 테이블 추출
+                        logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                        tables = pd.read_html(driver.page_source)
+                        if tables:
+                                largest_table = max(tables, key=lambda t: t.size)
+                                logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
+                                return {"기본 테이블": largest_table}
+                        else:
+                                logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
+                                return None
 
-	except Exception as e:
-		# 오류 발생 시, 현재 페이지의 HTML을 로그에 출력하여 디버그 지원
-		logger.error(f"iframe 전환 및 데이터 추출 중 오류 발생: {str(e)}")
-		try:
-			html_debug = driver.page_source
-			logger.error("오류 발생 시 페이지 HTML:\n" + html_debug)
-			driver.switch_to.default_content()
-		except Exception:
-			pass
-		return None
+        except Exception as e:
+                # 오류 발생 시, 현재 페이지의 HTML을 로그에 출력하여 디버그 지원
+                logger.error(f"iframe 전환 및 데이터 추출 중 오류 발생: {str(e)}")
+                try:
+                        html_debug = driver.page_source
+                        logger.error("오류 발생 시 페이지 HTML:\n" + html_debug)
+                        driver.switch_to.default_content()
+                except Exception:
+                        pass
+                return None
 
 
     def extract_table_from_html(self, html_content):
-	"""HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
-	try:
-		soup = BeautifulSoup(html_content, 'html.parser')
-		
-		# 모든 <table> 요소 검색
-		tables = soup.find_all('table')
-		if not tables:
-			logger.warning("HTML에서 테이블을 찾을 수 없음")
-			return None
-		
-		# 내부 함수: 하나의 테이블을 파싱하여 2차원 리스트(행렬)로 변환 (rowspan, colspan 처리)
-		def parse_table(table):
-			table_data = []
-			# pending은 (row_index, col_index) -> cell 내용 딕셔너리
-			pending = {}
-			rows = table.find_all('tr')
-			for row_idx, row in enumerate(rows):
-				current_row = []
-				col_idx = 0
-				
-				# 현재 행 시작 시, 이미 이전 row의 rowspan으로 채워야 할 셀 처리
-				while (row_idx, col_idx) in pending:
-					current_row.append(pending[(row_idx, col_idx)])
-					del pending[(row_idx, col_idx)]
-					col_idx += 1
-				
-				# 현재 행의 각 셀 처리
-				cells = row.find_all(['td', 'th'])
-				for cell in cells:
-					# 만약 현재 위치에 pending 셀이 있다면 먼저 채움
-					while (row_idx, col_idx) in pending:
-						current_row.append(pending[(row_idx, col_idx)])
-						del pending[(row_idx, col_idx)]
-						col_idx += 1
-					
-					text = cell.get_text(strip=True)
-					try:
-						colspan = int(cell.get("colspan", 1))
-					except Exception:
-						colspan = 1
-					try:
-						rowspan = int(cell.get("rowspan", 1))
-					except Exception:
-						rowspan = 1
-					
-					# 현재 셀을 colspan 횟수만큼 현재 행에 추가
-					for i in range(colspan):
-						current_row.append(text)
-						# rowspan이 있는 경우 후속 행에 해당 셀 값 추가
-						if rowspan > 1:
-							for r in range(1, rowspan):
-								pending[(row_idx + r, col_idx)] = text
-						col_idx += 1
-				
-				# 셀 처리 후, 만약 남은 pending 셀이 있다면 채움
-				while (row_idx, col_idx) in pending:
-					current_row.append(pending[(row_idx, col_idx)])
-					del pending[(row_idx, col_idx)]
-					col_idx += 1
-				
-				table_data.append(current_row)
-			return table_data
-		
-		# 파싱된 테이블 중 헤더와 데이터 행이 있는 테이블만 선택
-		parsed_tables = []
-		for table in tables:
-			data = parse_table(table)
-			if data and len(data) >= 2:
-				parsed_tables.append((len(data), data))
-		if not parsed_tables:
-			logger.warning("전처리된 테이블 데이터가 충분하지 않음")
-			return None
-		
-		# 행 수가 가장 많은 테이블 선택
-		_, largest_table = max(parsed_tables, key=lambda x: x[0])
-		if len(largest_table) < 2:
-			logger.warning("테이블 데이터가 충분하지 않음")
-			return None
-		
-		# 첫 번째 행을 헤더로 간주하고 나머지를 데이터로 사용
-		header = largest_table[0]
-		data_rows = []
-		for row in largest_table[1:]:
-			# 헤더 열 개수에 맞춰 행 길이 조정 (부족하면 빈 문자열 채움, 초과하면 잘라냄)
-			if len(row) < len(header):
-				row.extend([""] * (len(header) - len(row)))
-			elif len(row) > len(header):
-				row = row[:len(header)]
-			data_rows.append(row)
-		
-		df = pd.DataFrame(data_rows, columns=header)
-		logger.info(f"테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
-		return df
-	
-	except Exception as e:
-		logger.error(f"HTML에서 테이블 추출 중 오류: {str(e)}")
-		return None
+        """HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
+        try:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # 모든 <table> 요소 검색
+                tables = soup.find_all('table')
+                if not tables:
+                        logger.warning("HTML에서 테이블을 찾을 수 없음")
+                        return None
+                
+                # 내부 함수: 하나의 테이블을 파싱하여 2차원 리스트(행렬)로 변환 (rowspan, colspan 처리)
+                def parse_table(table):
+                        table_data = []
+                        # pending은 (row_index, col_index) -> cell 내용 딕셔너리
+                        pending = {}
+                        rows = table.find_all('tr')
+                        for row_idx, row in enumerate(rows):
+                                current_row = []
+                                col_idx = 0
+                                
+                                # 현재 행 시작 시, 이미 이전 row의 rowspan으로 채워야 할 셀 처리
+                                while (row_idx, col_idx) in pending:
+                                        current_row.append(pending[(row_idx, col_idx)])
+                                        del pending[(row_idx, col_idx)]
+                                        col_idx += 1
+                                
+                                # 현재 행의 각 셀 처리
+                                cells = row.find_all(['td', 'th'])
+                                for cell in cells:
+                                        # 만약 현재 위치에 pending 셀이 있다면 먼저 채움
+                                        while (row_idx, col_idx) in pending:
+                                                current_row.append(pending[(row_idx, col_idx)])
+                                                del pending[(row_idx, col_idx)]
+                                                col_idx += 1
+                                        
+                                        text = cell.get_text(strip=True)
+                                        try:
+                                                colspan = int(cell.get("colspan", 1))
+                                        except Exception:
+                                                colspan = 1
+                                        try:
+                                                rowspan = int(cell.get("rowspan", 1))
+                                        except Exception:
+                                                rowspan = 1
+                                        
+                                        # 현재 셀을 colspan 횟수만큼 현재 행에 추가
+                                        for i in range(colspan):
+                                                current_row.append(text)
+                                                # rowspan이 있는 경우 후속 행에 해당 셀 값 추가
+                                                if rowspan > 1:
+                                                        for r in range(1, rowspan):
+                                                                pending[(row_idx + r, col_idx)] = text
+                                                col_idx += 1
+                                
+                                # 셀 처리 후, 만약 남은 pending 셀이 있다면 채움
+                                while (row_idx, col_idx) in pending:
+                                        current_row.append(pending[(row_idx, col_idx)])
+                                        del pending[(row_idx, col_idx)]
+                                        col_idx += 1
+                                
+                                table_data.append(current_row)
+                        return table_data
+                
+                # 파싱된 테이블 중 헤더와 데이터 행이 있는 테이블만 선택
+                parsed_tables = []
+                for table in tables:
+                        data = parse_table(table)
+                        if data and len(data) >= 2:
+                                parsed_tables.append((len(data), data))
+                if not parsed_tables:
+                        logger.warning("전처리된 테이블 데이터가 충분하지 않음")
+                        return None
+                
+                # 행 수가 가장 많은 테이블 선택
+                _, largest_table = max(parsed_tables, key=lambda x: x[0])
+                if len(largest_table) < 2:
+                        logger.warning("테이블 데이터가 충분하지 않음")
+                        return None
+                
+                # 첫 번째 행을 헤더로 간주하고 나머지를 데이터로 사용
+                header = largest_table[0]
+                data_rows = []
+                for row in largest_table[1:]:
+                        # 헤더 열 개수에 맞춰 행 길이 조정 (부족하면 빈 문자열 채움, 초과하면 잘라냄)
+                        if len(row) < len(header):
+                                row.extend([""] * (len(header) - len(row)))
+                        elif len(row) > len(header):
+                                row = row[:len(header)]
+                        data_rows.append(row)
+                
+                df = pd.DataFrame(data_rows, columns=header)
+                logger.info(f"테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                return df
+        
+        except Exception as e:
+                logger.error(f"HTML에서 테이블 추출 중 오류: {str(e)}")
+                return None
 
 
     def create_placeholder_dataframe(self, post_info):
