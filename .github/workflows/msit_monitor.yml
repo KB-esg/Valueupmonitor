@@ -27,8 +27,6 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    container:
-      image: selenium/standalone-chrome:latest
     timeout-minutes: 30
 
     steps:
@@ -41,21 +39,17 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    - name: Install Chrome
-      run: |
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google.list
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-        google-chrome --version
-
     - name: Install Chrome and ChromeDriver
       run: |
-        sudo apt-get update || true
-        sudo apt-get install -y google-chrome-stable || true
-        google-chrome --version
-        # Use webdriver-manager instead of downloading chromedriver manually
-        pip install webdriver-manager
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f 3 | cut -d '.' -f 1)
+        wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION" -O chromedriver-version.txt
+        CHROMEDRIVER_VERSION=$(cat chromedriver-version.txt)
+        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip" -O chromedriver.zip
+        unzip -q chromedriver.zip
+        chmod +x chromedriver
+        sudo mv chromedriver /usr/local/bin/
 
     - name: Install Xvfb
       run: sudo apt-get install -y xvfb
@@ -151,29 +145,26 @@ jobs:
       if: always()
       run: |
         export DISPLAY=:99
-        # Install dependencies
-        pip install selenium webdriver-manager
-    
-        # Create a simple screenshot script that uses webdriver-manager
+        # 필요한 종속성 확인 및 설치
+        pip list | grep -q selenium || pip install selenium
+        
+        # 간단한 스크린샷 스크립트 생성
         echo 'from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.chrome.options import Options
-        from webdriver_manager.chrome import ChromeDriverManager
         import time
 
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--headless")
-    
-        # Let webdriver_manager find the right driver
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    
+        service = Service("/usr/local/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+        
         try:
             driver.get("https://www.msit.go.kr")
             time.sleep(5)
             driver.save_screenshot("msit_page.png")
-        
+            
             driver.get("https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99")
             time.sleep(5)
             driver.save_screenshot("msit_stats_page.png")
@@ -181,10 +172,10 @@ jobs:
             print(f"스크린샷 오류: {str(e)}")
         finally:
             driver.quit()' > simple_screenshot.py
-    
-        # Run the script
-        python simple_screenshot.py
         
+        # 스크립트 실행
+        python simple_screenshot.py
+
     - name: Archive artifacts
       if: always()
       run: |
