@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
+import random
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
