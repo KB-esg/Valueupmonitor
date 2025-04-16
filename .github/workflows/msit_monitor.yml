@@ -43,17 +43,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
+        google-chrome --version  # 디버깅용 버전 출력
 
-    - name: Install ChromeDriver (using setup-chromedriver action)
-      uses: browser-actions/setup-chrome@v1
-      
-    - name: Install ChromeDriver (using webdriver-manager)
+    - name: Install webdriver-manager
       run: |
         pip install webdriver-manager
-        echo "ChromeDriver installation path $(which chromedriver)"
-        # For debugging
-        ls -la /usr/local/bin/ | grep chrome
-        ls -la $(which chromedriver) || echo "ChromeDriver 직접 접근 불가"
+        echo "webdriver-manager 설치 완료"
 
     - name: Install Xvfb
       run: sudo apt-get install -y xvfb
@@ -61,10 +56,105 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        else
+          pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager
+        fi
 
     - name: Create downloads directory
       run: mkdir -p downloads
+      
+    - name: Create screenshots directory
+      run: mkdir -p screenshots
+
+    - name: Modify msit_monitor.py to use webdriver-manager
+      run: |
+        cat > modify_script.py << 'EOF'
+        import re
+        import os
+
+        script_path = 'msit_monitor.py'
+        if os.path.exists(script_path):
+            with open(script_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+                
+            # 업데이트: Selenium WebDriver 설정 함수 수정
+            setup_pattern = r"def setup_driver\(self\):(?:.+?)return driver"
+            replacement = """def setup_driver(self):
+        \"\"\"Selenium WebDriver 설정 (웹드라이버 매니저 사용)\"\"\"
+        options = Options()
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        # 중요: 각 실행마다 고유한 사용자 데이터 디렉터리 사용
+        options.add_argument(f'--user-data-dir=/tmp/chrome-user-data-{int(time.time())}')
+        
+        # 사용자 에이전트 설정
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+        
+        # 자동화 감지 우회를 위한 옵션
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        
+        # webdriver-manager를 사용하여 ChromeDriver 자동 설치
+        from webdriver_manager.chrome import ChromeDriverManager
+        
+        try:
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
+            logger.info("WebDriver 초기화 완료 (webdriver-manager 사용)")
+        except Exception as e:
+            logger.error(f"WebDriver 초기화 실패: {str(e)}")
+            # 대체 방법 시도
+            try:
+                driver = webdriver.Chrome(options=options)
+                logger.info("WebDriver 대체 방법으로 초기화 완료")
+            except Exception as e2:
+                logger.error(f"WebDriver 대체 초기화 실패: {str(e2)}")
+                raise
+        
+        driver.set_page_load_timeout(60)
+        
+        # Selenium Stealth 적용 (있는 경우)
+        try:
+            from selenium_stealth import stealth
+            stealth(driver,
+                languages=["ko-KR", "ko"],
+                vendor="Google Inc.",
+                platform="Win32",
+                webgl_vendor="Intel Inc.",
+                renderer="Intel Iris OpenGL Engine",
+                fix_hairline=True)
+            logger.info("Selenium Stealth 적용 완료")
+        except ImportError:
+            logger.warning("selenium-stealth 라이브러리를 찾을 수 없습니다. 기본 모드로 계속합니다.")
+            
+        return driver"""
+            
+            # 정규식 패턴을 사용하여 함수 교체
+            modified_content = re.sub(setup_pattern, replacement, content, flags=re.DOTALL)
+            
+            # 모든 Service('경로') 패턴을 webdriver-manager로 교체
+            modified_content = re.sub(
+                r"service\s*=\s*Service\s*\(\s*['\"].*?['\"]\s*\)",
+                "from webdriver_manager.chrome import ChromeDriverManager\n        service = Service(ChromeDriverManager().install())",
+                modified_content
+            )
+            
+            with open(script_path, 'w', encoding='utf-8') as file:
+                file.write(modified_content)
+                
+            print(f"{script_path} 파일을 성공적으로 수정했습니다.")
+        else:
+            print(f"오류: {script_path} 파일을 찾을 수 없습니다!")
+        EOF
+        
+        python modify_script.py
 
     - name: Create screenshot script
       run: |
@@ -88,43 +178,66 @@ jobs:
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option("useAutomationExtension", False)
             
-            # ChromeDriverManager 사용
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            # 중요: 고유한 사용자 데이터 디렉터리 사용
+            options.add_argument(f'--user-data-dir=/tmp/chrome-user-data-{int(time.time())}')
+            
+            print("ChromeDriver 설치 시작...")
+            driver_path = ChromeDriverManager().install()
+            print(f"ChromeDriver 설치 완료: {driver_path}")
+            
+            driver = webdriver.Chrome(service=Service(driver_path), options=options)
             
             try:
                 if url:
+                    print(f"URL 접속: {url}")
                     driver.get(url)
                     time.sleep(5)
                     driver.save_screenshot(f"{filename_prefix}.png")
+                    print(f"스크린샷 저장 완료: {filename_prefix}.png")
                 else:
+                    print("MSIT 메인 페이지 접속...")
                     driver.get('https://www.msit.go.kr')
                     time.sleep(5)
                     driver.save_screenshot('main_page.png')
+                    print("메인 페이지 스크린샷 저장 완료")
+                    
                     try:
+                        print("통계정보 버튼 찾기...")
                         stats_button = WebDriverWait(driver, 10).until(
                             EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '통계정보')]"))
                         )
                         stats_button.click()
+                        print("통계정보 버튼 클릭 성공")
                         time.sleep(5)
                         driver.save_screenshot('stats_page_after_click.png')
+                        print("통계정보 페이지 스크린샷 저장 완료")
                     except Exception as click_error:
                         print(f"버튼 클릭 오류: {str(click_error)}")
+                    
+                    print("통계정보 페이지 직접 접속...")
                     driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
                     time.sleep(5)
                     driver.save_screenshot('stats_page_direct.png')
+                    print("통계정보 페이지 직접 접속 스크린샷 저장 완료")
+                    
                     with open('page_source.html', 'w', encoding='utf-8') as f:
                         f.write(driver.page_source)
+                    
                     if "시스템 점검 안내" in driver.page_source:
+                        print("시스템 점검 안내 페이지 감지됨")
                         driver.save_screenshot('system_maintenance.png')
                         try:
                             driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
                             driver.save_screenshot('after_overlay_removal.png')
+                            print("오버레이 제거 시도 후 스크린샷 저장 완료")
                         except Exception as overlay_err:
                             print(f"오버레이 제거 오류: {str(overlay_err)}")
             except Exception as e:
                 print(f'스크린샷 오류: {str(e)}')
             finally:
+                print("WebDriver 종료")
                 driver.quit()
+        
         if __name__ == "__main__":
             if len(sys.argv) > 1:
                 take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
@@ -146,44 +259,22 @@ jobs:
         export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
         sleep 2
-        # msit_monitor.py 파일 수정
-        echo "import sys; print('Python version:', sys.version)" > check_version.py
-        python check_version.py
-        # msit_monitor.py 파일 수정
-        cat > msit_monitor_patch.py << 'EOF'
-        import re
-        import os
-
-        # 원본 파일 읽기
-        with open('msit_monitor.py', 'r', encoding='utf-8') as file:
-            content = file.read()
-
-        # WebDriverManager 사용으로 수정
-        content = re.sub(
-            r"service = Service\(['\"](.+?)['\"]\)",
-            "from webdriver_manager.chrome import ChromeDriverManager\n        service = Service(ChromeDriverManager().install())",
-            content
-        )
-
-        # 수정된 내용 저장
-        with open('msit_monitor.py', 'w', encoding='utf-8') as file:
-            file.write(content)
-
-        print("msit_monitor.py 파일이 성공적으로 패치되었습니다.")
-        EOF
-
-        # 패치 스크립트 실행
-        python msit_monitor_patch.py
         
-        # 모니터링 실행
-        python msit_monitor.py
+        # Python 버전 확인
+        python --version
+        
+        # 테스트 스크립트 실행
+        echo "스크린샷 테스트 스크립트 실행..."
+        python take_screenshot.py
+        
+        # 실제 모니터링 스크립트 실행
+        echo "모니터링 스크립트 실행..."
+        python msit_monitor.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
 
     - name: Take screenshots (always)
       if: always()
       run: |
         export DISPLAY=:99
-        # 필요한 종속성 확인 및 설치
-        pip list | grep -q selenium || pip install selenium webdriver-manager
         
         # 간단한 스크린샷 스크립트 생성
         cat > simple_screenshot.py << 'EOF'
@@ -192,41 +283,51 @@ jobs:
         from selenium.webdriver.chrome.options import Options
         from webdriver_manager.chrome import ChromeDriverManager
         import time
+        import random
 
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         
-        # ChromeDriverManager 사용
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # 고유한 사용자 데이터 디렉터리 사용
+        temp_dir = f"/tmp/chrome-data-{random.randint(1000, 9999)}-{int(time.time())}"
+        options.add_argument(f"--user-data-dir={temp_dir}")
+        
+        print(f"ChromeDriver 설치 시작 (simple_screenshot.py)...")
+        driver_path = ChromeDriverManager().install()
+        print(f"ChromeDriver 설치 완료: {driver_path}")
+        
+        print("WebDriver 초기화...")
+        driver = webdriver.Chrome(service=Service(driver_path), options=options)
         
         try:
-            print("Opening MSIT page...")
+            print("MSIT 메인 페이지 접속...")
             driver.get("https://www.msit.go.kr")
             time.sleep(5)
             driver.save_screenshot("msit_page.png")
+            print("MSIT 메인 페이지 스크린샷 저장 완료")
             
-            print("Opening MSIT stats page...")
+            print("MSIT 통계 페이지 접속...")
             driver.get("https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99")
             time.sleep(5)
             driver.save_screenshot("msit_stats_page.png")
-            print("Screenshots completed successfully")
+            print("MSIT 통계 페이지 스크린샷 저장 완료")
         except Exception as e:
             print(f"스크린샷 오류: {str(e)}")
         finally:
+            print("WebDriver 종료")
             driver.quit()
         EOF
         
         # 스크립트 실행
-        python simple_screenshot.py
+        python simple_screenshot.py || echo "간단한 스크린샷 스크립트 실패, 계속 진행"
 
     - name: Archive artifacts
       if: always()
       run: |
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         mkdir -p artifacts
-        cp -r *.log *.png *.html downloads/* artifacts/ 2>/dev/null || true
+        cp -r *.log *.png *.html downloads/* screenshots/* artifacts/ 2>/dev/null || true
         echo "실행 정보:" > artifacts/run_info.txt
         echo "실행 ID: ${{ github.run_id }}" >> artifacts/run_info.txt
         echo "실행 번호: ${{ github.run_number }}" >> artifacts/run_info.txt
