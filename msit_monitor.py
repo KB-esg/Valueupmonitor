@@ -74,69 +74,57 @@ class MSITMonitor:
         self.temp_dir.mkdir(exist_ok=True)
 
     def setup_driver(self):
-        """Selenium WebDriver 설정 (향상된 버전)"""
+        """Selenium WebDriver 설정 (향상된 봇 탐지 회피)"""
         options = Options()
         # 비-headless 모드 실행 (GitHub Actions에서 Xvfb 사용 시)
-        # 일반 환경에서는 headless 모드를 사용할 수 있음
-        # options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1920,1080')
-
-        # 사용자 에이전트 설정
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36")
+        
+        # 랜덤 User-Agent 설정
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0"
+        ]
+        selected_ua = random.choice(user_agents)
+        options.add_argument(f"user-agent={selected_ua}")
+        logger.info(f"선택된 User-Agent: {selected_ua}")
         
         # 자동화 감지 우회를 위한 옵션
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--disable-blink-features=AutomationControlled")
         
-        # 성능 최적화 설정
-        prefs = {
-            "profile.default_content_setting_values.images": 2,  # 이미지 로딩 비활성화
-            "profile.default_content_setting_values.cookies": 1,  # 쿠키 활성화 (세션 유지를 위해)
-            "profile.managed_default_content_settings.javascript": 1  # JavaScript 활성화 (필요함)
-        }
-        options.add_experimental_option("prefs", prefs)
-        
         # 불필요한 로그 비활성화
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
         
-        # 서비스 설정 (향상된 버전)
         try:
-            # 첫번째: chromium-browser 확인
-            if os.path.exists('/usr/bin/chromium-browser'):
-                options.binary_location = '/usr/bin/chromium-browser'
-                service = Service('/usr/bin/chromedriver')
-                logger.info("Chromium 브라우저 및 드라이버 사용")
-            # 두번째: chrome-browser 확인 
-            elif os.path.exists('/usr/bin/google-chrome-stable'):
-                options.binary_location = '/usr/bin/google-chrome-stable'
-                service = Service('/usr/bin/chromedriver')
-                logger.info("Chrome 브라우저 및 드라이버 사용")
-            # 세번째: webdriver-manager 사용
-            else:
-                try:
-                    from webdriver_manager.chrome import ChromeDriverManager
-                    service = Service(ChromeDriverManager().install())
-                    logger.info("ChromeDriverManager를 통한 드라이버 설치 완료")
-                except ImportError:
-                    service = Service('/usr/bin/chromedriver')
-                    logger.info("기본 경로 chromedriver 사용")
+            # webdriver-manager 사용
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
+            logger.info("ChromeDriverManager를 통한 드라이버 설치 완료")
         except Exception as e:
             logger.error(f"WebDriver 설정 중 오류: {str(e)}")
-            service = Service('/usr/bin/chromedriver')
-            logger.info("오류 발생 후 기본 경로 chromedriver 사용")
+            # 기본 경로 사용
+            if os.path.exists('/usr/bin/chromedriver'):
+                service = Service('/usr/bin/chromedriver')
+                logger.info("기본 경로 chromedriver 사용")
+            else:
+                raise Exception("ChromeDriver를 찾을 수 없습니다")
         
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(60)
+        
+        # 페이지 로드 타임아웃 증가
+        driver.set_page_load_timeout(90)
         
         # Selenium Stealth 적용 (있는 경우)
         try:
             from selenium_stealth import stealth
             stealth(driver,
-                languages=["ko-KR", "ko"],
+                languages=["ko-KR", "ko", "en-US", "en"],
                 vendor="Google Inc.",
                 platform="Win32",
                 webgl_vendor="Intel Inc.",
@@ -145,11 +133,17 @@ class MSITMonitor:
             logger.info("Selenium Stealth 적용 완료")
         except ImportError:
             logger.warning("selenium-stealth 라이브러리를 찾을 수 없습니다. 기본 모드로 계속합니다.")
-
-        # 스크린샷 디렉토리 생성
-        screenshots_dir = Path("./screenshots")
-        screenshots_dir.mkdir(exist_ok=True)
-
+        
+        # 추가 스텔스 설정
+        try:
+            # 웹드라이버 탐지 방지를 위한 JavaScript 실행
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            logger.info("추가 스텔스 설정 적용 완료")
+        except Exception as js_err:
+            logger.warning(f"추가 스텔스 설정 적용 중 오류: {str(js_err)}")
+        
         return driver
 
     def setup_gspread_client(self):
@@ -447,12 +441,10 @@ class MSITMonitor:
             except Exception as save_err:
                 logger.warning(f"페이지 소스 저장 중 오류: {str(save_err)}")
             
-            
             # 스크린샷 저장
             self.take_screenshot(driver, f"parsed_page_{page_num}")
-        
-        
-        # 스크린샷 저장 (디버깅용)
+            
+            # 스크린샷 저장 (디버깅용)
             try:
                 driver.save_screenshot('last_parsed_page.png')
                 logger.info("현재 페이지 스크린샷 저장 완료: last_parsed_page.png")
@@ -612,36 +604,73 @@ class MSITMonitor:
             try:
                 # 게시물 상세 페이지로 이동
                 detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+                logger.info(f"게시물 URL 접근 시도 ({attempt+1}/{max_retries}): {detail_url}")
                 driver.get(detail_url)
-                time.sleep(retry_delay)
+                
+                # 페이지 로드 대기 시간 증가
+                time.sleep(retry_delay + attempt * 2)  # 점진적으로 대기 시간 증가
 
-              
                 # 스크린샷 저장
                 self.take_screenshot(driver, f"post_view_{post['post_id']}_attempt_{attempt}")
-            
-    
-                # 시스템 점검 오버레이 제거 시도
+                
+                # 오류 페이지 감지 (명확한 감지)
+                if "시스템 점검 안내" in driver.page_source or "error-type" in driver.page_source or "error-wrap" in driver.page_source:
+                    logger.warning(f"오류 페이지 감지됨 (시도 {attempt+1}/{max_retries})")
+                    
+                    # HTML 스니펫 로깅
+                    html_snippet = driver.page_source[:500]
+                    logger.debug(f"오류 페이지 HTML 스니펫: {html_snippet}")
+                    
+                    if attempt < max_retries - 1:
+                        # 대기 시간 증가 후 재시도
+                        time.sleep(retry_delay * 2)
+                        continue
+                    else:
+                        # 날짜 정보 추출
+                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                        if date_match:
+                            year = int(date_match.group(1))
+                            month = int(date_match.group(2))
+                            
+                            return {
+                                'content': "시스템 점검 또는 오류 페이지",
+                                'date': {'year': year, 'month': month},
+                                'post_info': post
+                            }
+                        return None
+                
+                # JavaScript 오류로 인한 로딩 문제 해결 시도
                 try:
-                    driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
-                    overlay_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '시스템 점검 안내')]")
-                    if overlay_elements:
-                        logger.info("시스템 점검 안내 오버레이 감지됨. 오버레이 제거 시도 중...")
-                        driver.execute_script("document.querySelectorAll('//*[contains(text(), \"시스템 점검 안내\")]').forEach(e => e.remove());")
-                        time.sleep(1)
-                except Exception:
-                    logger.info("시스템 점검 안내 오버레이 없음 또는 이미 제거됨.")
+                    # JavaScript 오류 처리 (일부 스크립트 오류 무시)
+                    driver.execute_script("""
+                        window.onerror = function(message, source, lineno, colno, error) { 
+                            console.log('JavaScript 오류 무시: ' + message);
+                            return true; 
+                        }
+                    """)
+                    
+                    # 일부 사이트에서 오버레이 또는 팝업 제거
+                    driver.execute_script("""
+                        document.querySelectorAll('.overlay, .popup, .modal').forEach(e => e.remove());
+                        document.querySelectorAll('div[class*="overlay"], div[class*="popup"], div[class*="modal"]').forEach(e => e.remove());
+                    """)
+                except Exception as js_err:
+                    logger.warning(f"JavaScript 실행 중 오류: {str(js_err)}")
                 
                 # 다양한 요소 중 하나라도 로드되면 성공으로 간주
                 wait_elements = [
                     (By.CLASS_NAME, "view_head"),
                     (By.CLASS_NAME, "view_file"),
-                    (By.CLASS_NAME, "view_cont")
+                    (By.CLASS_NAME, "view_cont"),
+                    (By.CSS_SELECTOR, ".bbs_wrap .view"),
+                    (By.XPATH, "//div[contains(@class, 'view')]")
                 ]
                 
                 element_found = False
                 for by_type, selector in wait_elements:
                     try:
-                        WebDriverWait(driver, 10).until(
+                        # 대기 시간 증가
+                        element = WebDriverWait(driver, 15).until(
                             EC.presence_of_element_located((by_type, selector))
                         )
                         logger.info(f"페이지 로드 성공: {selector} 요소 발견")
@@ -650,91 +679,78 @@ class MSITMonitor:
                     except TimeoutException:
                         continue
                 
-                # 시스템 점검 페이지 감지
-            # 시스템 점검 페이지 감지
-                if "시스템 점검 안내" in driver.page_source:
-                    if attempt < max_retries - 1:
-                        logger.warning("시스템 점검 중입니다. 나중에 다시 시도합니다.")
-                        time.sleep(retry_delay * 2)  # 더 오래 대기
-                        continue
-                    else:
-                        # 최종 시도 후에도 시스템 점검 페이지면 오류 반환
-                        logger.warning("시스템 점검 중입니다.")
-                        
-                        # 페이지 소스 미리보기 저장
-                        html_snippet = driver.page_source[:1000]
-                        logger.error(f"최종 시도 후 페이지 HTML 스니펫:\n{html_snippet}")
-                        
-                        # 날짜 정보 추출 시도
-                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                        if date_match:
-                            year = int(date_match.group(1))
-                            month = int(date_match.group(2))
-                            
-                            return {
-                                'content': "시스템 점검 중입니다.",
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
-                        
-                        return None
-                
-                # 로드 실패 시
-                if not element_found:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"페이지 요소를 찾을 수 없음 (시도 {attempt+1}/{max_retries})")
-                        time.sleep(retry_delay)
-                        retry_delay *= 1.5  # 대기 시간 증가
-                        continue
-                    else:
-                        logger.error(f"{max_retries}번 시도 후 페이지 요소를 찾을 수 없음")
-                        
-                        # 날짜 정보 추출 시도
-                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                        if date_match:
-                            year = int(date_match.group(1))
-                            month = int(date_match.group(2))
-                            
-                            return {
-                                'content': "페이지 로드 실패",
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
-                        
-                        return None
-                
                 # 디버깅용 스크린샷 저장
                 try:
-                    driver.save_screenshot(f"post_view_{post['post_id']}.png")
-                    logger.info(f"게시물 페이지 스크린샷 저장: post_view_{post['post_id']}.png")
+                    screenshot_path = f"post_view_{post['post_id']}_loaded.png"
+                    driver.save_screenshot(screenshot_path)
+                    logger.info(f"게시물 페이지 스크린샷 저장: {screenshot_path}")
                 except Exception as ss_err:
                     logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
                 
-                # 바로보기 링크 찾기
+                # 바로보기 링크 찾기 (확장된 선택자)
                 try:
                     # 여러 선택자로 바로보기 링크 찾기
+                    view_links = []
+                    
+                    # 1. 일반적인 '바로보기' 링크
                     view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
                     
+                    # 2. onclick 속성으로 찾기
                     if not view_links:
-                        # onclick 속성으로 찾기
                         all_links = driver.find_elements(By.TAG_NAME, "a")
                         view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
                     
+                    # 3. 텍스트로 찾기
                     if not view_links:
-                        # 텍스트로 찾기
                         all_links = driver.find_elements(By.TAG_NAME, "a")
                         view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+                    
+                    # 4. class 속성으로 찾기
+                    if not view_links:
+                        view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
+                    
+                    # 5. 제목에 포함된 키워드로 관련 링크 찾기
+                    if not view_links and '통계' in post['title']:
+                        all_links = driver.find_elements(By.TAG_NAME, "a")
+                        view_links = [link for link in all_links if 
+                                    any(ext in (link.get_attribute('href') or '')  
+                                       for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
                     
                     if view_links:
                         view_link = view_links[0]
                         onclick_attr = view_link.get_attribute('onclick')
-                        logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}")
+                        href_attr = view_link.get_attribute('href')
+                        
+                        logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}, href: {href_attr}")
                         
                         # getExtension_path('49234', '1') 형식에서 매개변수 추출
-                        match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
-                        if match:
-                            atch_file_no = match.group(1)
-                            file_ord = match.group(2)
+                        if onclick_attr and 'getExtension_path' in onclick_attr:
+                            match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                            if match:
+                                atch_file_no = match.group(1)
+                                file_ord = match.group(2)
+                                
+                                # 날짜 정보 추출
+                                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                if date_match:
+                                    year = int(date_match.group(1))
+                                    month = int(date_match.group(2))
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'date': {'year': year, 'month': month},
+                                        'post_info': post
+                                    }
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'post_info': post
+                                }
+                        # 직접 다운로드 URL인 경우 처리
+                        elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
+                            logger.info(f"직접 다운로드 링크 발견: {href_attr}")
                             
                             # 날짜 정보 추출
                             date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
@@ -743,20 +759,50 @@ class MSITMonitor:
                                 month = int(date_match.group(2))
                                 
                                 return {
-                                    'atch_file_no': atch_file_no,
-                                    'file_ord': file_ord,
+                                    'download_url': href_attr,
                                     'date': {'year': year, 'month': month},
                                     'post_info': post
                                 }
-                            
-                            return {
-                                'atch_file_no': atch_file_no,
-                                'file_ord': file_ord,
-                                'post_info': post
-                            }
                     
                     # 바로보기 링크를 찾을 수 없는 경우
                     logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+                    
+                    # 게시물 내용 추출 시도
+                    try:
+                        # 다양한 선택자로 내용 찾기
+                        content_selectors = [
+                            "div.view_cont", 
+                            ".view_content", 
+                            ".bbs_content",
+                            ".bbs_detail_content",
+                            "div[class*='view'] div[class*='cont']"
+                        ]
+                        
+                        content = ""
+                        for selector in content_selectors:
+                            try:
+                                content_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                                content = content_elem.text if content_elem else ""
+                                if content.strip():
+                                    logger.info(f"게시물 내용 추출 성공 (길이: {len(content)})")
+                                    break
+                            except:
+                                continue
+                        
+                        # 날짜 정보 추출
+                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                        if date_match:
+                            year = int(date_match.group(1))
+                            month = int(date_match.group(2))
+                            
+                            return {
+                                'content': content if content else "내용 없음",
+                                'date': {'year': year, 'month': month},
+                                'post_info': post
+                            }
+                        
+                    except Exception as content_err:
+                        logger.warning(f"게시물 내용 추출 중 오류: {str(content_err)}")
                     
                     # 날짜 정보 추출
                     date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
@@ -764,23 +810,11 @@ class MSITMonitor:
                         year = int(date_match.group(1))
                         month = int(date_match.group(2))
                         
-                        # 게시물 내용 추출
-                        try:
-                            content_div = driver.find_element(By.CLASS_NAME, "view_cont")
-                            content = content_div.text if content_div else ""
-                            
-                            return {
-                                'content': content,
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
-                        except NoSuchElementException:
-                            logger.warning("게시물 내용을 찾을 수 없음")
-                            return {
-                                'content': "내용 없음",
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
+                        return {
+                            'content': "내용 없음",
+                            'date': {'year': year, 'month': month},
+                            'post_info': post
+                        }
                     
                     return None
                     
@@ -804,8 +838,7 @@ class MSITMonitor:
             except TimeoutException:
                 if attempt < max_retries - 1:
                     logger.warning(f"페이지 로드 타임아웃, 재시도 {attempt+1}/{max_retries}")
-                    time.sleep(retry_delay)
-                    retry_delay *= 1.5  # 대기 시간 증가
+                    time.sleep(retry_delay * 2)  # 대기 시간 증가
                 else:
                     logger.error(f"{max_retries}번 시도 후 페이지 로드 실패")
                     
