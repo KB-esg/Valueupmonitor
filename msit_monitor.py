@@ -1798,7 +1798,7 @@ def access_iframe_direct(driver, file_params):
     return None
 
 def extract_from_synap_viewer(driver, file_params):
-    """향상된 Synap Document Viewer 데이터 추출"""
+    """향상된 Synap Document Viewer 데이터 추출 - 중첩된 iframe 처리"""
     view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
     logger.info(f"바로보기 URL 접근: {view_url}")
     
@@ -1839,159 +1839,239 @@ def extract_from_synap_viewer(driver, file_params):
                         logger.info(f"시트 탭 '{sheet_name}' 클릭")
                         time.sleep(3)  # 시트 전환 대기
                         
-                        # 시트 전환 확인
-                        active_tab = driver.find_element(By.CSS_SELECTOR, ".sheet-list__sheet-tab--on")
-                        if active_tab.text.strip() != sheet_name:
-                            logger.warning(f"시트 전환 실패: {active_tab.text.strip()} != {sheet_name}")
-                            continue
+                        # 활성 탭 변경 확인
+                        try:
+                            active_tab = driver.find_element(By.CSS_SELECTOR, ".sheet-list__sheet-tab--on")
+                            if active_tab.text.strip() != sheet_name:
+                                logger.warning(f"시트 전환 확인 실패: {active_tab.text.strip()} != {sheet_name}")
+                                # 재시도
+                                driver.execute_script("arguments[0].click();", tab)
+                                time.sleep(2)
+                        except Exception as tab_err:
+                            logger.warning(f"활성 탭 확인 중 오류: {str(tab_err)}")
                     except Exception as e:
                         logger.error(f"시트 전환 중 오류: {str(e)}")
                         continue
                 
-                # innerWrap iframe 처리
+                # 외부 iframe 처리
                 try:
-                    # iframe 확인
-                    iframe = WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.ID, "innerWrap"))
-                    )
+                    # 외부 iframe 식별
+                    outer_iframe = driver.find_element(By.ID, "innerWrap")
+                    outer_iframe_src = outer_iframe.get_attribute('src')
+                    logger.info(f"외부 iframe 소스: {outer_iframe_src}")
                     
-                    # iframe 소스 URL 확인
-                    iframe_src = iframe.get_attribute('src')
-                    logger.info(f"iframe 소스: {iframe_src}")
+                    # 외부 iframe으로 전환
+                    driver.switch_to.frame(outer_iframe)
+                    logger.info("외부 iframe으로 전환 완료")
                     
-                    # iframe으로 전환
-                    driver.switch_to.frame(iframe)
+                    # 내부에 중첩된 iframe이 있는지 확인
+                    inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
                     
-                    # 현재 iframe의 HTML 가져오기
-                    iframe_html = driver.execute_script("return document.documentElement.outerHTML;")
-                    
-                    # 방법 1: pandas read_html 사용 (가능할 경우)
-                    try:
+                    if inner_iframes:
+                        logger.info(f"{len(inner_iframes)}개의 내부 iframe 발견")
+                        inner_iframe = inner_iframes[0]  # 첫 번째 내부 iframe 사용
+                        
+                        # 내부 iframe 소스 확인
+                        inner_iframe_src = inner_iframe.get_attribute('src')
+                        logger.info(f"내부 iframe 소스: {inner_iframe_src}")
+                        
+                        # 내부 iframe으로 전환
+                        driver.switch_to.frame(inner_iframe)
+                        logger.info("내부 iframe으로 전환 완료")
+                        
+                        # 현재 페이지 소스 가져오기 (내부 iframe)
+                        inner_html = driver.page_source
+                        
+                        # BeautifulSoup으로 파싱
+                        soup = BeautifulSoup(inner_html, 'html.parser')
+                        
+                        # 테이블 또는 div 그리드 찾기
+                        tables = soup.find_all('table')
+                        
+                        if tables:
+                            logger.info(f"{len(tables)}개 테이블 발견")
+                            df = extract_table_from_html_element(tables[0])  # 첫 번째 테이블 처리
+                            if df is not None and not df.empty:
+                                all_data[sheet_name] = df
+                                logger.info(f"시트 '{sheet_name}'에서 테이블 추출 성공: {df.shape}")
+                        else:
+                            # div 기반 그리드 찾기
+                            grid_divs = soup.find_all('div', class_=lambda c: c and ('grid' in c.lower() or 'table' in c.lower()))
+                            if grid_divs:
+                                logger.info(f"{len(grid_divs)}개 그리드 div 발견")
+                                df = extract_data_from_div_grid(grid_divs[0])
+                                if df is not None and not df.empty:
+                                    all_data[sheet_name] = df
+                                    logger.info(f"시트 '{sheet_name}'에서 div 그리드 추출 성공: {df.shape}")
+                            else:
+                                # 구조화된 div 찾기
+                                content_divs = soup.find_all('div', class_=lambda c: c and ('content' in c.lower() or 'data' in c.lower()))
+                                if content_divs:
+                                    logger.info(f"{len(content_divs)}개 콘텐츠 div 발견")
+                                    df = extract_structured_data_from_divs(content_divs[0])
+                                    if df is not None and not df.empty:
+                                        all_data[sheet_name] = df
+                                        logger.info(f"시트 '{sheet_name}'에서 구조화된 데이터 추출 성공: {df.shape}")
+                                else:
+                                    logger.warning(f"시트 '{sheet_name}'에서 테이블/그리드 요소를 찾을 수 없음")
+                        
+                        # 내부 iframe에서 빠져나오기
+                        driver.switch_to.default_content()
+                        driver.switch_to.frame(outer_iframe)  # 다시 외부 iframe으로
+                    else:
+                        # 내부 iframe이 없는 경우 - 현재 iframe에서 직접 처리
+                        logger.info("내부 iframe이 없음, 외부 iframe에서 직접 처리")
+                        
+                        # 현재 iframe 소스 가져오기
+                        iframe_html = driver.page_source
+                        
+                        # 데이터 추출 시도
                         tables = pd.read_html(iframe_html)
                         if tables:
                             largest_table = max(tables, key=lambda t: t.shape[0] * t.shape[1])
                             all_data[sheet_name] = largest_table
-                            logger.info(f"pandas로 테이블 추출 성공: {largest_table.shape}")
+                            logger.info(f"외부 iframe에서 테이블 추출 성공: {largest_table.shape}")
                         else:
-                            logger.warning("pandas로 테이블을 찾지 못함")
-                    except Exception as e:
-                        logger.warning(f"pandas 테이블 추출 실패: {str(e)}")
-                    
-                    # 방법 2: BeautifulSoup으로 직접 테이블 추출 (방법 1 실패 시)
-                    if sheet_name not in all_data:
-                        try:
+                            # BeautifulSoup으로 시도
                             soup = BeautifulSoup(iframe_html, 'html.parser')
-                            
-                            # 모든 테이블 요소 찾기
                             tables = soup.find_all('table')
-                            logger.info(f"{len(tables)}개 테이블 요소 발견")
                             
                             if tables:
-                                # 가장 큰 테이블 선택
-                                largest_table = max(tables, key=lambda t: len(t.find_all('tr')))
-                                
-                                # 테이블 데이터 추출
-                                df = extract_table_from_html_element(largest_table)
-                                
+                                df = extract_table_from_html_element(tables[0])
                                 if df is not None and not df.empty:
                                     all_data[sheet_name] = df
-                                    logger.info(f"BeautifulSoup으로 테이블 추출 성공: {df.shape}")
-                                else:
-                                    logger.warning("BeautifulSoup으로 테이블 데이터 추출 실패")
+                                    logger.info(f"외부 iframe BeautifulSoup 테이블 추출 성공: {df.shape}")
                             else:
-                                logger.warning("테이블 요소를 찾을 수 없음")
-                                
-                                # 테이블이 없을 경우 특별 처리 시도
-                                divs = soup.find_all('div', class_=lambda c: c and ('table' in c.lower() or 'grid' in c.lower()))
-                                if divs:
-                                    logger.info(f"{len(divs)}개 테이블형 div 요소 발견")
-                                    # 테이블형 div에서 데이터 추출 시도
-                                    df = extract_data_from_div_grid(divs[0])
+                                # div 그리드 시도
+                                grid_divs = soup.find_all('div', class_=lambda c: c and ('grid' in c.lower() or 'table' in c.lower()))
+                                if grid_divs:
+                                    df = extract_data_from_div_grid(grid_divs[0])
                                     if df is not None and not df.empty:
                                         all_data[sheet_name] = df
-                                        logger.info(f"div에서 테이블 데이터 추출 성공: {df.shape}")
-                        except Exception as bs_err:
-                            logger.error(f"BeautifulSoup 테이블 추출 오류: {str(bs_err)}")
+                                        logger.info(f"외부 iframe div 그리드 추출 성공: {df.shape}")
+                                else:
+                                    logger.warning("외부 iframe에서 테이블/그리드 요소를 찾을 수 없음")
                     
-                    # 방법 3: JavaScript로 테이블 데이터 추출 (방법 1, 2 실패 시)
-                    if sheet_name not in all_data:
-                        try:
-                            # JavaScript로 테이블 데이터 직접 추출
-                            table_data = driver.execute_script("""
-                                // 테이블 요소 찾기
-                                var tables = document.getElementsByTagName('table');
-                                if (tables.length === 0) return null;
-                                
-                                // 가장 큰 테이블 찾기
-                                var largestTable = tables[0];
-                                var maxRows = largestTable.rows.length;
-                                for (var i = 1; i < tables.length; i++) {
-                                    if (tables[i].rows.length > maxRows) {
-                                        largestTable = tables[i];
-                                        maxRows = tables[i].rows.length;
-                                    }
-                                }
-                                
-                                // 테이블 데이터 추출
-                                var data = [];
-                                for (var i = 0; i < largestTable.rows.length; i++) {
-                                    var row = largestTable.rows[i];
-                                    var rowData = [];
-                                    for (var j = 0; j < row.cells.length; j++) {
-                                        rowData.push(row.cells[j].innerText.trim());
-                                    }
-                                    data.push(rowData);
-                                }
-                                return data;
-                            """)
-                            
-                            if table_data:
-                                # 헤더와 데이터 분리
-                                headers = table_data[0] if table_data else []
-                                data_rows = table_data[1:] if len(table_data) > 1 else []
-                                
-                                # DataFrame 생성
-                                df = pd.DataFrame(data_rows, columns=headers)
-                                all_data[sheet_name] = df
-                                logger.info(f"JavaScript로 테이블 추출 성공: {df.shape}")
-                            else:
-                                logger.warning("JavaScript로 테이블 데이터를 찾을 수 없음")
-                        except Exception as js_err:
-                            logger.error(f"JavaScript 테이블 추출 오류: {str(js_err)}")
-                    
-                    # 기본 프레임으로 돌아가기
+                    # iframe에서 빠져나오기
                     driver.switch_to.default_content()
                     
                 except Exception as iframe_err:
                     logger.error(f"iframe 처리 중 오류: {str(iframe_err)}")
-                    # 기본 프레임으로 돌아가기 시도
+                    # 기본 프레임으로 복귀 시도
                     try:
                         driver.switch_to.default_content()
                     except:
                         pass
             
+            # 결과 반환
             if all_data:
                 logger.info(f"{len(all_data)}개 시트에서 데이터 추출 완료")
                 return all_data
             else:
                 logger.warning("모든 시트에서 데이터 추출 실패")
-                return None
                 
+                # 마지막 시도: 전체 페이지 스크린샷을 이용한 OCR 제안
+                logger.info("스크린샷을 이용한 OCR 데이터 추출을 고려해 보세요")
+                return None
+            
         except Exception as e:
-            logger.error(f"시트 처리 중 오류 발생: {str(e)}")
+            logger.error(f"Synap Document Viewer 처리 중 오류: {str(e)}")
             return None
     else:
-        logger.warning(f"Synap Document Viewer로 리디렉션되지 않음: {current_url}")
+        # 직접 파일 다운로드 시도
+        return try_direct_file_download(file_params)
+
+def extract_structured_data_from_divs(parent_div):
+    """
+    구조화된 div 컨테이너에서 테이블 형식의 데이터 추출
+    """
+    try:
+        # 후보 행 요소들 찾기
+        row_candidates = [
+            parent_div.find_all('div', class_=lambda c: c and ('row' in c.lower())),
+            parent_div.find_all('div', style=lambda s: s and ('display: flex' in s.lower() or 'display:flex' in s.lower())),
+            parent_div.find_all('div', recursive=False)  # 최상위 자식 div들
+        ]
         
-        # Excel 파일 다운로드 시도
-        try:
-            direct_download_url = f"https://www.msit.go.kr/bbs/fileDown.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
-            logger.info(f"직접 다운로드 시도: {direct_download_url}")
-            
-            return download_and_process_file(direct_download_url)
-        except Exception as download_err:
-            logger.error(f"파일 다운로드 시도 중 오류: {str(download_err)}")
+        # 가장 많은 요소를 가진 후보 선택
+        row_elements = max(row_candidates, key=len) if row_candidates else []
+        
+        if not row_elements:
+            logger.warning("구조화된 행 요소를 찾을 수 없음")
             return None
+        
+        logger.info(f"{len(row_elements)}개 행 요소 감지")
+        
+        # 첫 번째 행이 헤더인지 확인
+        first_row = row_elements[0]
+        header_candidates = [
+            first_row.find_all('div', class_=lambda c: c and ('header' in c.lower() or 'head' in c.lower() or 'title' in c.lower())),
+            first_row.find_all('div', style=lambda s: s and ('font-weight: bold' in s.lower() or 'font-weight:bold' in s.lower())),
+            first_row.find_all('div', recursive=False)  # 첫 번째 행의 직계 자식들
+        ]
+        
+        # 가장 많은 요소를 가진 헤더 후보 선택
+        header_elements = max(header_candidates, key=len) if header_candidates else []
+        
+        # 헤더 텍스트 추출
+        headers = []
+        if header_elements:
+            headers = [he.get_text(strip=True) for he in header_elements]
+            # 빈 헤더 처리
+            headers = [f"Column_{i+1}" if not h else h for i, h in enumerate(headers)]
+        
+        # 데이터 행 처리 (첫 번째 행이 헤더인 경우 건너뛰기)
+        data_rows = []
+        for row_idx, row in enumerate(row_elements):
+            if row_idx == 0 and header_elements:
+                continue  # 헤더 행 건너뛰기
+            
+            # 셀 요소 찾기
+            cell_candidates = [
+                row.find_all('div', class_=lambda c: c and ('cell' in c.lower() or 'col' in c.lower())),
+                row.find_all('span', recursive=False),
+                row.find_all('div', recursive=False)  # 행의 직계 자식들
+            ]
+            
+            # 가장 많은 요소를 가진 셀 후보 선택
+            cell_elements = max(cell_candidates, key=len) if cell_candidates else []
+            
+            if cell_elements:
+                row_data = [ce.get_text(strip=True) for ce in cell_elements]
+                data_rows.append(row_data)
+        
+        if not data_rows:
+            logger.warning("데이터 행을 추출할 수 없음")
+            return None
+        
+        # 모든 행의 최대 길이 확인
+        max_cols = max([len(row) for row in data_rows])
+        
+        # 헤더가 없거나 길이가 맞지 않는 경우 생성
+        if not headers or len(headers) != max_cols:
+            headers = [f"Column_{i+1}" for i in range(max_cols)]
+        
+        # 행 길이 정규화
+        normalized_rows = []
+        for row in data_rows:
+            if len(row) < max_cols:
+                normalized_rows.append(row + [''] * (max_cols - len(row)))
+            else:
+                normalized_rows.append(row[:max_cols])
+        
+        # DataFrame 생성
+        df = pd.DataFrame(normalized_rows, columns=headers)
+        
+        # 빈 행/열 제거
+        df = df.loc[:, ~df.isna().all() & ~(df == '').all()]
+        df = df.loc[~df.isna().all(axis=1) & ~(df == '').all(axis=1)]
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"구조화된 div에서 데이터 추출 중 오류: {str(e)}")
+        return None
+
 
 def extract_table_from_html_element(table_element):
     """
@@ -2172,6 +2252,136 @@ def extract_data_from_div_grid(div_element):
         
     except Exception as e:
         logger.error(f"div 그리드 데이터 추출 중 오류: {str(e)}")
+        return None
+
+def try_direct_file_download(file_params):
+    """
+    직접 파일 다운로드 시도 (Synap Document Viewer 실패 시)
+    """
+    try:
+        # 직접 다운로드 URL 구성
+        download_url = f"https://www.msit.go.kr/bbs/fileDown.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+        logger.info(f"직접 다운로드 시도: {download_url}")
+        
+        # Session 객체 생성 (쿠키 유지)
+        session = requests.Session()
+        
+        # User-Agent 및 Referer 설정
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+            'Referer': 'https://www.msit.go.kr/'
+        }
+        
+        # 다운로드 요청
+        response = session.get(download_url, headers=headers, stream=True, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"파일 다운로드 실패, 상태 코드: {response.status_code}")
+            return None
+        
+        # Content-Type 및 Content-Disposition 확인
+        content_type = response.headers.get('Content-Type', '')
+        content_disposition = response.headers.get('Content-Disposition', '')
+        
+        logger.info(f"다운로드 Content-Type: {content_type}")
+        logger.info(f"Content-Disposition: {content_disposition}")
+        
+        # 파일명 추출 (Content-Disposition에서)
+        filename = None
+        if content_disposition:
+            filename_match = re.search(r'filename[^;=\n]*=(([\'"]).*?\2|[^;\n]*)', content_disposition)
+            if filename_match:
+                filename = filename_match.group(1).strip('"\'')
+                # URL 인코딩 처리
+                filename = urllib.parse.unquote(filename)
+                logger.info(f"파일명 추출: {filename}")
+        
+        # 파일 확장자 결정
+        file_ext = '.tmp'
+        if filename:
+            _, ext = os.path.splitext(filename)
+            if ext:
+                file_ext = ext
+        elif 'excel' in content_type.lower() or 'spreadsheet' in content_type.lower():
+            file_ext = '.xlsx'
+        elif 'csv' in content_type.lower():
+            file_ext = '.csv'
+        elif 'text/plain' in content_type.lower():
+            file_ext = '.txt'
+        
+        logger.info(f"파일 확장자: {file_ext}")
+        
+        # 임시 파일 생성
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            temp_file_path = temp_file.name
+            
+            # 파일 저장
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    temp_file.write(chunk)
+        
+        logger.info(f"파일 다운로드 완료: {temp_file_path}")
+        
+        # 파일 형식에 따라 처리
+        all_data = {}
+        
+        if file_ext.lower() in ['.xlsx', '.xls']:
+            # Excel 파일 처리
+            try:
+                xl = pd.ExcelFile(temp_file_path)
+                
+                # 모든 시트 처리
+                for sheet_name in xl.sheet_names:
+                    df = pd.read_excel(xl, sheet_name=sheet_name)
+                    
+                    # 빈 시트 제외
+                    if not df.empty:
+                        all_data[sheet_name] = df
+                        logger.info(f"시트 '{sheet_name}' 추출 완료: {df.shape}")
+                
+                if not all_data:
+                    logger.warning("Excel 파일에서 유효한 데이터를 찾을 수 없음")
+            except Exception as excel_err:
+                logger.error(f"Excel 파일 처리 중 오류: {str(excel_err)}")
+        
+        elif file_ext.lower() == '.csv':
+            # CSV 파일 처리
+            try:
+                # 인코딩 자동 감지
+                import chardet
+                with open(temp_file_path, 'rb') as f:
+                    result = chardet.detect(f.read())
+                encoding = result['encoding']
+                
+                # CSV 파일 읽기
+                df = pd.read_csv(temp_file_path, encoding=encoding)
+                
+                # 파일명에서 시트명 추출 (확장자 제외)
+                sheet_name = os.path.basename(filename).rsplit('.', 1)[0] if filename else "Sheet1"
+                all_data[sheet_name] = df
+                logger.info(f"CSV 시트 '{sheet_name}' 추출 완료: {df.shape}")
+                
+            except Exception as csv_err:
+                logger.error(f"CSV 파일 처리 중 오류: {str(csv_err)}")
+        
+        # 임시 파일 삭제
+        try:
+            os.unlink(temp_file_path)
+            logger.info(f"임시 파일 삭제 완료: {temp_file_path}")
+        except Exception as unlink_err:
+            logger.warning(f"임시 파일 삭제 실패: {str(unlink_err)}")
+        
+        if all_data:
+            return all_data
+        else:
+            logger.warning("파일에서 데이터를 추출할 수 없음")
+            return None
+            
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"파일 다운로드 요청 중 오류: {str(req_err)}")
+        return None
+    except Exception as e:
+        logger.error(f"파일 다운로드 처리 중 오류: {str(e)}")
         return None
 
 def download_and_process_file(download_url):
@@ -2475,7 +2685,9 @@ def determine_report_type(title):
 
 
 def update_google_sheets(client, data):
-    """Google Sheets 업데이트"""
+    """
+    첨부파일의 형태를 유지하면서 Google Sheets 업데이트
+    """
     if not client or not data:
         logger.error("Google Sheets 업데이트 불가: 클라이언트 또는 데이터 없음")
         return False
@@ -2489,7 +2701,7 @@ def update_google_sheets(client, data):
             year = data['date']['year']
             month = data['date']['month']
         else:
-            # 제목에서 날짜 정보 추출 (향상된 정규식)
+            # 제목에서 날짜 정보 추출
             date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
             if not date_match:
                 logger.error(f"제목에서 날짜를 추출할 수 없음: {post_info['title']}")
@@ -2500,9 +2712,8 @@ def update_google_sheets(client, data):
         
         # 날짜 문자열 포맷
         date_str = f"{year}년 {month}월"
-        report_type = determine_report_type(post_info['title'])
         
-        # 스프레드시트 열기 (재시도 로직 포함)
+        # 스프레드시트 열기
         spreadsheet = None
         retry_count = 0
         max_retries = 3
@@ -2546,24 +2757,32 @@ def update_google_sheets(client, data):
                 return False
         
         # 시트 데이터 처리
-        if 'sheets' in data:
-            # 여러 시트 처리
+        if 'sheets' in data or all(isinstance(v, pd.DataFrame) for v in data.values() if not isinstance(v, str) and not isinstance(v, dict)):
+            # sheets 키가 있거나 데이터프레임 값들이 있는 경우
+            sheets_data = data.get('sheets', data)
+            
+            # post_info와 같은 비 DataFrame 항목 제외
+            sheets_data = {k: v for k, v in sheets_data.items() if isinstance(v, pd.DataFrame)}
+            
+            # 모든 시트 업데이트
             success_count = 0
-            for sheet_name, df in data['sheets'].items():
+            for sheet_name, df in sheets_data.items():
                 if df is not None and not df.empty:
-                    success = update_single_sheet(spreadsheet, sheet_name, df, date_str)
+                    # 첨부파일의 시트명 그대로 사용
+                    success = update_sheet_with_raw_data(spreadsheet, sheet_name, df, date_str)
                     if success:
                         success_count += 1
                     else:
                         logger.warning(f"시트 '{sheet_name}' 업데이트 실패")
             
-            logger.info(f"전체 {len(data['sheets'])}개 시트 중 {success_count}개 업데이트 성공")
+            logger.info(f"전체 {len(sheets_data)}개 시트 중 {success_count}개 업데이트 성공")
             return success_count > 0
-            
+        
         elif 'dataframe' in data:
-            # 단일 데이터프레임 처리
-            return update_single_sheet(spreadsheet, report_type, data['dataframe'], date_str)
-            
+            # 단일 데이터프레임인 경우
+            sheet_name = post_info.get('title', '통신 통계')
+            return update_sheet_with_raw_data(spreadsheet, sheet_name, data['dataframe'], date_str)
+        
         else:
             logger.error("업데이트할 데이터가 없습니다")
             return False
@@ -2571,7 +2790,6 @@ def update_google_sheets(client, data):
     except Exception as e:
         logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
         return False
-
 
 def update_single_sheet(spreadsheet, sheet_name, df, date_str):
     """단일 시트 업데이트"""
@@ -2682,6 +2900,134 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
         return False
 
 
+def update_sheet_with_raw_data(spreadsheet, sheet_name, df, date_str):
+    """
+    원본 데이터 구조를 유지하면서 시트 업데이트
+    """
+    try:
+        # API 속도 제한 방지를 위한 지연 시간
+        time.sleep(1)
+        
+        # 시트명 정리 (특수 문자 제거)
+        clean_sheet_name = re.sub(r'[\\/*[\]?:]', '', sheet_name)
+        if not clean_sheet_name:
+            clean_sheet_name = "Sheet1"
+        elif len(clean_sheet_name) > 100:
+            clean_sheet_name = clean_sheet_name[:97] + "..."
+        
+        # 워크시트 찾기 또는 생성
+        try:
+            worksheet = spreadsheet.worksheet(clean_sheet_name)
+            logger.info(f"기존 워크시트 찾음: {clean_sheet_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            # 새 워크시트 생성
+            worksheet = spreadsheet.add_worksheet(title=clean_sheet_name, rows="1000", cols="50")
+            logger.info(f"새 워크시트 생성: {clean_sheet_name}")
+            
+            # 헤더 추가
+            worksheet.update_cell(1, 1, "참고")
+            worksheet.update_cell(2, 1, f"{date_str} 데이터를 추출할 수 있습니다")
+            time.sleep(1)  # API 속도 제한 방지
+        
+        # 데이터프레임 전처리
+        df = df.fillna('')  # NaN 값을 빈 문자열로 변환
+        
+        # 헤더와 데이터 준비
+        headers = df.columns.tolist()
+        values = df.values.tolist()
+        
+        # 전체 업데이트 데이터 준비
+        update_data = [headers]  # 첫 번째 행: 헤더
+        update_data.extend(values)  # 나머지 행: 데이터
+        
+        # 행과 열 수 계산
+        num_rows = len(update_data)
+        num_cols = max(len(row) for row in update_data)
+        
+        # 업데이트할 셀 범위
+        range_str = f"A1:{chr(65 + num_cols - 1)}{num_rows}"
+        
+        # 시트 초기화 (기존 데이터 지우기)
+        try:
+            worksheet.clear()
+            logger.info(f"워크시트 '{clean_sheet_name}' 초기화 완료")
+        except Exception as clear_err:
+            logger.warning(f"워크시트 초기화 중 오류: {str(clear_err)}")
+        
+        # 시트 크기 조정 (필요한 경우)
+        try:
+            current_rows = worksheet.row_count
+            current_cols = worksheet.col_count
+            
+            if num_rows > current_rows or num_cols > current_cols:
+                # 필요한 행/열 추가
+                new_rows = max(num_rows, current_rows)
+                new_cols = max(num_cols, current_cols)
+                worksheet.resize(rows=new_rows, cols=new_cols)
+                logger.info(f"워크시트 크기 조정: {new_rows}행 x {new_cols}열")
+        except Exception as resize_err:
+            logger.warning(f"워크시트 크기 조정 중 오류: {str(resize_err)}")
+        
+        # 배치 업데이트 시도
+        try:
+            worksheet.update(range_str, update_data)
+            logger.info(f"워크시트 '{clean_sheet_name}' 일괄 업데이트 완료: {len(update_data)}행 x {num_cols}열")
+            
+            # 날짜 정보 추가 (A1 셀에)
+            try:
+                worksheet.update_cell(1, 1, f"{date_str} {sheet_name}")
+                logger.info(f"날짜 정보 추가 완료: {date_str}")
+            except Exception as date_err:
+                logger.warning(f"날짜 정보 추가 중 오류: {str(date_err)}")
+            
+            return True
+        except gspread.exceptions.APIError as api_err:
+            logger.warning(f"일괄 업데이트 중 API 오류: {str(api_err)}")
+            
+            # 속도 제한 또는 용량 초과 시 분할 업데이트 시도
+            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                logger.info("분할 업데이트 시도 중...")
+                
+                # API 제한 대비 분할 업데이트
+                batch_size = 100  # 한 번에 업데이트할 행 수
+                success = True
+                
+                # 헤더 먼저 업데이트
+                try:
+                    header_range = f"A1:{chr(65 + num_cols - 1)}1"
+                    worksheet.update(header_range, [headers])
+                    logger.info("헤더 업데이트 완료")
+                    time.sleep(2)  # API 속도 제한 방지
+                except Exception as header_err:
+                    logger.warning(f"헤더 업데이트 중 오류: {str(header_err)}")
+                    success = False
+                
+                # 데이터 분할 업데이트
+                for i in range(0, len(values), batch_size):
+                    batch = values[i:i+batch_size]
+                    start_row = i + 2  # 헤더 행(1) 이후부터 시작
+                    end_row = start_row + len(batch) - 1
+                    
+                    batch_range = f"A{start_row}:{chr(65 + num_cols - 1)}{end_row}"
+                    
+                    try:
+                        worksheet.update(batch_range, batch)
+                        logger.info(f"배치 {i//batch_size + 1} 업데이트 완료: 행 {start_row}-{end_row}")
+                        time.sleep(2)  # API 속도 제한 방지
+                    except Exception as batch_err:
+                        logger.error(f"배치 {i//batch_size + 1} 업데이트 중 오류: {str(batch_err)}")
+                        success = False
+                
+                return success
+            else:
+                # 기타 API 오류
+                logger.error(f"API 오류: {str(api_err)}")
+                return False
+        
+    except Exception as e:
+        logger.error(f"시트 업데이트 중 오류: {str(e)}")
+        return False
+
 def update_sheet_from_dataframe(worksheet, df, col_idx):
     """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
     try:
@@ -2756,6 +3102,211 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
         
     except Exception as e:
         logger.error(f"데이터프레임으로 워크시트 업데이트 중 오류: {str(e)}")
+        return False
+
+def navigate_through_iframes(driver, target_frame_pattern=None):
+    """
+    중첩된 iframe 구조를 탐색하며 모든 iframe을 확인
+    특정 패턴의 iframe을 찾으면 해당 iframe으로 이동
+    
+    :param driver: Selenium WebDriver 객체
+    :param target_frame_pattern: 찾고자 하는 iframe 소스 URL의 패턴 (정규식 문자열)
+    :return: (성공 여부, iframe 경로 리스트)
+    """
+    iframe_path = []  # iframe 경로 추적 (인덱스 저장)
+    visited_frames = set()  # 이미 방문한 프레임 소스 URL
+    
+    def explore_iframe(depth=0, max_depth=5):
+        """재귀적으로 iframe 탐색"""
+        if depth >= max_depth:
+            return False  # 최대 깊이 제한
+        
+        # 현재 프레임의 URL
+        current_url = driver.current_url
+        current_src = f"{current_url}#{depth}"
+        
+        if current_src in visited_frames:
+            return False  # 이미 방문한 프레임
+        
+        visited_frames.add(current_src)
+        logger.info(f"프레임 깊이 {depth}: URL {current_url}")
+        
+        # 현재 프레임에서 iframe 요소 찾기
+        try:
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            logger.info(f"프레임 깊이 {depth}에서 {len(iframes)}개 iframe 발견")
+            
+            # 각 iframe 확인
+            for i, iframe in enumerate(iframes):
+                try:
+                    iframe_src = iframe.get_attribute('src')
+                    iframe_id = iframe.get_attribute('id') or f"iframe_{i}"
+                    logger.info(f"  iframe {i}: id={iframe_id}, src={iframe_src}")
+                    
+                    # 대상 패턴에 매칭되는지 확인
+                    if target_frame_pattern and iframe_src and re.search(target_frame_pattern, iframe_src):
+                        logger.info(f"대상 패턴과 일치하는 iframe 발견: {iframe_src}")
+                        driver.switch_to.frame(iframe)
+                        iframe_path.append(i)
+                        return True
+                    
+                    # 해당 iframe으로 이동
+                    driver.switch_to.frame(iframe)
+                    iframe_path.append(i)
+                    
+                    # 재귀적으로 해당 iframe 내부 탐색
+                    if explore_iframe(depth + 1, max_depth):
+                        return True  # 대상 찾음
+                    
+                    # 찾지 못했으면 부모 프레임으로 복귀
+                    driver.switch_to.parent_frame()
+                    iframe_path.pop()
+                    
+                except Exception as frame_err:
+                    logger.warning(f"iframe {i} 탐색 중 오류: {str(frame_err)}")
+                    # 오류 발생 시 부모 프레임으로 복귀 시도
+                    try:
+                        driver.switch_to.parent_frame()
+                        if iframe_path:
+                            iframe_path.pop()
+                    except:
+                        pass
+            
+            return False  # 모든 iframe 탐색했지만 찾지 못함
+            
+        except Exception as e:
+            logger.error(f"iframe 탐색 중 오류: {str(e)}")
+            return False
+    
+    # 기본 프레임에서 시작
+    driver.switch_to.default_content()
+    iframe_path = []
+    
+    # iframe 탐색 시작
+    result = explore_iframe()
+    
+    return result, iframe_path
+
+def enhance_stealth_with_cdp(driver):
+    """
+    Chrome DevTools Protocol을 사용하여 향상된 스텔스 기능 적용
+    """
+    try:
+        # 탐지 방지 스크립트 주입
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                // navigator.webdriver 속성 숨기기
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                
+                // 권한 감지 우회
+                if (navigator.permissions) {
+                    navigator.permissions.__proto__.query = navigator.permissions.__proto__.query || (() => {});
+                    const originalQuery = navigator.permissions.__proto__.query;
+                    navigator.permissions.__proto__.query = function() {
+                        const promiseResult = Promise.resolve({state: "prompt", onchange: null});
+                        promiseResult.state = "prompt";
+                        return promiseResult;
+                    };
+                }
+                
+                // 브라우저 지문 감지 방지
+                const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    // UNMASKED_RENDERER_WEBGL or UNMASKED_VENDOR_WEBGL
+                    if (parameter === 37446) {
+                        return "Intel Open Source Technology Center";
+                    }
+                    if (parameter === 37447) {
+                        return "Mesa DRI Intel(R) Haswell Mobile";
+                    }
+                    return originalGetParameter.apply(this, arguments);
+                };
+                
+                // Chrome 객체 정의
+                window.chrome = {
+                    app: {
+                        isInstalled: false,
+                        InstallState: {
+                            DISABLED: 'disabled',
+                            INSTALLED: 'installed',
+                            NOT_INSTALLED: 'not_installed'
+                        },
+                        RunningState: {
+                            CANNOT_RUN: 'cannot_run',
+                            READY_TO_RUN: 'ready_to_run',
+                            RUNNING: 'running'
+                        }
+                    },
+                    runtime: {
+                        OnInstalledReason: {
+                            CHROME_UPDATE: 'chrome_update',
+                            INSTALL: 'install',
+                            SHARED_MODULE_UPDATE: 'shared_module_update',
+                            UPDATE: 'update'
+                        },
+                        OnRestartRequiredReason: {
+                            APP_UPDATE: 'app_update',
+                            OS_UPDATE: 'os_update',
+                            PERIODIC: 'periodic'
+                        },
+                        PlatformArch: {
+                            ARM: 'arm',
+                            ARM64: 'arm64',
+                            MIPS: 'mips',
+                            MIPS64: 'mips64',
+                            X86_32: 'x86-32',
+                            X86_64: 'x86-64'
+                        },
+                        PlatformNaclArch: {
+                            ARM: 'arm',
+                            MIPS: 'mips',
+                            MIPS64: 'mips64',
+                            X86_32: 'x86-32',
+                            X86_64: 'x86-64'
+                        },
+                        PlatformOs: {
+                            ANDROID: 'android',
+                            CROS: 'cros',
+                            LINUX: 'linux',
+                            MAC: 'mac',
+                            OPENBSD: 'openbsd',
+                            WIN: 'win'
+                        },
+                        RequestUpdateCheckStatus: {
+                            NO_UPDATE: 'no_update',
+                            THROTTLED: 'throttled',
+                            UPDATE_AVAILABLE: 'update_available'
+                        }
+                    }
+                };
+                
+                // 언어 설정
+                Object.defineProperty(navigator, 'language', {
+                    get: function() {
+                        return "ko-KR";
+                    }
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: function() {
+                        return ["ko-KR", "ko", "en-US", "en"];
+                    }
+                });
+                
+                // 플랫폼 설정
+                Object.defineProperty(navigator, 'platform', {
+                    get: function() {
+                        return "Win32";
+                    }
+                });
+            """
+        })
+        
+        logger.info("CDP를 통한 향상된 스텔스 설정 적용 완료")
+        return True
+    except Exception as e:
+        logger.error(f"CDP 스텔스 설정 중 오류: {str(e)}")
         return False
 
 
