@@ -65,7 +65,7 @@ jobs:
 
     - name: Fix indentation issues
       run: |
-        cat > fix_indentation.py << EOF
+        cat > fix_indentation.py << 'EOF'
 #!/usr/bin/env python
 
 def convert_tabs_to_spaces():
@@ -88,7 +88,7 @@ EOF
 
     - name: Create document viewer script
       run: |
-        cat > document_capture.py << EOF
+        cat > document_capture.py << 'EOF'
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -260,7 +260,7 @@ EOF
 
     - name: Create HTML processor script
       run: |
-        cat > process_html.py << EOF
+        cat > process_html.py << 'EOF'
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
