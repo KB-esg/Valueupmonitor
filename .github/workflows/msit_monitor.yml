@@ -61,6 +61,7 @@ jobs:
       run: |
         mkdir -p downloads
         mkdir -p screenshots
+        mkdir -p html_content  # HTML 내용을 저장할 디렉토리 추가
 
     - name: Fix indentation issues
       run: |
@@ -85,9 +86,9 @@ jobs:
     
         python fix_indentation.py
 
-    - name: Create screenshot script
+    - name: Create document viewer script
       run: |
-        cat > take_screenshot.py << 'EOF'
+        cat > document_capture.py << 'EOF'
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.chrome.options import Options
@@ -99,11 +100,14 @@ jobs:
         import sys
         import os
         import random
+        import json
+        import re
 
-        def take_screenshots(url=None, filename_prefix="screenshot"):
+        def capture_document_content(url, file_id, order_id):
             options = Options()
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
+            options.add_argument("--headless")
             options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option("useAutomationExtension", False)
@@ -120,75 +124,137 @@ jobs:
             driver = webdriver.Chrome(service=Service(driver_path), options=options)
             
             try:
-                if url:
-                    print(f"URL 접속: {url}")
-                    driver.get(url)
-                    time.sleep(5)
-                    driver.save_screenshot(f"{filename_prefix}.png")
-                    print(f"스크린샷 저장 완료: {filename_prefix}.png")
-                else:
-                    print("MSIT 메인 페이지 접속...")
-                    driver.get('https://www.msit.go.kr')
-                    time.sleep(5)
-                    driver.save_screenshot('main_page.png')
-                    print("메인 페이지 스크린샷 저장 완료")
-                    
-                    try:
-                        print("통계정보 버튼 찾기...")
-                        stats_button = WebDriverWait(driver, 10).until(
-                            EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '통계정보')]"))
-                        )
-                        stats_button.click()
-                        print("통계정보 버튼 클릭 성공")
-                        time.sleep(5)
-                        driver.save_screenshot('stats_page_after_click.png')
-                        print("통계정보 페이지 스크린샷 저장 완료")
-                    except Exception as click_error:
-                        print(f"버튼 클릭 오류: {str(click_error)}")
-                    
-                    print("통계정보 페이지 직접 접속...")
-                    driver.get('https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99')
-                    time.sleep(5)
-                    driver.save_screenshot('stats_page_direct.png')
-                    print("통계정보 페이지 직접 접속 스크린샷 저장 완료")
-                    
-                    with open('page_source.html', 'w', encoding='utf-8') as f:
-                        f.write(driver.page_source)
-                    
-                    if "시스템 점검 안내" in driver.page_source:
-                        print("시스템 점검 안내 페이지 감지됨")
-                        driver.save_screenshot('system_maintenance.png')
+                print(f"문서 뷰어 URL 접속: {url}")
+                driver.get(url)
+                print("문서 로딩 대기 중...")
+                time.sleep(10)  # 문서 뷰어 로딩 대기
+                
+                driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_screenshot.png")
+                print(f"문서 뷰어 스크린샷 저장 완료")
+                
+                # HTML 내용 저장
+                html_content = driver.page_source
+                with open(f"html_content/document_{file_id}_{order_id}_content.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                print(f"HTML 내용 저장 완료")
+                
+                # 시트 탭 확인
+                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-tab")
+                sheet_names = []
+                if sheet_tabs:
+                    print(f"{len(sheet_tabs)}개 시트 탭 발견")
+                    for idx, tab in enumerate(sheet_tabs):
+                        sheet_name = tab.get_attribute("textContent") or f"Sheet{idx+1}"
+                        sheet_names.append(sheet_name.strip())
+                        print(f"시트 {idx+1}: {sheet_name.strip()}")
+                        
+                        # 각 시트 탭 클릭하고 내용 저장
                         try:
-                            driver.execute_script("document.querySelectorAll('.overlay').forEach(e => e.remove());")
-                            driver.save_screenshot('after_overlay_removal.png')
-                            print("오버레이 제거 시도 후 스크린샷 저장 완료")
-                        except Exception as overlay_err:
-                            print(f"오버레이 제거 오류: {str(overlay_err)}")
+                            tab.click()
+                            time.sleep(3)  # 탭 전환 대기
+                            
+                            driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.png")
+                            
+                            sheet_html = driver.page_source
+                            with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.html", "w", encoding="utf-8") as f:
+                                f.write(sheet_html)
+                            print(f"시트 {idx+1} HTML 내용 저장 완료")
+                            
+                            # JavaScript를 통해 테이블 내용 추출 시도
+                            try:
+                                tables_data = driver.execute_script('''
+                                    const tables = document.querySelectorAll('table');
+                                    let result = [];
+                                    
+                                    tables.forEach((table, tableIndex) => {
+                                        let tableData = {
+                                            id: tableIndex,
+                                            rows: [],
+                                            dimensions: { rows: 0, cols: 0 }
+                                        };
+                                        
+                                        const rows = table.querySelectorAll('tr');
+                                        tableData.dimensions.rows = rows.length;
+                                        
+                                        rows.forEach((row, rowIndex) => {
+                                            const cells = row.querySelectorAll('td, th');
+                                            if (rowIndex === 0) {
+                                                tableData.dimensions.cols = cells.length;
+                                            }
+                                            
+                                            let rowData = [];
+                                            cells.forEach(cell => {
+                                                rowData.push(cell.textContent.trim());
+                                            });
+                                            
+                                            tableData.rows.push(rowData);
+                                        });
+                                        
+                                        result.push(tableData);
+                                    });
+                                    
+                                    return result;
+                                ''')
+                                
+                                if tables_data:
+                                    with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}_tables.json", "w", encoding="utf-8") as f:
+                                        json.dump(tables_data, f, ensure_ascii=False, indent=2)
+                                    print(f"시트 {idx+1}에서 {len(tables_data)}개 테이블 데이터 추출 완료")
+                                else:
+                                    print(f"시트 {idx+1}에서 테이블 데이터 추출 실패")
+                            except Exception as js_error:
+                                print(f"테이블 데이터 추출 JavaScript 오류: {str(js_error)}")
+                                
+                        except Exception as click_error:
+                            print(f"시트 탭 클릭 오류: {str(click_error)}")
+                            
+                    # 시트 정보 저장
+                    with open(f"html_content/document_{file_id}_{order_id}_sheets.json", "w", encoding="utf-8") as f:
+                        json.dump(sheet_names, f, ensure_ascii=False, indent=2)
+                else:
+                    print("시트 탭을 찾을 수 없음")
+                    
+                # iframe 내용 확인
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                if iframes:
+                    print(f"{len(iframes)}개 iframe 발견")
+                    for idx, iframe in enumerate(iframes):
+                        try:
+                            driver.switch_to.frame(iframe)
+                            iframe_html = driver.page_source
+                            with open(f"html_content/document_{file_id}_{order_id}_iframe_{idx+1}.html", "w", encoding="utf-8") as f:
+                                f.write(iframe_html)
+                            print(f"iframe {idx+1} 내용 저장 완료")
+                            driver.switch_to.default_content()  # 기본 컨텍스트로 복귀
+                        except Exception as iframe_error:
+                            print(f"iframe {idx+1} 처리 오류: {str(iframe_error)}")
+                            driver.switch_to.default_content()
+                    
+                return True
+                
             except Exception as e:
-                print(f'스크린샷 오류: {str(e)}')
+                print(f'문서 내용 캡처 오류: {str(e)}')
+                return False
             finally:
                 print("WebDriver 종료")
                 driver.quit()
         
         if __name__ == "__main__":
-            if len(sys.argv) > 1:
-                take_screenshots(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "custom_screenshot")
+            if len(sys.argv) < 2:
+                print("사용법: python document_capture.py <문서뷰어URL> <파일ID> <순서ID>")
+                sys.exit(1)
+                
+            url = sys.argv[1]
+            file_id = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+            order_id = sys.argv[3] if len(sys.argv) > 3 else "1"
+            
+            success = capture_document_content(url, file_id, order_id)
+            if success:
+                print("문서 내용 캡처 성공")
             else:
-                take_screenshots()
+                print("문서 내용 캡처 실패")
+                sys.exit(1)
         EOF
-
-    - name: Test screenshot functionality
-      run: |
-        export DISPLAY=:99
-        Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
-        sleep 2
-        
-        # Python 버전 확인
-        python --version
-        
-        # 테스트 스크립트 실행
-        echo "스크린샷 테스트 스크립트 실행..."
-        python take_screenshot.py
 
     - name: Run monitoring script
       env:
@@ -202,68 +268,146 @@ jobs:
         PYTHONIOENCODING: utf-8
       run: |
         export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+        sleep 2
         
         # 모니터링 스크립트 실행
         echo "모니터링 스크립트 실행..."
         python msit_monitor.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
 
-    - name: Take screenshots (always)
+    - name: Capture document content (if document view URL exists)
       if: always()
       run: |
         export DISPLAY=:99
         
-        # 간단한 스크린샷 스크립트 생성
-        cat > simple_screenshot.py << 'EOF'
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from webdriver_manager.chrome import ChromeDriverManager
-        import time
-        import random
+        # 로그 파일에서 바로보기 URL 추출
+        DOCUMENT_VIEW_URL=$(grep -o "바로보기 URL: [^ ]*" *.log 2>/dev/null | head -1 | sed 's/바로보기 URL: //')
+        
+        if [ -n "$DOCUMENT_VIEW_URL" ]; then
+          echo "바로보기 URL 발견: $DOCUMENT_VIEW_URL"
+          
+          # URL에서 파일 ID와 순서 ID 추출
+          FILE_ID=$(echo $DOCUMENT_VIEW_URL | grep -o "atchFileNo=[0-9]*" | sed 's/atchFileNo=//')
+          ORDER_ID=$(echo $DOCUMENT_VIEW_URL | grep -o "fileOrdr=[0-9]*" | sed 's/fileOrdr=//')
+          
+          echo "문서 캡처 스크립트 실행..."
+          python document_capture.py "$DOCUMENT_VIEW_URL" "$FILE_ID" "$ORDER_ID"
+          
+          # 캡처된 HTML 파일 확인
+          echo "캡처된 HTML 파일 목록:"
+          ls -la html_content/
+        else
+          echo "바로보기 URL을 찾을 수 없음"
+        fi
 
-        options = Options()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        
-        # 고유한 사용자 데이터 디렉터리 사용
-        temp_dir = f"/tmp/chrome-data-{random.randint(1000, 9999)}-{int(time.time())}"
-        options.add_argument(f"--user-data-dir={temp_dir}")
-        
-        print(f"ChromeDriver 설치 시작 (simple_screenshot.py)...")
-        driver_path = ChromeDriverManager().install()
-        print(f"ChromeDriver 설치 완료: {driver_path}")
-        
-        print("WebDriver 초기화...")
-        driver = webdriver.Chrome(service=Service(driver_path), options=options)
-        
-        try:
-            print("MSIT 메인 페이지 접속...")
-            driver.get("https://www.msit.go.kr")
-            time.sleep(5)
-            driver.save_screenshot("msit_page.png")
-            print("MSIT 메인 페이지 스크린샷 저장 완료")
+    - name: Process captured HTML files
+      if: always()
+      run: |
+        # HTML 파일이 존재하는지 확인
+        if [ -d "html_content" ] && [ "$(ls -A html_content/*.html 2>/dev/null)" ]; then
+          echo "HTML 파일 처리 중..."
+          
+          # JSON 테이블 파일이 존재하는지 확인
+          TABLE_FILES=$(find html_content/ -name "*_tables.json" 2>/dev/null)
+          
+          if [ -n "$TABLE_FILES" ]; then
+            echo "테이블 데이터 파일 발견:"
+            ls -la $TABLE_FILES
             
-            print("MSIT 통계 페이지 접속...")
-            driver.get("https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99")
-            time.sleep(5)
-            driver.save_screenshot("msit_stats_page.png")
-            print("MSIT 통계 페이지 스크린샷 저장 완료")
-        except Exception as e:
-            print(f"스크린샷 오류: {str(e)}")
-        finally:
-            print("WebDriver 종료")
-            driver.quit()
-        EOF
-        
-        # 스크립트 실행
-        python simple_screenshot.py || echo "간단한 스크린샷 스크립트 실패, 계속 진행"
+            # 테이블 데이터 파일 내용 확인
+            for file in $TABLE_FILES; do
+              echo "파일 내용: $file"
+              cat $file | head -50
+              echo "..."
+            done
+            
+            # 테이블 데이터 처리 스크립트 생성
+            cat > process_tables.py << 'EOF'
+            import json
+            import os
+            import pandas as pd
+            import glob
+            import sys
+
+            def process_table_files():
+                table_files = glob.glob('html_content/*_tables.json')
+                if not table_files:
+                    print("테이블 데이터 파일을 찾을 수 없음")
+                    return False
+                    
+                print(f"{len(table_files)}개 테이블 파일 발견")
+                
+                all_tables = []
+                
+                for file_path in table_files:
+                    sheet_name = os.path.basename(file_path).split('_sheet_')[1].split('_')[0]
+                    print(f"시트 {sheet_name} 처리 중...")
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            tables_data = json.load(f)
+                            
+                        for table_idx, table in enumerate(tables_data):
+                            if not table.get('rows'):
+                                continue
+                                
+                            try:
+                                df = pd.DataFrame(table['rows'])
+                                
+                                # 첫 번째 행이 헤더인지 확인
+                                if len(df) > 1:
+                                    # 첫 번째 행을 헤더로 사용
+                                    headers = df.iloc[0].tolist()
+                                    df = df.iloc[1:]
+                                    df.columns = headers
+                                
+                                # CSV로 저장
+                                csv_file = f'html_content/extracted_table_sheet_{sheet_name}_table_{table_idx}.csv'
+                                df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+                                print(f"테이블 데이터 CSV 저장 완료: {csv_file}")
+                                
+                                all_tables.append((sheet_name, table_idx, df))
+                            except Exception as df_error:
+                                print(f"테이블 {table_idx} 데이터프레임 변환 오류: {str(df_error)}")
+                    except Exception as file_error:
+                        print(f"파일 처리 오류: {str(file_error)}")
+                
+                if all_tables:
+                    # 결합된 데이터 엑셀로 저장
+                    try:
+                        with pd.ExcelWriter('html_content/combined_tables.xlsx') as writer:
+                            for sheet_name, table_idx, df in all_tables:
+                                sheet_name_safe = f"{sheet_name}_Table{table_idx}"[:31]  # 엑셀 시트 이름 길이 제한
+                                df.to_excel(writer, sheet_name=sheet_name_safe, index=False)
+                        print("모든 테이블 데이터 엑셀 파일로 결합 완료")
+                        return True
+                    except Exception as excel_error:
+                        print(f"엑셀 파일 생성 오류: {str(excel_error)}")
+                
+                return len(all_tables) > 0
+
+            if __name__ == "__main__":
+                success = process_table_files()
+                if not success:
+                    print("테이블 데이터 처리 실패")
+                    sys.exit(1)
+            EOF
+            
+            # 테이블 처리 스크립트 실행
+            python process_tables.py || echo "테이블 처리 스크립트 실패, 계속 진행"
+          else
+            echo "테이블 데이터 파일이 없음"
+          fi
+        else
+          echo "HTML 파일이 없음"
+        fi
 
     - name: Archive artifacts
       if: always()
       run: |
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         mkdir -p artifacts
-        cp -r *.log *.png *.html downloads/* screenshots/* *.bak artifacts/ 2>/dev/null || true
+        cp -r *.log *.png *.html downloads/* screenshots/* html_content/* *.bak artifacts/ 2>/dev/null || true
         echo "실행 정보:" > artifacts/run_info.txt
         echo "실행 ID: ${{ github.run_id }}" >> artifacts/run_info.txt
         echo "실행 번호: ${{ github.run_number }}" >> artifacts/run_info.txt
