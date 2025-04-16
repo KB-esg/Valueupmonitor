@@ -28,16 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('msit_monitor')
 
-def take_screenshot(self, driver, name):
-    """특정 페이지의 스크린샷 저장"""
-    try:
-        screenshot_path = f"screenshots/{name}_{int(time.time())}.png"
-        driver.save_screenshot(screenshot_path)
-        logger.info(f"스크린샷 저장: {screenshot_path}")
-        return screenshot_path
-    except Exception as e:
-        logger.error(f"스크린샷 저장 중 오류: {str(e)}")
-        return None
+
 
 class MSITMonitor:
     def __init__(self):
@@ -593,6 +584,18 @@ class MSITMonitor:
             logger.error(f"페이지 파싱 중 에러: {str(e)}")
             return [], [], False
 
+    def take_screenshot(self, driver, name):
+        """특정 페이지의 스크린샷 저장"""
+        try:
+            screenshot_path = f"screenshots/{name}_{int(time.time())}.png"
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"스크린샷 저장: {screenshot_path}")
+            return screenshot_path
+        except Exception as e:
+            logger.error(f"스크린샷 저장 중 오류: {str(e)}")
+            return None
+
+    
     def find_view_link_params(self, driver, post):
         """게시물에서 바로보기 링크 파라미터 찾기"""
         if not post.get('post_id'):
