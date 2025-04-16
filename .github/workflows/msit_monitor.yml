@@ -82,6 +82,55 @@ jobs:
         echo "모니터링 스크립트 실행..."
         python msit_monitor.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
 
+    - name: Create simple capture script
+      run: |
+        echo "import os, sys, time" > simple_capture.py
+        echo "from selenium import webdriver" >> simple_capture.py
+        echo "from selenium.webdriver.chrome.service import Service" >> simple_capture.py
+        echo "from selenium.webdriver.chrome.options import Options" >> simple_capture.py
+        echo "from webdriver_manager.chrome import ChromeDriverManager" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "def capture_url(url, output_path):" >> simple_capture.py
+        echo "    options = Options()" >> simple_capture.py
+        echo "    options.add_argument('--no-sandbox')" >> simple_capture.py
+        echo "    options.add_argument('--disable-dev-shm-usage')" >> simple_capture.py
+        echo "    options.add_argument('--headless')" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "    try:" >> simple_capture.py
+        echo "        print(f\"URL 접속: {url}\")" >> simple_capture.py
+        echo "        driver.get(url)" >> simple_capture.py
+        echo "        time.sleep(10)  # 로딩 대기" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "        # 스크린샷 저장" >> simple_capture.py
+        echo "        driver.save_screenshot(output_path)" >> simple_capture.py
+        echo "        print(f\"스크린샷 저장 완료: {output_path}\")" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "        # 페이지 소스 저장" >> simple_capture.py
+        echo "        with open('document_content.html', 'w', encoding='utf-8') as f:" >> simple_capture.py
+        echo "            f.write(driver.page_source)" >> simple_capture.py
+        echo "        print(\"HTML 내용 저장 완료\")" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "        return True" >> simple_capture.py
+        echo "    except Exception as e:" >> simple_capture.py
+        echo "        print(f\"오류 발생: {str(e)}\")" >> simple_capture.py
+        echo "        return False" >> simple_capture.py
+        echo "    finally:" >> simple_capture.py
+        echo "        driver.quit()" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "if __name__ == \"__main__\":" >> simple_capture.py
+        echo "    if len(sys.argv) < 2:" >> simple_capture.py
+        echo "        print(\"사용법: python simple_capture.py <URL> [output_path]\")" >> simple_capture.py
+        echo "        sys.exit(1)" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "    url = sys.argv[1]" >> simple_capture.py
+        echo "    output_path = sys.argv[2] if len(sys.argv) > 2 else \"document_screenshot.png\"" >> simple_capture.py
+        echo "" >> simple_capture.py
+        echo "    success = capture_url(url, output_path)" >> simple_capture.py
+        echo "    if not success:" >> simple_capture.py
+        echo "        sys.exit(1)" >> simple_capture.py
+
     - name: Take screenshots of document (if URL exists)
       if: always()
       run: |
@@ -92,60 +141,6 @@ jobs:
         
         if [ -n "$DOCUMENT_VIEW_URL" ]; then
           echo "바로보기 URL 발견: $DOCUMENT_VIEW_URL"
-          
-          # 간단한 스크린샷 스크립트 작성
-          cat > simple_capture.py << EOF
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-import time
-import sys
-import os
-
-def capture_url(url, output_path):
-    options = Options()
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--headless')
-    
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    
-    try:
-        print(f"URL 접속: {url}")
-        driver.get(url)
-        time.sleep(10)  # 로딩 대기
-        
-        # 스크린샷 저장
-        driver.save_screenshot(output_path)
-        print(f"스크린샷 저장 완료: {output_path}")
-        
-        # 페이지 소스 저장
-        with open('document_content.html', 'w', encoding='utf-8') as f:
-            f.write(driver.page_source)
-        print("HTML 내용 저장 완료")
-        
-        return True
-    except Exception as e:
-        print(f"오류 발생: {str(e)}")
-        return False
-    finally:
-        driver.quit()
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("사용법: python simple_capture.py <URL> [output_path]")
-        sys.exit(1)
-    
-    url = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else "document_screenshot.png"
-    
-    success = capture_url(url, output_path)
-    if not success:
-        sys.exit(1)
-EOF
-          
-          # 스크립트 실행
           python simple_capture.py "$DOCUMENT_VIEW_URL" "html_content/document_screenshot.png"
         else
           echo "바로보기 URL을 찾을 수 없음"
