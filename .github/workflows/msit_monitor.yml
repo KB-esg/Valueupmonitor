@@ -65,196 +65,363 @@ jobs:
 
     - name: Fix indentation issues
       run: |
-        cat > fix_indentation.py << 'EOF'
-        #!/usr/bin/env python
-    
-        def convert_tabs_to_spaces():
-            with open('msit_monitor.py', 'r') as file:
-                content = file.read()
-        
-            # Convert all tabs to 4 spaces
-            fixed_content = content.replace('\t', '    ')
-        
-            with open('msit_monitor.py', 'w') as file:
-                file.write(fixed_content)
-        
-            print("All tabs converted to spaces in the file")
-    
-        if __name__ == "__main__":
-            convert_tabs_to_spaces()
-        EOF
+        cat > fix_indentation.py << EOF
+#!/usr/bin/env python
+
+def convert_tabs_to_spaces():
+    with open('msit_monitor.py', 'r') as file:
+        content = file.read()
+
+    # Convert all tabs to 4 spaces
+    fixed_content = content.replace('\t', '    ')
+
+    with open('msit_monitor.py', 'w') as file:
+        file.write(fixed_content)
+
+    print("All tabs converted to spaces in the file")
+
+if __name__ == "__main__":
+    convert_tabs_to_spaces()
+EOF
     
         python fix_indentation.py
 
     - name: Create document viewer script
       run: |
-        cat > document_capture.py << 'EOF'
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from webdriver_manager.chrome import ChromeDriverManager
-        import time
-        import sys
-        import os
-        import random
-        import json
-        import re
+        cat > document_capture.py << EOF
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import time
+import sys
+import os
+import random
+import json
+import re
+from bs4 import BeautifulSoup
+import pandas as pd
 
-        def capture_document_content(url, file_id, order_id):
-            options = Options()
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument("--headless")
-            options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            options.add_experimental_option("useAutomationExtension", False)
-            
-            # 중요: 고유한 사용자 데이터 디렉터리 사용
-            unique_dir = f'/tmp/chrome-user-data-{int(time.time())}-{random.randint(1000, 9999)}'
-            options.add_argument(f'--user-data-dir={unique_dir}')
-            print(f"Chrome 사용자 데이터 디렉토리: {unique_dir}")
-            
-            print("ChromeDriver 설치 시작...")
-            driver_path = ChromeDriverManager().install()
-            print(f"ChromeDriver 설치 완료: {driver_path}")
-            
-            driver = webdriver.Chrome(service=Service(driver_path), options=options)
-            
-            try:
-                print(f"문서 뷰어 URL 접속: {url}")
-                driver.get(url)
-                print("문서 로딩 대기 중...")
-                time.sleep(10)  # 문서 뷰어 로딩 대기
+def capture_document_content(url, file_id, order_id):
+    options = Options()
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument("--headless")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    
+    # 중요: 고유한 사용자 데이터 디렉터리 사용
+    unique_dir = f'/tmp/chrome-user-data-{int(time.time())}-{random.randint(1000, 9999)}'
+    options.add_argument(f'--user-data-dir={unique_dir}')
+    print(f"Chrome 사용자 데이터 디렉토리: {unique_dir}")
+    
+    print("ChromeDriver 설치 시작...")
+    driver_path = ChromeDriverManager().install()
+    print(f"ChromeDriver 설치 완료: {driver_path}")
+    
+    driver = webdriver.Chrome(service=Service(driver_path), options=options)
+    
+    try:
+        print(f"문서 뷰어 URL 접속: {url}")
+        driver.get(url)
+        print("문서 로딩 대기 중...")
+        time.sleep(10)  # 문서 뷰어 로딩 대기
+        
+        driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_screenshot.png")
+        print(f"문서 뷰어 스크린샷 저장 완료")
+        
+        # HTML 내용 저장
+        html_content = driver.page_source
+        with open(f"html_content/document_{file_id}_{order_id}_content.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print(f"HTML 내용 저장 완료")
+        
+        # 시트 탭 확인
+        sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-tab")
+        sheet_names = []
+        if sheet_tabs:
+            print(f"{len(sheet_tabs)}개 시트 탭 발견")
+            for idx, tab in enumerate(sheet_tabs):
+                sheet_name = tab.get_attribute("textContent") or f"Sheet{idx+1}"
+                sheet_names.append(sheet_name.strip())
+                print(f"시트 {idx+1}: {sheet_name.strip()}")
                 
-                driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_screenshot.png")
-                print(f"문서 뷰어 스크린샷 저장 완료")
-                
-                # HTML 내용 저장
-                html_content = driver.page_source
-                with open(f"html_content/document_{file_id}_{order_id}_content.html", "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                print(f"HTML 내용 저장 완료")
-                
-                # 시트 탭 확인
-                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-tab")
-                sheet_names = []
-                if sheet_tabs:
-                    print(f"{len(sheet_tabs)}개 시트 탭 발견")
-                    for idx, tab in enumerate(sheet_tabs):
-                        sheet_name = tab.get_attribute("textContent") or f"Sheet{idx+1}"
-                        sheet_names.append(sheet_name.strip())
-                        print(f"시트 {idx+1}: {sheet_name.strip()}")
-                        
-                        # 각 시트 탭 클릭하고 내용 저장
-                        try:
-                            tab.click()
-                            time.sleep(3)  # 탭 전환 대기
+                # 각 시트 탭 클릭하고 내용 저장
+                try:
+                    tab.click()
+                    time.sleep(3)  # 탭 전환 대기
+                    
+                    driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.png")
+                    
+                    sheet_html = driver.page_source
+                    with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.html", "w", encoding="utf-8") as f:
+                        f.write(sheet_html)
+                    print(f"시트 {idx+1} HTML 내용 저장 완료")
+                    
+                    # JavaScript를 통해 테이블 내용 추출 시도
+                    try:
+                        tables_data = driver.execute_script('''
+                            const tables = document.querySelectorAll('table');
+                            let result = [];
                             
-                            driver.save_screenshot(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.png")
-                            
-                            sheet_html = driver.page_source
-                            with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}.html", "w", encoding="utf-8") as f:
-                                f.write(sheet_html)
-                            print(f"시트 {idx+1} HTML 내용 저장 완료")
-                            
-                            # JavaScript를 통해 테이블 내용 추출 시도
-                            try:
-                                tables_data = driver.execute_script('''
-                                    const tables = document.querySelectorAll('table');
-                                    let result = [];
+                            tables.forEach((table, tableIndex) => {
+                                let tableData = {
+                                    id: tableIndex,
+                                    rows: [],
+                                    dimensions: { rows: 0, cols: 0 }
+                                };
+                                
+                                const rows = table.querySelectorAll('tr');
+                                tableData.dimensions.rows = rows.length;
+                                
+                                rows.forEach((row, rowIndex) => {
+                                    const cells = row.querySelectorAll('td, th');
+                                    if (rowIndex === 0) {
+                                        tableData.dimensions.cols = cells.length;
+                                    }
                                     
-                                    tables.forEach((table, tableIndex) => {
-                                        let tableData = {
-                                            id: tableIndex,
-                                            rows: [],
-                                            dimensions: { rows: 0, cols: 0 }
-                                        };
-                                        
-                                        const rows = table.querySelectorAll('tr');
-                                        tableData.dimensions.rows = rows.length;
-                                        
-                                        rows.forEach((row, rowIndex) => {
-                                            const cells = row.querySelectorAll('td, th');
-                                            if (rowIndex === 0) {
-                                                tableData.dimensions.cols = cells.length;
-                                            }
-                                            
-                                            let rowData = [];
-                                            cells.forEach(cell => {
-                                                rowData.push(cell.textContent.trim());
-                                            });
-                                            
-                                            tableData.rows.push(rowData);
-                                        });
-                                        
-                                        result.push(tableData);
+                                    let rowData = [];
+                                    cells.forEach(cell => {
+                                        rowData.push(cell.textContent.trim());
                                     });
                                     
-                                    return result;
-                                ''')
+                                    tableData.rows.push(rowData);
+                                });
                                 
-                                if tables_data:
-                                    with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}_tables.json", "w", encoding="utf-8") as f:
-                                        json.dump(tables_data, f, ensure_ascii=False, indent=2)
-                                    print(f"시트 {idx+1}에서 {len(tables_data)}개 테이블 데이터 추출 완료")
-                                else:
-                                    print(f"시트 {idx+1}에서 테이블 데이터 추출 실패")
-                            except Exception as js_error:
-                                print(f"테이블 데이터 추출 JavaScript 오류: {str(js_error)}")
-                                
-                        except Exception as click_error:
-                            print(f"시트 탭 클릭 오류: {str(click_error)}")
+                                result.push(tableData);
+                            });
                             
-                    # 시트 정보 저장
-                    with open(f"html_content/document_{file_id}_{order_id}_sheets.json", "w", encoding="utf-8") as f:
-                        json.dump(sheet_names, f, ensure_ascii=False, indent=2)
-                else:
-                    print("시트 탭을 찾을 수 없음")
+                            return result;
+                        ''')
+                        
+                        if tables_data:
+                            with open(f"html_content/document_{file_id}_{order_id}_sheet_{idx+1}_tables.json", "w", encoding="utf-8") as f:
+                                json.dump(tables_data, f, ensure_ascii=False, indent=2)
+                            print(f"시트 {idx+1}에서 {len(tables_data)}개 테이블 데이터 추출 완료")
+                        else:
+                            print(f"시트 {idx+1}에서 테이블 데이터 추출 실패")
+                    except Exception as js_error:
+                        print(f"테이블 데이터 추출 JavaScript 오류: {str(js_error)}")
+                        
+                except Exception as click_error:
+                    print(f"시트 탭 클릭 오류: {str(click_error)}")
                     
-                # iframe 내용 확인
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                if iframes:
-                    print(f"{len(iframes)}개 iframe 발견")
-                    for idx, iframe in enumerate(iframes):
-                        try:
-                            driver.switch_to.frame(iframe)
-                            iframe_html = driver.page_source
-                            with open(f"html_content/document_{file_id}_{order_id}_iframe_{idx+1}.html", "w", encoding="utf-8") as f:
-                                f.write(iframe_html)
-                            print(f"iframe {idx+1} 내용 저장 완료")
-                            driver.switch_to.default_content()  # 기본 컨텍스트로 복귀
-                        except Exception as iframe_error:
-                            print(f"iframe {idx+1} 처리 오류: {str(iframe_error)}")
-                            driver.switch_to.default_content()
-                    
-                return True
-                
-            except Exception as e:
-                print(f'문서 내용 캡처 오류: {str(e)}')
-                return False
-            finally:
-                print("WebDriver 종료")
-                driver.quit()
-        
-        if __name__ == "__main__":
-            if len(sys.argv) < 2:
-                print("사용법: python document_capture.py <문서뷰어URL> <파일ID> <순서ID>")
-                sys.exit(1)
-                
-            url = sys.argv[1]
-            file_id = sys.argv[2] if len(sys.argv) > 2 else "unknown"
-            order_id = sys.argv[3] if len(sys.argv) > 3 else "1"
+            # 시트 정보 저장
+            with open(f"html_content/document_{file_id}_{order_id}_sheets.json", "w", encoding="utf-8") as f:
+                json.dump(sheet_names, f, ensure_ascii=False, indent=2)
+        else:
+            print("시트 탭을 찾을 수 없음")
             
-            success = capture_document_content(url, file_id, order_id)
-            if success:
-                print("문서 내용 캡처 성공")
-            else:
-                print("문서 내용 캡처 실패")
-                sys.exit(1)
-        EOF
+        # iframe 내용 확인
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        if iframes:
+            print(f"{len(iframes)}개 iframe 발견")
+            for idx, iframe in enumerate(iframes):
+                try:
+                    driver.switch_to.frame(iframe)
+                    iframe_html = driver.page_source
+                    with open(f"html_content/document_{file_id}_{order_id}_iframe_{idx+1}.html", "w", encoding="utf-8") as f:
+                        f.write(iframe_html)
+                    print(f"iframe {idx+1} 내용 저장 완료")
+                    driver.switch_to.default_content()  # 기본 컨텍스트로 복귀
+                except Exception as iframe_error:
+                    print(f"iframe {idx+1} 처리 오류: {str(iframe_error)}")
+                    driver.switch_to.default_content()
+            
+        return True
+            
+    except Exception as e:
+        print(f'문서 내용 캡처 오류: {str(e)}')
+        return False
+    finally:
+        print("WebDriver 종료")
+        driver.quit()
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("사용법: python document_capture.py <문서뷰어URL> <파일ID> <순서ID>")
+        sys.exit(1)
+        
+    url = sys.argv[1]
+    file_id = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+    order_id = sys.argv[3] if len(sys.argv) > 3 else "1"
+    
+    success = capture_document_content(url, file_id, order_id)
+    if success:
+        print("문서 내용 캡처 성공")
+    else:
+        print("문서 내용 캡처 실패")
+        sys.exit(1)
+EOF
+
+    - name: Create HTML processor script
+      run: |
+        cat > process_html.py << EOF
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import json
+import glob
+import pandas as pd
+from bs4 import BeautifulSoup
+import sys
+
+def extract_tables_from_html(html_file):
+    """HTML 파일에서 테이블 추출"""
+    print(f"HTML 파일 분석 중: {html_file}")
+    
+    try:
+        with open(html_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        tables = soup.find_all('table')
+        
+        if not tables:
+            print(f"테이블을 찾을 수 없음: {html_file}")
+            return None
+        
+        print(f"{len(tables)}개 테이블 발견")
+        extracted_tables = []
+        
+        for i, table in enumerate(tables):
+            # 테이블 행 추출
+            rows = []
+            for tr in table.find_all('tr'):
+                row = []
+                for cell in tr.find_all(['td', 'th']):
+                    cell_text = cell.get_text(strip=True)
+                    row.append(cell_text)
+                if row:  # 빈 행 건너뛰기
+                    rows.append(row)
+            
+            if not rows:
+                print(f"테이블 {i+1}에 행이 없음")
+                continue
+            
+            # 데이터프레임 변환 시도
+            try:
+                # 열 수가 동일한지 확인
+                col_counts = [len(row) for row in rows]
+                if len(set(col_counts)) > 1:
+                    # 열 수가 다른 경우, 최대 열 수로 맞춤
+                    max_cols = max(col_counts)
+                    rows = [row + [''] * (max_cols - len(row)) for row in rows]
+                    print(f"테이블 {i+1}: 열 수 불일치 보정 ({col_counts} -> {max_cols})")
+                
+                # 첫 번째 행을 헤더로 간주
+                headers = rows[0]
+                data = rows[1:]
+                
+                # 모든 값이 빈 열 확인
+                is_empty_col = [all(row[j] == '' for row in data) for j in range(len(headers))]
+                
+                # 빈 열이 있는 경우 필터링
+                if any(is_empty_col):
+                    filtered_headers = [h for j, h in enumerate(headers) if not is_empty_col[j]]
+                    filtered_data = [[row[j] for j, is_empty in enumerate(is_empty_col) if not is_empty] for row in data]
+                    
+                    headers = filtered_headers
+                    data = filtered_data
+                    print(f"테이블 {i+1}: 빈 열 {is_empty_col.count(True)}개 제거")
+                
+                # 데이터프레임 생성
+                df = pd.DataFrame(data, columns=headers)
+                
+                # CSV 파일로 저장
+                basename = os.path.basename(html_file)
+                table_name = f"{basename.split('.')[0]}_table_{i+1}"
+                csv_path = f"html_content/{table_name}.csv"
+                df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                
+                print(f"테이블 {i+1} CSV 저장 완료: {csv_path}")
+                extracted_tables.append({
+                    'table_index': i,
+                    'csv_path': csv_path,
+                    'rows': len(df),
+                    'columns': len(df.columns)
+                })
+            
+            except Exception as df_error:
+                print(f"테이블 {i+1} 데이터프레임 변환 오류: {str(df_error)}")
+        
+        return extracted_tables
+    
+    except Exception as e:
+        print(f"HTML 파일 처리 오류: {str(e)}")
+        return None
+
+def process_html_files():
+    """HTML 디렉토리의 모든 HTML 파일 처리"""
+    html_dir = "html_content"
+    if not os.path.exists(html_dir):
+        print(f"HTML 디렉토리가 없음: {html_dir}")
+        return False
+    
+    # HTML 파일 목록 가져오기 (iframe, sheet 파일 우선)
+    html_files = []
+    html_files.extend(glob.glob(f"{html_dir}/*_sheet_*.html"))
+    html_files.extend(glob.glob(f"{html_dir}/*_iframe_*.html"))
+    html_files.extend(glob.glob(f"{html_dir}/*_content.html"))
+    
+    if not html_files:
+        print("처리할 HTML 파일이 없음")
+        return False
+    
+    print(f"{len(html_files)}개 HTML 파일 처리 중...")
+    
+    all_tables = []
+    for html_file in html_files:
+        tables = extract_tables_from_html(html_file)
+        if tables:
+            all_tables.extend(tables)
+    
+    if all_tables:
+        print(f"총 {len(all_tables)}개 테이블 추출 완료")
+        
+        # 추출 결과 JSON 저장
+        with open(f"{html_dir}/extracted_tables_info.json", "w", encoding="utf-8") as f:
+            json.dump(all_tables, f, ensure_ascii=False, indent=2)
+        
+        # Excel 파일 생성
+        try:
+            excel_path = f"{html_dir}/all_extracted_tables.xlsx"
+            with pd.ExcelWriter(excel_path) as writer:
+                for table in all_tables:
+                    try:
+                        csv_path = table['csv_path']
+                        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+                        
+                        # 시트 이름 생성 (31자 제한)
+                        sheet_name = os.path.basename(csv_path).split('.')[0]
+                        if len(sheet_name) > 31:
+                            sheet_name = sheet_name[:28] + "..."
+                        
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                        print(f"테이블 추가 완료: {sheet_name}")
+                        
+                    except Exception as e:
+                        print(f"테이블 Excel 추가 오류: {str(e)}")
+            
+            print(f"모든 테이블이 Excel 파일로 결합됨: {excel_path}")
+            return True
+        
+        except Exception as excel_error:
+            print(f"Excel 파일 생성 오류: {str(excel_error)}")
+    
+    return len(all_tables) > 0
+
+if __name__ == "__main__":
+    success = process_html_files()
+    if not success:
+        print("HTML 파일 처리 실패")
+        sys.exit(1)
+EOF
 
     - name: Run monitoring script
       env:
@@ -306,98 +473,7 @@ jobs:
         # HTML 파일이 존재하는지 확인
         if [ -d "html_content" ] && [ "$(ls -A html_content/*.html 2>/dev/null)" ]; then
           echo "HTML 파일 처리 중..."
-          
-          # JSON 테이블 파일이 존재하는지 확인
-          TABLE_FILES=$(find html_content/ -name "*_tables.json" 2>/dev/null)
-          
-          if [ -n "$TABLE_FILES" ]; then
-            echo "테이블 데이터 파일 발견:"
-            ls -la $TABLE_FILES
-            
-            # 테이블 데이터 파일 내용 확인
-            for file in $TABLE_FILES; do
-              echo "파일 내용: $file"
-              cat $file | head -50
-              echo "..."
-            done
-            
-            # 테이블 데이터 처리 스크립트 생성
-            cat > process_tables.py << 'EOF'
-            import json
-            import os
-            import pandas as pd
-            import glob
-            import sys
-
-            def process_table_files():
-                table_files = glob.glob('html_content/*_tables.json')
-                if not table_files:
-                    print("테이블 데이터 파일을 찾을 수 없음")
-                    return False
-                    
-                print(f"{len(table_files)}개 테이블 파일 발견")
-                
-                all_tables = []
-                
-                for file_path in table_files:
-                    sheet_name = os.path.basename(file_path).split('_sheet_')[1].split('_')[0]
-                    print(f"시트 {sheet_name} 처리 중...")
-                    
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            tables_data = json.load(f)
-                            
-                        for table_idx, table in enumerate(tables_data):
-                            if not table.get('rows'):
-                                continue
-                                
-                            try:
-                                df = pd.DataFrame(table['rows'])
-                                
-                                # 첫 번째 행이 헤더인지 확인
-                                if len(df) > 1:
-                                    # 첫 번째 행을 헤더로 사용
-                                    headers = df.iloc[0].tolist()
-                                    df = df.iloc[1:]
-                                    df.columns = headers
-                                
-                                # CSV로 저장
-                                csv_file = f'html_content/extracted_table_sheet_{sheet_name}_table_{table_idx}.csv'
-                                df.to_csv(csv_file, index=False, encoding='utf-8-sig')
-                                print(f"테이블 데이터 CSV 저장 완료: {csv_file}")
-                                
-                                all_tables.append((sheet_name, table_idx, df))
-                            except Exception as df_error:
-                                print(f"테이블 {table_idx} 데이터프레임 변환 오류: {str(df_error)}")
-                    except Exception as file_error:
-                        print(f"파일 처리 오류: {str(file_error)}")
-                
-                if all_tables:
-                    # 결합된 데이터 엑셀로 저장
-                    try:
-                        with pd.ExcelWriter('html_content/combined_tables.xlsx') as writer:
-                            for sheet_name, table_idx, df in all_tables:
-                                sheet_name_safe = f"{sheet_name}_Table{table_idx}"[:31]  # 엑셀 시트 이름 길이 제한
-                                df.to_excel(writer, sheet_name=sheet_name_safe, index=False)
-                        print("모든 테이블 데이터 엑셀 파일로 결합 완료")
-                        return True
-                    except Exception as excel_error:
-                        print(f"엑셀 파일 생성 오류: {str(excel_error)}")
-                
-                return len(all_tables) > 0
-
-            if __name__ == "__main__":
-                success = process_table_files()
-                if not success:
-                    print("테이블 데이터 처리 실패")
-                    sys.exit(1)
-            EOF
-            
-            # 테이블 처리 스크립트 실행
-            python process_tables.py || echo "테이블 처리 스크립트 실패, 계속 진행"
-          else
-            echo "테이블 데이터 파일이 없음"
-          fi
+          python process_html.py
         else
           echo "HTML 파일이 없음"
         fi
