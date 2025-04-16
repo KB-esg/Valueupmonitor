@@ -1453,6 +1453,370 @@ def direct_access_view_link_params(driver, post):
     
     return None
 
+def build_valid_session(driver):
+    """
+    유효한 세션 빌드업을 위한 사이트 탐색 과정
+    """
+    try:
+        # 1. 랜딩 페이지 방문
+        logger.info("세션 빌드업 시작: 랜딩 페이지 접근")
+        driver.get(CONFIG['landing_url'])
+        
+        # 랜딩 페이지 로드 확인
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "skip_nav"))
+            )
+            logger.info("랜딩 페이지 로드 완료")
+        except TimeoutException:
+            logger.warning("랜딩 페이지 로드 타임아웃, 계속 진행")
+        
+        # 쿠키 및 세션 안정화를 위한 지연
+        time.sleep(3)
+        
+        # 2. 몇 가지 기본 페이지 방문 (세션 강화)
+        basic_pages = [
+            CONFIG['landing_url'] + "/msit/index.do",  # 메인 페이지
+            CONFIG['landing_url'] + "/eng/index.do",   # 영문 페이지
+            CONFIG['landing_url'] + "/user/about.do"   # 소개 페이지
+        ]
+        
+        for page in basic_pages:
+            try:
+                logger.info(f"세션 강화: {page} 방문")
+                driver.get(page)
+                time.sleep(2)  # 페이지 로드 대기
+            except Exception as e:
+                logger.warning(f"페이지 방문 중 오류: {str(e)}")
+        
+        # 3. 통계정보 페이지로 이동
+        logger.info("통계정보 페이지 접근")
+        driver.get(CONFIG['stats_url'])
+        
+        # 페이지 로드 확인
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+            )
+            logger.info("통계정보 페이지 로드 완료")
+        except TimeoutException:
+            logger.warning("통계정보 페이지 로드 타임아웃, 계속 진행")
+        
+        # 추가 지연 (세션 안정화)
+        time.sleep(3)
+        
+        # 4. 쿠키 정보 확인
+        cookies = driver.get_cookies()
+        logger.info(f"{len(cookies)}개 쿠키 설정됨")
+        
+        # 간단한 스크롤 동작 (자연스러운 사용자 행동 시뮬레이션)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 3);")
+        time.sleep(1)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+        time.sleep(1)
+        
+        return True
+    except Exception as e:
+        logger.error(f"세션 빌드업 중 오류: {str(e)}")
+        return False
+
+def navigate_to_post_detail(driver, post):
+    """
+    게시물 목록에서 특정 게시물로 자연스럽게 이동
+    """
+    try:
+        # 1. 통계정보 페이지로 이동
+        logger.info(f"통계정보 페이지로 이동 (게시물 {post['post_id']} 접근 위해)")
+        driver.get(CONFIG['stats_url'])
+        
+        # 페이지 로드 대기
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+        )
+        
+        # 약간의 지연 (자연스러운 사용자 행동 시뮬레이션)
+        time.sleep(2)
+        
+        # 2. 게시물 제목으로 검색
+        search_term = post['title'][:15]  # 제목의 앞부분만 사용
+        
+        # 검색 필드 찾기 및 입력
+        search_selectors = [
+            "input[type='text'][name*='searchTxt']", 
+            "input.sch_txt",
+            "input[type='text']"
+        ]
+        
+        search_field = None
+        for selector in search_selectors:
+            try:
+                search_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if search_elements:
+                    search_field = search_elements[0]
+                    break
+            except:
+                continue
+        
+        if search_field:
+            logger.info(f"검색 필드 발견, 검색어 입력: {search_term}")
+            search_field.clear()
+            search_field.send_keys(search_term)
+            
+            # 검색 버튼 찾기 및 클릭
+            search_button_selectors = [
+                "button.btn_search", 
+                "input[type='submit']",
+                "button[type='submit']"
+            ]
+            
+            for selector in search_button_selectors:
+                try:
+                    buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if buttons:
+                        buttons[0].click()
+                        logger.info("검색 버튼 클릭")
+                        time.sleep(3)  # 검색 결과 로드 대기
+                        break
+                except:
+                    continue
+        
+        # 3. 게시물 제목 링크 찾기
+        title_xpath = f"//p[contains(@class, 'title') and contains(text(), '{search_term}')]"
+        
+        try:
+            title_element = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, title_xpath))
+            )
+            
+            # 스크린샷 (디버깅용)
+            driver.save_screenshot(f"found_post_{post['post_id']}.png")
+            
+            # 링크 클릭
+            logger.info(f"게시물 제목 링크 발견, 클릭: {title_element.text}")
+            driver.execute_script("arguments[0].click();", title_element)
+            
+            # 상세 페이지 로드 대기
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
+            )
+            
+            logger.info(f"게시물 상세 페이지 로드 완료: {driver.current_url}")
+            return True
+            
+        except TimeoutException:
+            logger.warning(f"검색 결과에서 게시물을 찾을 수 없음: {search_term}")
+        
+        # 4. 검색 실패 시 직접 URL 접근 시도 (세션이 이미 구축된 상태)
+        detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+        logger.info(f"직접 URL 접근 시도 (세션 구축 후): {detail_url}")
+        
+        driver.get(detail_url)
+        
+        # 페이지 로드 대기
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
+            )
+            logger.info("게시물 상세 페이지 로드 완료 (직접 URL)")
+            return True
+        except TimeoutException:
+            logger.warning("게시물 상세 페이지 로드 시간 초과 (직접 URL)")
+            return False
+        
+    except Exception as e:
+        logger.error(f"게시물 상세 페이지 접근 중 오류: {str(e)}")
+        return False
+
+def extract_view_link_params(driver, post):
+    """
+    게시물 상세 페이지에서 바로보기 링크 파라미터 추출
+    """
+    try:
+        # 스크린샷 저장 (디버깅용)
+        driver.save_screenshot(f"detail_page_{post['post_id']}.png")
+        
+        # 바로보기 링크 찾기
+        view_link_selectors = [
+            "//a[contains(text(), '바로보기')]",
+            "//a[@title='새창 열림']",
+            "//a[contains(@onclick, 'getExtension')]",
+            ".view_file a",
+            ".file_area a",
+            "div[class*='attach'] a"
+        ]
+        
+        for selector in view_link_selectors:
+            try:
+                elements = None
+                if selector.startswith("//"):
+                    elements = driver.find_elements(By.XPATH, selector)
+                else:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+                if elements:
+                    # 가장 첫 번째 링크 선택
+                    link = elements[0]
+                    
+                    # 링크 정보 확인
+                    onclick = link.get_attribute('onclick')
+                    href = link.get_attribute('href')
+                    text = link.text.strip()
+                    
+                    logger.info(f"바로보기 링크 발견: text='{text}', onclick='{onclick}', href='{href}'")
+                    
+                    # getExtension_path 함수 호출 확인
+                    if onclick and 'getExtension_path' in onclick:
+                        match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick)
+                        if match:
+                            atch_file_no = match.group(1)
+                            file_ord = match.group(2)
+                            
+                            # 스크린샷 (디버깅용)
+                            driver.save_screenshot(f"found_link_{post['post_id']}.png")
+                            
+                            # 날짜 정보 추출
+                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                            if date_match:
+                                year = int(date_match.group(1))
+                                month = int(date_match.group(2))
+                                
+                                logger.info(f"바로보기 링크 파라미터 추출 성공: atchFileNo={atch_file_no}, fileOrdr={file_ord}")
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'date': {'year': year, 'month': month},
+                                    'post_info': post
+                                }
+                            
+                            logger.info(f"바로보기 링크 파라미터 추출 성공 (날짜 없음): atchFileNo={atch_file_no}, fileOrdr={file_ord}")
+                            return {
+                                'atch_file_no': atch_file_no,
+                                'file_ord': file_ord,
+                                'post_info': post
+                            }
+                    
+                    # 링크 직접 클릭 (JavaScript를 사용하여)
+                    logger.info(f"직접 링크 클릭 시도: {text}")
+                    driver.execute_script("arguments[0].click();", link)
+                    
+                    # 새 창 또는 탭이 열리는지 확인
+                    original_window = driver.current_window_handle
+                    wait_time = 0
+                    max_wait = 8  # 최대 8초 대기
+                    
+                    while len(driver.window_handles) == 1 and wait_time < max_wait:
+                        time.sleep(1)
+                        wait_time += 1
+                    
+                    if len(driver.window_handles) > 1:
+                        # 새 창으로 전환
+                        for window_handle in driver.window_handles:
+                            if window_handle != original_window:
+                                driver.switch_to.window(window_handle)
+                                break
+                        
+                        # 현재 URL 확인
+                        current_url = driver.current_url
+                        logger.info(f"새 창 URL: {current_url}")
+                        
+                        # Synap Document Viewer 확인
+                        if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
+                            logger.info("Synap Document Viewer 감지됨")
+                            
+                            # URL에서 파라미터 추출
+                            atch_file_match = re.search(r'atchFileNo=(\d+)', driver.current_url)
+                            file_ord_match = re.search(r'fileOrdr=(\d+)', driver.current_url)
+                            
+                            if atch_file_match and file_ord_match:
+                                atch_file_no = atch_file_match.group(1)
+                                file_ord = file_ord_match.group(1)
+                                
+                                # 날짜 정보 추출
+                                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                if date_match:
+                                    year = int(date_match.group(1))
+                                    month = int(date_match.group(2))
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'date': {'year': year, 'month': month},
+                                        'post_info': post,
+                                        'already_opened': True
+                                    }
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'post_info': post,
+                                    'already_opened': True
+                                }
+                            
+                            # URL에서 파라미터를 추출할 수 없는 경우 
+                            # 하드코딩된 파라미터 사용 (최신 게시물 기준)
+                            logger.warning("URL에서 파라미터를 추출할 수 없음, 하드코딩된 값 사용")
+                            
+                            # 날짜 정보 추출
+                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                            if date_match:
+                                year = int(date_match.group(1))
+                                month = int(date_match.group(2))
+                                
+                                return {
+                                    'atch_file_no': '49234',  # 하드코딩 값
+                                    'file_ord': '1',
+                                    'date': {'year': year, 'month': month},
+                                    'post_info': post,
+                                    'already_opened': True
+                                }
+                            
+                            return {
+                                'atch_file_no': '49234',  # 하드코딩 값
+                                'file_ord': '1',
+                                'post_info': post,
+                                'already_opened': True
+                            }
+                        
+                        # 원래 창으로 돌아가기
+                        driver.close()
+                        driver.switch_to.window(original_window)
+            except Exception as sel_err:
+                logger.warning(f"선택자 '{selector}' 처리 중 오류: {str(sel_err)}")
+        
+        logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+            
+        # 날짜 정보 추출하여 반환
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+        if date_match:
+            year = int(date_match.group(1))
+            month = int(date_match.group(2))
+            
+            return {
+                'content': "바로보기 링크를 찾을 수 없음",
+                'date': {'year': year, 'month': month},
+                'post_info': post
+            }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"바로보기 링크 추출 중 오류: {str(e)}")
+        
+        # 날짜 정보 추출하여 반환
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+        if date_match:
+            year = int(date_match.group(1))
+            month = int(date_match.group(2))
+            
+            return {
+                'content': f"오류 발생: {str(e)}",
+                'date': {'year': year, 'month': month},
+                'post_info': post
+            }
+        
+        return None
+
 def try_ajax_access(driver, post):
     """AJAX 방식으로 게시물 데이터 접근 시도"""
     if not post.get('post_id'):
@@ -1797,190 +2161,118 @@ def access_iframe_direct(driver, file_params):
     
     return None
 
-def extract_from_synap_viewer(driver, file_params):
-    """향상된 Synap Document Viewer 데이터 추출 - 중첩된 iframe 처리"""
-    view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
-    logger.info(f"바로보기 URL 접근: {view_url}")
-    
-    driver.get(view_url)
-    time.sleep(5)  # 리디렉션 대기
-    
-    # 현재 URL 확인 (리디렉션 후)
-    current_url = driver.current_url
-    logger.info(f"리디렉션 후 URL: {current_url}")
-    
-    if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
-        logger.info("Synap Document Viewer 감지됨")
+def extract_from_synap_viewer_simple(driver, file_params):
+    """
+    이미 열린 Synap Document Viewer 창에서 데이터 추출 (단순 버전)
+    """
+    try:
+        # 스크린샷 (디버깅용)
+        driver.save_screenshot("synap_viewer_opened.png")
         
-        # 시트 탭 대기
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "sheet-list__sheet-tab"))
-            )
+        # 현재 URL 확인
+        current_url = driver.current_url
+        logger.info(f"현재 열린 Viewer URL: {current_url}")
+        
+        # 시트 탭 확인
+        sheet_tabs = WebDriverWait(driver, 20).until(
+            EC.presence_of_all_elements_located((By.CLASS_NAME, "sheet-list__sheet-tab"))
+        )
+        logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+        
+        all_data = {}
+        
+        for i, tab in enumerate(sheet_tabs):
+            sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+            logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리: {sheet_name}")
             
-            # 스크린샷 (디버깅용)
-            driver.save_screenshot(f"synap_viewer_{file_params['atch_file_no']}.png")
-            
-            # 시트 탭 확인
-            sheet_tabs = driver.find_elements(By.CLASS_NAME, "sheet-list__sheet-tab")
-            logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
-            
-            all_data = {}
-            
-            for i, tab in enumerate(sheet_tabs):
-                sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
-                logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리: {sheet_name}")
-                
-                # 첫 번째가 아닌 시트는 클릭하여 활성화
-                if i > 0:
-                    try:
-                        # JavaScript로 클릭 (더 안정적)
-                        driver.execute_script("arguments[0].click();", tab)
-                        logger.info(f"시트 탭 '{sheet_name}' 클릭")
-                        time.sleep(3)  # 시트 전환 대기
-                        
-                        # 활성 탭 변경 확인
-                        try:
-                            active_tab = driver.find_element(By.CSS_SELECTOR, ".sheet-list__sheet-tab--on")
-                            if active_tab.text.strip() != sheet_name:
-                                logger.warning(f"시트 전환 확인 실패: {active_tab.text.strip()} != {sheet_name}")
-                                # 재시도
-                                driver.execute_script("arguments[0].click();", tab)
-                                time.sleep(2)
-                        except Exception as tab_err:
-                            logger.warning(f"활성 탭 확인 중 오류: {str(tab_err)}")
-                    except Exception as e:
-                        logger.error(f"시트 전환 중 오류: {str(e)}")
-                        continue
-                
-                # 외부 iframe 처리
+            # 첫 번째가 아닌 시트는 클릭하여 활성화
+            if i > 0:
                 try:
-                    # 외부 iframe 식별
-                    outer_iframe = driver.find_element(By.ID, "innerWrap")
-                    outer_iframe_src = outer_iframe.get_attribute('src')
-                    logger.info(f"외부 iframe 소스: {outer_iframe_src}")
-                    
-                    # 외부 iframe으로 전환
-                    driver.switch_to.frame(outer_iframe)
-                    logger.info("외부 iframe으로 전환 완료")
-                    
-                    # 내부에 중첩된 iframe이 있는지 확인
-                    inner_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    
-                    if inner_iframes:
-                        logger.info(f"{len(inner_iframes)}개의 내부 iframe 발견")
-                        inner_iframe = inner_iframes[0]  # 첫 번째 내부 iframe 사용
-                        
-                        # 내부 iframe 소스 확인
-                        inner_iframe_src = inner_iframe.get_attribute('src')
-                        logger.info(f"내부 iframe 소스: {inner_iframe_src}")
-                        
-                        # 내부 iframe으로 전환
-                        driver.switch_to.frame(inner_iframe)
-                        logger.info("내부 iframe으로 전환 완료")
-                        
-                        # 현재 페이지 소스 가져오기 (내부 iframe)
-                        inner_html = driver.page_source
-                        
-                        # BeautifulSoup으로 파싱
-                        soup = BeautifulSoup(inner_html, 'html.parser')
-                        
-                        # 테이블 또는 div 그리드 찾기
-                        tables = soup.find_all('table')
-                        
-                        if tables:
-                            logger.info(f"{len(tables)}개 테이블 발견")
-                            df = extract_table_from_html_element(tables[0])  # 첫 번째 테이블 처리
-                            if df is not None and not df.empty:
-                                all_data[sheet_name] = df
-                                logger.info(f"시트 '{sheet_name}'에서 테이블 추출 성공: {df.shape}")
-                        else:
-                            # div 기반 그리드 찾기
-                            grid_divs = soup.find_all('div', class_=lambda c: c and ('grid' in c.lower() or 'table' in c.lower()))
-                            if grid_divs:
-                                logger.info(f"{len(grid_divs)}개 그리드 div 발견")
-                                df = extract_data_from_div_grid(grid_divs[0])
-                                if df is not None and not df.empty:
-                                    all_data[sheet_name] = df
-                                    logger.info(f"시트 '{sheet_name}'에서 div 그리드 추출 성공: {df.shape}")
-                            else:
-                                # 구조화된 div 찾기
-                                content_divs = soup.find_all('div', class_=lambda c: c and ('content' in c.lower() or 'data' in c.lower()))
-                                if content_divs:
-                                    logger.info(f"{len(content_divs)}개 콘텐츠 div 발견")
-                                    df = extract_structured_data_from_divs(content_divs[0])
-                                    if df is not None and not df.empty:
-                                        all_data[sheet_name] = df
-                                        logger.info(f"시트 '{sheet_name}'에서 구조화된 데이터 추출 성공: {df.shape}")
-                                else:
-                                    logger.warning(f"시트 '{sheet_name}'에서 테이블/그리드 요소를 찾을 수 없음")
-                        
-                        # 내부 iframe에서 빠져나오기
-                        driver.switch_to.default_content()
-                        driver.switch_to.frame(outer_iframe)  # 다시 외부 iframe으로
-                    else:
-                        # 내부 iframe이 없는 경우 - 현재 iframe에서 직접 처리
-                        logger.info("내부 iframe이 없음, 외부 iframe에서 직접 처리")
-                        
-                        # 현재 iframe 소스 가져오기
-                        iframe_html = driver.page_source
-                        
-                        # 데이터 추출 시도
-                        tables = pd.read_html(iframe_html)
-                        if tables:
-                            largest_table = max(tables, key=lambda t: t.shape[0] * t.shape[1])
-                            all_data[sheet_name] = largest_table
-                            logger.info(f"외부 iframe에서 테이블 추출 성공: {largest_table.shape}")
-                        else:
-                            # BeautifulSoup으로 시도
-                            soup = BeautifulSoup(iframe_html, 'html.parser')
-                            tables = soup.find_all('table')
-                            
-                            if tables:
-                                df = extract_table_from_html_element(tables[0])
-                                if df is not None and not df.empty:
-                                    all_data[sheet_name] = df
-                                    logger.info(f"외부 iframe BeautifulSoup 테이블 추출 성공: {df.shape}")
-                            else:
-                                # div 그리드 시도
-                                grid_divs = soup.find_all('div', class_=lambda c: c and ('grid' in c.lower() or 'table' in c.lower()))
-                                if grid_divs:
-                                    df = extract_data_from_div_grid(grid_divs[0])
-                                    if df is not None and not df.empty:
-                                        all_data[sheet_name] = df
-                                        logger.info(f"외부 iframe div 그리드 추출 성공: {df.shape}")
-                                else:
-                                    logger.warning("외부 iframe에서 테이블/그리드 요소를 찾을 수 없음")
-                    
-                    # iframe에서 빠져나오기
-                    driver.switch_to.default_content()
-                    
-                except Exception as iframe_err:
-                    logger.error(f"iframe 처리 중 오류: {str(iframe_err)}")
-                    # 기본 프레임으로 복귀 시도
-                    try:
-                        driver.switch_to.default_content()
-                    except:
-                        pass
+                    driver.execute_script("arguments[0].click();", tab)
+                    logger.info(f"시트 탭 '{sheet_name}' 클릭")
+                    time.sleep(3)  # 시트 전환 대기
+                except Exception as e:
+                    logger.error(f"시트 전환 중 오류: {str(e)}")
+                    continue
             
-            # 결과 반환
-            if all_data:
-                logger.info(f"{len(all_data)}개 시트에서 데이터 추출 완료")
-                return all_data
-            else:
-                logger.warning("모든 시트에서 데이터 추출 실패")
+            # innerWrap iframe 처리
+            try:
+                # 기본 프레임으로 복귀
+                driver.switch_to.default_content()
                 
-                # 마지막 시도: 전체 페이지 스크린샷을 이용한 OCR 제안
-                logger.info("스크린샷을 이용한 OCR 데이터 추출을 고려해 보세요")
-                return None
-            
-        except Exception as e:
-            logger.error(f"Synap Document Viewer 처리 중 오류: {str(e)}")
+                # iframe 찾기
+                iframe = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "innerWrap"))
+                )
+                
+                # iframe으로 전환
+                driver.switch_to.frame(iframe)
+                logger.info("iframe으로 전환 완료")
+                
+                # 페이지 스크린샷 (디버깅용)
+                driver.save_screenshot(f"iframe_content_{sheet_name}.png")
+                
+                # 페이지 소스 가져오기
+                iframe_html = driver.page_source
+                
+                # pandas read_html 사용 시도
+                try:
+                    tables = pd.read_html(iframe_html)
+                    if tables:
+                        largest_table = max(tables, key=lambda t: t.shape[0] * t.shape[1])
+                        all_data[sheet_name] = largest_table
+                        logger.info(f"pandas로 테이블 추출 성공: {largest_table.shape}")
+                        continue  # 다음 시트로
+                except Exception as e:
+                    logger.warning(f"pandas 테이블 추출 실패: {str(e)}")
+                
+                # BeautifulSoup 사용 시도
+                soup = BeautifulSoup(iframe_html, 'html.parser')
+                
+                # 테이블 요소 찾기
+                tables = soup.find_all('table')
+                if tables:
+                    logger.info(f"{len(tables)}개 테이블 요소 발견")
+                    
+                    largest_table = max(tables, key=lambda t: len(t.find_all('tr')))
+                    
+                    # 행 데이터 추출
+                    rows = []
+                    for row in largest_table.find_all('tr'):
+                        cells = row.find_all(['td', 'th'])
+                        if cells:
+                            rows.append([cell.get_text(strip=True) for cell in cells])
+                    
+                    if rows:
+                        # 첫 번째 행을 헤더로 사용
+                        headers = rows[0]
+                        data = rows[1:]
+                        
+                        df = pd.DataFrame(data, columns=headers)
+                        all_data[sheet_name] = df
+                        logger.info(f"BeautifulSoup으로 테이블 추출 성공: {df.shape}")
+                        continue  # 다음 시트로
+                
+                logger.warning(f"시트 '{sheet_name}'에서 데이터 추출 실패")
+                
+            except Exception as iframe_err:
+                logger.error(f"iframe 처리 중 오류: {str(iframe_err)}")
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+        
+        if all_data:
+            logger.info(f"{len(all_data)}개 시트에서 데이터 추출 완료")
+            return all_data
+        else:
+            logger.warning("모든 시트에서 데이터 추출 실패")
             return None
-    else:
-        # 직접 파일 다운로드 시도
-        return try_direct_file_download(file_params)
-
+            
+    except Exception as e:
+        logger.error(f"Synap Document Viewer 처리 중 오류: {str(e)}")
+        return None
+        
 def extract_structured_data_from_divs(parent_div):
     """
     구조화된 div 컨테이너에서 테이블 형식의 데이터 추출
@@ -3648,42 +3940,75 @@ async def run_monitor(days_range=4, check_sheets=True):
         
         if gs_client and telecom_stats_posts and check_sheets:
             logger.info(f"{len(telecom_stats_posts)}개 통신 통계 게시물 처리 중")
-            
+    
+            # 1. 먼저 올바른 세션 빌드업
+            if not build_valid_session(driver):
+                logger.error("세션 빌드업 실패, 계속 진행합니다")
+    
+            # 2. 각 게시물 처리
+            data_updates = []
             for i, post in enumerate(telecom_stats_posts):
                 try:
                     logger.info(f"게시물 {i+1}/{len(telecom_stats_posts)} 처리 중: {post['title']}")
-                    
-                    # 바로보기 링크 파라미터 추출 (수정된 방식)
-                    file_params = find_view_link_params(driver, post)
-                    
-                    if not file_params:
-                        logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
-                        continue
-                    
-                    # 바로보기 링크가 있는 경우
-                    if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                        # iframe 직접 접근하여 데이터 추출
-                        sheets_data = access_iframe_direct(driver, file_params)
-                        
-                        if sheets_data:
-                            # Google Sheets 업데이트
-                            update_data = {
-                                'sheets': sheets_data,
-                                'post_info': post
-                            }
-                            
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
-                            
-                            success = update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
+            
+                    # 게시물 상세 페이지로 이동
+                    if navigate_to_post_detail(driver, post):
+                        # 바로보기 링크 파라미터 추출
+                        file_params = extract_view_link_params(driver, post)
+                
+                        if not file_params:
+                            logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
+                            continue
+                
+                        # 바로보기 링크가 있는 경우
+                        if 'atch_file_no' in file_params and 'file_ord' in file_params:
+                            # 이미 열린 상태인지 확인
+                            if file_params.get('already_opened', False):
+                                # 이미 열린 상태면 현재 창에서 처리
+                                sheets_data = extract_from_synap_viewer_simple(driver, file_params)
                             else:
-                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
-                        else:
-                            logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
+                                # 아니면 바로보기 URL 열기
+                                sheets_data = extract_from_synap_viewer(driver, file_params)
+                    
+                            if sheets_data:
+                                # Google Sheets 업데이트
+                                update_data = {
+                                    'sheets': sheets_data,
+                                    'post_info': post
+                                }
+                        
+                                if 'date' in file_params:
+                                    update_data['date'] = file_params['date']
+                        
+                                success = update_google_sheets(gs_client, update_data)
+                                if success:
+                                    logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
+                                    data_updates.append(update_data)
+                                else:
+                                    logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
+                            else:
+                                logger.warning(f"Synap Document Viewer에서 데이터 추출 실패: {post['title']}")
+                        
+                                # 대체 데이터 생성
+                                placeholder_df = create_placeholder_dataframe(post)
+                                if not placeholder_df.empty:
+                                    update_data = {
+                                        'dataframe': placeholder_df,
+                                        'post_info': post
+                                    }
                             
+                                    if 'date' in file_params:
+                                        update_data['date'] = file_params['date']
+                                    
+                                    success = update_google_sheets(gs_client, update_data)
+                                    if success:
+                                        logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                        data_updates.append(update_data)
+                
+                        # 게시물 내용만 있는 경우
+                        elif 'content' in file_params:
+                            logger.info(f"게시물 내용으로 처리 중: {post['title']}")
+                    
                             # 대체 데이터 생성
                             placeholder_df = create_placeholder_dataframe(post)
                             if not placeholder_df.empty:
@@ -3691,60 +4016,20 @@ async def run_monitor(days_range=4, check_sheets=True):
                                     'dataframe': placeholder_df,
                                     'post_info': post
                                 }
-                                
+                        
                                 if 'date' in file_params:
                                     update_data['date'] = file_params['date']
-                                
+                        
                                 success = update_google_sheets(gs_client, update_data)
                                 if success:
-                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                    logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
-                    
-                    # 게시물 내용만 있는 경우
-                    elif 'content' in file_params:
-                        logger.info(f"게시물 내용으로 처리 중: {post['title']}")
-                        
-                        # 대체 데이터 생성
-                        placeholder_df = create_placeholder_dataframe(post)
-                        if not placeholder_df.empty:
-                            update_data = {
-                                'dataframe': placeholder_df,
-                                'post_info': post
-                            }
-                            
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
-                            
-                            success = update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
-                    
-                    # AJAX 데이터가 있는 경우
-                    elif 'ajax_data' in file_params:
-                        logger.info(f"AJAX 데이터로 처리 중: {post['title']}")
-                        
-                        # 대체 데이터 생성
-                        placeholder_df = create_placeholder_dataframe(post)
-                        placeholder_df['AJAX 데이터'] = ['있음']
-                        
-                        if not placeholder_df.empty:
-                            update_data = {
-                                'dataframe': placeholder_df,
-                                'post_info': post
-                            }
-                            
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
-                            
-                            success = update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"AJAX 데이터로 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
-                    
+                    else:
+                        logger.error(f"게시물 상세 페이지 접근 실패: {post['title']}")
+            
                     # API 속도 제한 방지를 위한 지연
                     time.sleep(2)
-                
+            
                 except Exception as e:
                     logger.error(f"게시물 처리 중 오류: {str(e)}")
                     
