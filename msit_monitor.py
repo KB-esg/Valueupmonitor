@@ -459,9 +459,9 @@ class MSITMonitor:
             
             # 스크린샷 저장
             self.take_screenshot(driver, f"parsed_page_{page_num}")
-		
-		
-		# 스크린샷 저장 (디버깅용)
+        
+        
+        # 스크린샷 저장 (디버깅용)
             try:
                 driver.save_screenshot('last_parsed_page.png')
                 logger.info("현재 페이지 스크린샷 저장 완료: last_parsed_page.png")
@@ -612,7 +612,7 @@ class MSITMonitor:
                 driver.get(detail_url)
                 time.sleep(retry_delay)
 
-		      
+              
                 # 스크린샷 저장
                 self.take_screenshot(driver, f"post_view_{post['post_id']}_attempt_{attempt}")
             
@@ -648,7 +648,7 @@ class MSITMonitor:
                         continue
                 
                 # 시스템 점검 페이지 감지
-		    # 시스템 점검 페이지 감지
+            # 시스템 점검 페이지 감지
                 if "시스템 점검 안내" in driver.page_source:
                     if attempt < max_retries - 1:
                         logger.warning("시스템 점검 중입니다. 나중에 다시 시도합니다.")
@@ -863,12 +863,12 @@ class MSITMonitor:
                 current_url = driver.current_url
                 logger.info(f"현재 URL: {current_url}")
 
-		   
+           
                 # 스크린샷 저장
                 self.take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
                 
 
-		    
+            
                 # 현재 페이지 스크린샷 저장 (디버깅용)
                 try:
                     driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
@@ -1669,7 +1669,7 @@ class MSITMonitor:
             screenshots_dir = Path("./screenshots")
             screenshots_dir.mkdir(exist_ok=True)
 
-		
+        
             # WebDriver 초기화
             driver = self.setup_driver()
             logger.info("WebDriver 초기화 완료")
@@ -1809,7 +1809,7 @@ class MSITMonitor:
                                 if 'date' in file_params:
                                     update_data['date'] = file_params['date']
                                 
-				success = self.update_google_sheets(gs_client, update_data)
+                success = self.update_google_sheets(gs_client, update_data)
                                 if success:
                                     logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
