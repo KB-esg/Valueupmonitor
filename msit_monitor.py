@@ -56,61 +56,49 @@ CONFIG = {
 TEMP_DIR = Path("./downloads")
 TEMP_DIR.mkdir(exist_ok=True)
 
+
+
 def setup_driver():
-    """Selenium WebDriver 설정 (향상된 봇 탐지 회피)"""
+    """Selenium WebDriver 설정 (자동화 감지 회피 강화)"""
     options = Options()
-    # 비-headless 모드 실행 (GitHub Actions에서 Xvfb 사용 시)
+    
+    # 기존 옵션들 (유지)
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
-    
-    # 추가 성능 및 안정성 옵션
     options.add_argument('--disable-extensions')
     options.add_argument('--disable-popup-blocking')
     options.add_argument('--disable-web-security')
-    options.add_argument('--blink-settings=imagesEnabled=true')  # 이미지 로드 허용
+    options.add_argument('--blink-settings=imagesEnabled=true')
     
-    # WebGL 지문을 숨기기 위한 설정
-    options.add_argument('--disable-features=WebglDraftExtensions,WebglDecoderExtensions,WebglExtensionForceEnable,WebglImageChromium,WebglOverlays,WebglProgramCacheControl')
-    
-    # 캐시 비활성화 (항상 새로운 세션처럼 보이도록)
-    options.add_argument('--disable-application-cache')
-    options.add_argument('--disable-browser-cache')
-    
-    # 무작위 사용자 데이터 디렉토리 생성 (추적 방지)
-    temp_user_data_dir = f"/tmp/chrome-user-data-{int(time.time())}-{random.randint(1000, 9999)}"
-    options.add_argument(f'--user-data-dir={temp_user_data_dir}')
-    logger.info(f"임시 사용자 데이터 디렉토리 생성: {temp_user_data_dir}")
-    
-    # 랜덤 User-Agent 설정
+    # 랜덤 User-Agent
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.55 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0"
     ]
     selected_ua = random.choice(user_agents)
     options.add_argument(f"user-agent={selected_ua}")
     logger.info(f"선택된 User-Agent: {selected_ua}")
     
-    # 자동화 감지 우회를 위한 옵션
+    # 자동화 감지 우회 설정
+    options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("--disable-blink-features=AutomationControlled")
     
-    # 불필요한 로그 비활성화
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    # 무작위 사용자 데이터 디렉토리
+    temp_user_data_dir = f"/tmp/chrome-user-data-{int(time.time())}-{random.randint(1000, 9999)}"
+    options.add_argument(f'--user-data-dir={temp_user_data_dir}')
+    logger.info(f"임시 사용자 데이터 디렉토리 생성: {temp_user_data_dir}")
     
     try:
-        # webdriver-manager 사용
+        # WebDriver 설정
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
         logger.info("ChromeDriverManager를 통한 드라이버 설치 완료")
     except Exception as e:
-        logger.error(f"WebDriver 설정 중 오류: {str(e)}")
         # 기본 경로 사용
         if os.path.exists('/usr/bin/chromedriver'):
             service = Service('/usr/bin/chromedriver')
@@ -118,12 +106,96 @@ def setup_driver():
         else:
             raise Exception("ChromeDriver를 찾을 수 없습니다")
     
+    # 드라이버 생성
     driver = webdriver.Chrome(service=service, options=options)
     
     # 페이지 로드 타임아웃 증가
     driver.set_page_load_timeout(90)
     
-    # Selenium Stealth 적용 (있는 경우)
+    # CDP를 사용하여 자동화 감지 우회 스크립트 주입 (더 안정적인 방법)
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                // 자동화 감지 회피 스크립트
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                
+                // 권한 쿼리 감지 회피
+                const originalPermissionsQuery = window.navigator.permissions?.query;
+                if (originalPermissionsQuery) {
+                    window.navigator.permissions.query = (parameters) => {
+                        if (parameters.name === 'notifications' || parameters.name === 'clipboard-read') {
+                            return Promise.resolve({state: "prompt", onchange: null});
+                        }
+                        return originalPermissionsQuery(parameters);
+                    };
+                }
+                
+                // 스크립트 감지 피하기
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                
+                // 쿠키 관련 함수 조작 방지
+                Object.defineProperty(document, 'cookie', {
+                    get: function() {
+                        return "__cookieDetectionDefense=true; " + document.__originalCookie;
+                    },
+                    set: function(val) {
+                        document.__originalCookie = val;
+                        return val;
+                    }
+                });
+                
+                
+                // 언어 설정
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['ko-KR', 'ko', 'en-US', 'en']
+                });
+                
+                // 하드웨어 정보 숨기기
+                Object.defineProperty(navigator, 'deviceMemory', {
+                    get: () => 8
+                });
+                
+                // 스크린 정보 무작위화
+                const screenDetails = {
+                    width: Math.floor(Math.random() * 200) + 1366,
+                    height: Math.floor(Math.random() * 100) + 768,
+                    colorDepth: 24,
+                    pixelDepth: 24
+                };
+                
+                Object.defineProperty(screen, 'width', { get: () => screenDetails.width });
+                Object.defineProperty(screen, 'height', { get: () => screenDetails.height });
+                Object.defineProperty(screen, 'colorDepth', { get: () => screenDetails.colorDepth });
+                Object.defineProperty(screen, 'pixelDepth', { get: () => screenDetails.pixelDepth });
+                
+                // Chrome 객체 숨기기
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
+            """
+        })
+        logger.info("CDP를 통한 자동화 감지 회피 스크립트 주입 완료")
+    except Exception as cdp_err:
+        logger.warning(f"CDP 스크립트 주입 중 오류: {str(cdp_err)}")
+        
+        # 대체 방법: 일반 JavaScript 실행
+        try:
+            stealth_script = """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """
+            driver.execute_script(stealth_script)
+            logger.info("기본 JavaScript로 webdriver 속성 재정의 완료")
+        except Exception as js_err:
+            logger.warning(f"JavaScript 실행 중 오류: {str(js_err)}")
+    
+    # 실행 환경에 따라 selenium-stealth 적용 (있는 경우)
     try:
         from selenium_stealth import stealth
         stealth(driver,
@@ -137,17 +209,21 @@ def setup_driver():
     except ImportError:
         logger.warning("selenium-stealth 라이브러리를 찾을 수 없습니다. 기본 모드로 계속합니다.")
     
-    # 추가 스텔스 설정
-    try:
-        # 웹드라이버 탐지 방지를 위한 JavaScript 실행
-        driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
-        logger.info("추가 스텔스 설정 적용 완료")
-    except Exception as js_err:
-        logger.warning(f"추가 스텔스 설정 적용 중 오류: {str(js_err)}")
-    
     return driver
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def setup_gspread_client():
     """Google Sheets 클라이언트 초기화"""
@@ -780,230 +856,53 @@ def parse_page(driver, page_num=1, days_range=4):
         logger.error(f"페이지 파싱 중 에러: {str(e)}")
         return [], [], False
 
-##############################33
+##############################
 def find_view_link_params(driver, post):
-    """게시물에서 바로보기 링크 파라미터 찾기 (클릭 방식 우선)"""
+    """게시물에서 바로보기 링크 파라미터 찾기 (개선된 버전)"""
     if not post.get('post_id'):
         logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
         return None
     
     logger.info(f"게시물 열기: {post['title']}")
     
-    # 현재 URL 저장
-    current_url = driver.current_url
-    
-    # 게시물 목록 페이지로 돌아가기
-    try:
-        driver.get(CONFIG['stats_url'])
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-        )
-        time.sleep(2)  # 추가 대기
-    except Exception as e:
-        logger.error(f"게시물 목록 페이지 접근 실패: {str(e)}")
-        return direct_access_view_link_params(driver, post)
+    # 게시물 상세 페이지 직접 접근
+    detail_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+    logger.info(f"게시물 상세 페이지 접근: {detail_url}")
     
     # 최대 재시도 횟수
     max_retries = 3
-    retry_delay = 2
-    
     for attempt in range(max_retries):
         try:
-            # 제목으로 게시물 링크 찾기
-            xpath_selectors = [
-                f"//p[contains(@class, 'title') and contains(text(), '{post['title'][:20]}')]",
-                f"//a[contains(text(), '{post['title'][:20]}')]",
-                f"//div[contains(@class, 'toggle') and contains(., '{post['title'][:20]}')]"
-            ]
-            
-            post_link = None
-            for selector in xpath_selectors:
-                try:
-                    elements = driver.find_elements(By.XPATH, selector)
-                    if elements:
-                        post_link = elements[0]
-                        logger.info(f"게시물 링크 발견 (선택자: {selector})")
-                        break
-                except Exception as find_err:
-                    logger.warning(f"선택자로 게시물 찾기 실패: {selector}")
-                    continue
-            
-            if not post_link:
-                logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
-                
-                if attempt < max_retries - 1:
-                    logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    # 직접 URL 접근 방식으로 대체
-                    logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                    return direct_access_view_link_params(driver, post)
-            
-            # 스크린샷 저장 (클릭 전)
-            take_screenshot(driver, f"before_click_{post['post_id']}")
-            
-            # 링크 클릭하여 상세 페이지로 이동
-            logger.info(f"게시물 링크 클릭 시도: {post['title']}")
-            
-            # JavaScript로 클릭 시도 (더 신뢰성 있는 방법)
-            try:
-                driver.execute_script("arguments[0].click();", post_link)
-                logger.info("JavaScript를 통한 클릭 실행")
-            except Exception as js_click_err:
-                logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
-                # 일반 클릭 시도
-                post_link.click()
-                logger.info("일반 클릭 실행")
+            # 페이지 로드
+            driver.get(detail_url)
             
             # 페이지 로드 대기
             try:
                 WebDriverWait(driver, 15).until(
-                    lambda d: d.current_url != CONFIG['stats_url']
+                    EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
                 )
-                logger.info(f"페이지 URL 변경 감지됨: {driver.current_url}")
-                time.sleep(3)  # 추가 대기
+                logger.info("게시물 상세 페이지 로드 완료")
             except TimeoutException:
-                logger.warning("URL 변경 감지 실패")
+                logger.warning("게시물 상세 페이지 로드 시간 초과")
             
-            # 상세 페이지 대기
-            wait_elements = [
-                (By.CLASS_NAME, "view_head"),
-                (By.CLASS_NAME, "view_cont"),
-                (By.CSS_SELECTOR, ".bbs_wrap .view"),
-                (By.XPATH, "//div[contains(@class, 'view')]")
-            ]
+            # 스크린샷 저장 (디버깅용)
+            take_screenshot(driver, f"post_view_{post['post_id']}")
             
-            element_found = False
-            for by_type, selector in wait_elements:
-                try:
-                    WebDriverWait(driver, 15).until(
-                        EC.presence_of_element_located((by_type, selector))
-                    )
-                    logger.info(f"상세 페이지 로드 완료: {selector} 요소 발견")
-                    element_found = True
-                    break
-                except TimeoutException:
-                    continue
+            # 바로보기 링크 찾기 (우선순위대로 시도)
+            view_link = None
             
-            if not element_found:
-                logger.warning("상세 페이지 로드 실패")
-                if attempt < max_retries - 1:
-                    continue
-                else:
-                    # AJAX 방식 시도
-                    logger.info("AJAX 방식으로 접근 시도")
-                    ajax_result = try_ajax_access(driver, post)
-                    if ajax_result:
-                        return ajax_result
-                    
-                    # 직접 URL 접근 방식으로 대체
-                    return direct_access_view_link_params(driver, post)
-            
-            # 스크린샷 저장
-            take_screenshot(driver, f"post_view_clicked_{post['post_id']}")
-            
-            # 바로보기 링크 찾기 (확장된 선택자)
-            try:
-                # 여러 선택자로 바로보기 링크 찾기
-                view_links = []
+            # 전략 1: getExtension_path 함수를 사용하는 링크 찾기
+            links = driver.find_elements(By.XPATH, "//a[contains(@onclick, 'getExtension_path')]")
+            if links:
+                view_link = links[0]
+                onclick_attr = view_link.get_attribute('onclick')
+                logger.info(f"바로보기 링크 발견 (getExtension_path): {onclick_attr}")
                 
-                # 1. 일반적인 '바로보기' 링크
-                view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
-                
-                # 2. onclick 속성으로 찾기
-                if not view_links:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
-                
-                # 3. 텍스트로 찾기
-                if not view_links:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if '바로보기' in (link.text or '')]
-                
-                # 4. class 속성으로 찾기
-                if not view_links:
-                    view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
-                
-                # 5. 제목에 포함된 키워드로 관련 링크 찾기
-                if not view_links and '통계' in post['title']:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if 
-                                any(ext in (link.get_attribute('href') or '')  
-                                   for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
-                
-                if view_links:
-                    view_link = view_links[0]
-                    onclick_attr = view_link.get_attribute('onclick')
-                    href_attr = view_link.get_attribute('href')
-                    
-                    logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}, href: {href_attr}")
-                    
-                    # getExtension_path('49234', '1') 형식에서 매개변수 추출
-                    if onclick_attr and 'getExtension_path' in onclick_attr:
-                        match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
-                        if match:
-                            atch_file_no = match.group(1)
-                            file_ord = match.group(2)
-                            
-                            # 날짜 정보 추출
-                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                            if date_match:
-                                year = int(date_match.group(1))
-                                month = int(date_match.group(2))
-                                
-                                return {
-                                    'atch_file_no': atch_file_no,
-                                    'file_ord': file_ord,
-                                    'date': {'year': year, 'month': month},
-                                    'post_info': post
-                                }
-                            
-                            return {
-                                'atch_file_no': atch_file_no,
-                                'file_ord': file_ord,
-                                'post_info': post
-                            }
-                    # 직접 다운로드 URL인 경우 처리
-                    elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
-                        logger.info(f"직접 다운로드 링크 발견: {href_attr}")
-                        
-                        # 날짜 정보 추출
-                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                        if date_match:
-                            year = int(date_match.group(1))
-                            month = int(date_match.group(2))
-                            
-                            return {
-                                'download_url': href_attr,
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
-                
-                # 바로보기 링크를 찾을 수 없는 경우
-                logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
-                
-                # 게시물 내용 추출 시도
-                try:
-                    # 다양한 선택자로 내용 찾기
-                    content_selectors = [
-                        "div.view_cont", 
-                        ".view_content", 
-                        ".bbs_content",
-                        ".bbs_detail_content",
-                        "div[class*='view'] div[class*='cont']"
-                    ]
-                    
-                    content = ""
-                    for selector in content_selectors:
-                        try:
-                            content_elem = driver.find_element(By.CSS_SELECTOR, selector)
-                            content = content_elem.text if content_elem else ""
-                            if content.strip():
-                                logger.info(f"게시물 내용 추출 성공 (길이: {len(content)})")
-                                break
-                        except:
-                            continue
+                # 파라미터 추출
+                match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                if match:
+                    atch_file_no = match.group(1)
+                    file_ord = match.group(2)
                     
                     # 날짜 정보 추출
                     date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
@@ -1012,59 +911,245 @@ def find_view_link_params(driver, post):
                         month = int(date_match.group(2))
                         
                         return {
-                            'content': content if content else "내용 없음",
+                            'atch_file_no': atch_file_no,
+                            'file_ord': file_ord,
                             'date': {'year': year, 'month': month},
                             'post_info': post
                         }
                     
-                except Exception as content_err:
-                    logger.warning(f"게시물 내용 추출 중 오류: {str(content_err)}")
+                    return {
+                        'atch_file_no': atch_file_no,
+                        'file_ord': file_ord,
+                        'post_info': post
+                    }
+            
+            # 전략 2: view 클래스나 바로보기 텍스트를 포함하는 링크 찾기
+            if not view_link:
+                xpath_patterns = [
+                    "//a[contains(@class, 'view')]",
+                    "//a[contains(text(), '바로보기')]",
+                    "//a[@title='새창 열림']",
+                    "//a[contains(@href, 'documentView.do')]"
+                ]
                 
-                # 날짜 정보 추출
+                for xpath in xpath_patterns:
+                    links = driver.find_elements(By.XPATH, xpath)
+                    if links:
+                        view_link = links[0]
+                        href_attr = view_link.get_attribute('href')
+                        onclick_attr = view_link.get_attribute('onclick')
+                        logger.info(f"바로보기 링크 발견 (패턴 '{xpath}'): href={href_attr}, onclick={onclick_attr}")
+                        
+                        # onclick 속성에서 파라미터 추출 시도
+                        if onclick_attr and 'getExtension_path' in onclick_attr:
+                            match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                            if match:
+                                atch_file_no = match.group(1)
+                                file_ord = match.group(2)
+                                
+                                # 날짜 정보 추출
+                                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                if date_match:
+                                    year = int(date_match.group(1))
+                                    month = int(date_match.group(2))
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'date': {'year': year, 'month': month},
+                                        'post_info': post
+                                    }
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'post_info': post
+                                }
+                        
+                        # href 속성에서 파라미터 추출 시도
+                        if href_attr and 'documentView.do' in href_attr:
+                            match = re.search(r"atchFileNo=(\d+)&fileOrdr=(\d+)", href_attr)
+                            if match:
+                                atch_file_no = match.group(1)
+                                file_ord = match.group(2)
+                                
+                                # 날짜 정보 추출
+                                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                if date_match:
+                                    year = int(date_match.group(1))
+                                    month = int(date_match.group(2))
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'date': {'year': year, 'month': month},
+                                        'post_info': post
+                                    }
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'post_info': post
+                                }
+                        
+                        # 직접 다운로드 URL인 경우
+                        if href_attr and any(ext in href_attr.lower() for ext in ['.xls', '.xlsx', '.csv', '.pdf', '.hwp']):
+                            # 날짜 정보 추출
+                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                            if date_match:
+                                year = int(date_match.group(1))
+                                month = int(date_match.group(2))
+                                
+                                return {
+                                    'download_url': href_attr,
+                                    'date': {'year': year, 'month': month},
+                                    'post_info': post
+                                }
+                            
+                            return {
+                                'download_url': href_attr,
+                                'post_info': post
+                            }
+                        
+                        break
+            
+            # 전략 3: 첨부파일 영역에서 첫 번째 파일 링크 찾기
+            if not view_link:
+                attachment_sections = driver.find_elements(By.XPATH, "//div[contains(@class, 'view_file')] | //div[contains(@class, 'attach')]")
+                if attachment_sections:
+                    file_links = attachment_sections[0].find_elements(By.TAG_NAME, "a")
+                    if file_links:
+                        view_link = file_links[0]
+                        href_attr = view_link.get_attribute('href')
+                        onclick_attr = view_link.get_attribute('onclick')
+                        logger.info(f"첨부파일 영역에서 링크 발견: href={href_attr}, onclick={onclick_attr}")
+                        
+                        # onclick 속성 처리
+                        if onclick_attr and 'getExtension_path' in onclick_attr:
+                            match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                            if match:
+                                atch_file_no = match.group(1)
+                                file_ord = match.group(2)
+                                
+                                # 날짜 정보 추출
+                                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                if date_match:
+                                    year = int(date_match.group(1))
+                                    month = int(date_match.group(2))
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'date': {'year': year, 'month': month},
+                                        'post_info': post
+                                    }
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'post_info': post
+                                }
+            
+            # 바로보기 링크를 찾지 못한 경우
+            if not view_link:
+                logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+                
+                # AJAX를 통한 첨부파일 정보 가져오기 시도
+                try:
+                    file_info = driver.execute_script("""
+                        return new Promise((resolve, reject) => {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('GET', '/bbs/api/getAttachmentList.do?nttSeqNo=""" + post['post_id'] + """', true);
+                            xhr.onload = function() {
+                                if (this.status >= 200 && this.status < 300) {
+                                    resolve(xhr.responseText);
+                                } else {
+                                    reject(xhr.statusText);
+                                }
+                            };
+                            xhr.onerror = function() {
+                                reject(xhr.statusText);
+                            };
+                            xhr.send();
+                        });
+                    """)
+                    
+                    if file_info:
+                        try:
+                            file_data = json.loads(file_info)
+                            if 'attachList' in file_data and file_data['attachList']:
+                                attachment = file_data['attachList'][0]  # 첫 번째 첨부파일
+                                atch_file_no = attachment.get('atchFileNo')
+                                file_ord = attachment.get('fileOrdr', 1)
+                                
+                                if atch_file_no:
+                                    # 날짜 정보 추출
+                                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                    if date_match:
+                                        year = int(date_match.group(1))
+                                        month = int(date_match.group(2))
+                                        
+                                        return {
+                                            'atch_file_no': atch_file_no,
+                                            'file_ord': file_ord,
+                                            'date': {'year': year, 'month': month},
+                                            'post_info': post
+                                        }
+                                    
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'post_info': post
+                                    }
+                        except json.JSONDecodeError:
+                            logger.warning("AJAX 응답을 JSON으로 파싱할 수 없음")
+                except Exception as ajax_err:
+                    logger.warning(f"AJAX 요청 중 오류: {str(ajax_err)}")
+                
+                # 날짜 정보만 추출하여 반환
                 date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
                 if date_match:
                     year = int(date_match.group(1))
                     month = int(date_match.group(2))
                     
+                    # 게시물 내용 추출
+                    content_elements = driver.find_elements(By.CSS_SELECTOR, "div.view_cont, .bbs_content, .view_content")
+                    content = ""
+                    if content_elements:
+                        content = content_elements[0].text
+                    
                     return {
-                        'content': "내용 없음",
+                        'content': content,
                         'date': {'year': year, 'month': month},
                         'post_info': post
                     }
                 
-                return None
-                
-            except Exception as e:
-                logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
-                
-                # 오류 발생 시에도 날짜 정보 추출 시도
-                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                if date_match:
-                    year = int(date_match.group(1))
-                    month = int(date_match.group(2))
-                    
-                    return {
-                        'content': f"오류 발생: {str(e)}",
-                        'date': {'year': year, 'month': month},
-                        'post_info': post
-                    }
-                    
+                # 날짜 정보도 없는 경우
                 return None
                 
         except Exception as e:
-            logger.error(f"게시물 클릭 접근 중 오류: {str(e)}")
+            logger.error(f"게시물 {post['title']} 처리 중 오류: {str(e)}")
             
             if attempt < max_retries - 1:
-                logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                time.sleep(retry_delay * 2)
+                logger.info(f"재시도 {attempt+1}/{max_retries}...")
+                time.sleep(3)  # 잠시 대기 후 재시도
             else:
-                # 직접 URL 접근 방식으로 대체
-                logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                return direct_access_view_link_params(driver, post)
+                # 날짜 정보만 추출하여 반환
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'error': str(e),
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+                return None
     
-    # 모든 시도 실패 시 직접 URL 접근 방식으로 대체
-    return direct_access_view_link_params(driver, post)
-
+    # 모든 시도 실패
+    return None
+    
 def direct_access_view_link_params(driver, post):
     """직접 URL 접근 방식으로 게시물에서 바로보기 링크 파라미터 찾기 (기존 방식)"""
     if not post.get('post_id'):
@@ -1711,6 +1796,492 @@ def access_iframe_direct(driver, file_params):
                 return None
     
     return None
+
+def extract_from_synap_viewer(driver, file_params):
+    """향상된 Synap Document Viewer 데이터 추출"""
+    view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+    logger.info(f"바로보기 URL 접근: {view_url}")
+    
+    driver.get(view_url)
+    time.sleep(5)  # 리디렉션 대기
+    
+    # 현재 URL 확인 (리디렉션 후)
+    current_url = driver.current_url
+    logger.info(f"리디렉션 후 URL: {current_url}")
+    
+    if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
+        logger.info("Synap Document Viewer 감지됨")
+        
+        # 시트 탭 대기
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "sheet-list__sheet-tab"))
+            )
+            
+            # 스크린샷 (디버깅용)
+            driver.save_screenshot(f"synap_viewer_{file_params['atch_file_no']}.png")
+            
+            # 시트 탭 확인
+            sheet_tabs = driver.find_elements(By.CLASS_NAME, "sheet-list__sheet-tab")
+            logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+            
+            all_data = {}
+            
+            for i, tab in enumerate(sheet_tabs):
+                sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+                logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리: {sheet_name}")
+                
+                # 첫 번째가 아닌 시트는 클릭하여 활성화
+                if i > 0:
+                    try:
+                        # JavaScript로 클릭 (더 안정적)
+                        driver.execute_script("arguments[0].click();", tab)
+                        logger.info(f"시트 탭 '{sheet_name}' 클릭")
+                        time.sleep(3)  # 시트 전환 대기
+                        
+                        # 시트 전환 확인
+                        active_tab = driver.find_element(By.CSS_SELECTOR, ".sheet-list__sheet-tab--on")
+                        if active_tab.text.strip() != sheet_name:
+                            logger.warning(f"시트 전환 실패: {active_tab.text.strip()} != {sheet_name}")
+                            continue
+                    except Exception as e:
+                        logger.error(f"시트 전환 중 오류: {str(e)}")
+                        continue
+                
+                # innerWrap iframe 처리
+                try:
+                    # iframe 확인
+                    iframe = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "innerWrap"))
+                    )
+                    
+                    # iframe 소스 URL 확인
+                    iframe_src = iframe.get_attribute('src')
+                    logger.info(f"iframe 소스: {iframe_src}")
+                    
+                    # iframe으로 전환
+                    driver.switch_to.frame(iframe)
+                    
+                    # 현재 iframe의 HTML 가져오기
+                    iframe_html = driver.execute_script("return document.documentElement.outerHTML;")
+                    
+                    # 방법 1: pandas read_html 사용 (가능할 경우)
+                    try:
+                        tables = pd.read_html(iframe_html)
+                        if tables:
+                            largest_table = max(tables, key=lambda t: t.shape[0] * t.shape[1])
+                            all_data[sheet_name] = largest_table
+                            logger.info(f"pandas로 테이블 추출 성공: {largest_table.shape}")
+                        else:
+                            logger.warning("pandas로 테이블을 찾지 못함")
+                    except Exception as e:
+                        logger.warning(f"pandas 테이블 추출 실패: {str(e)}")
+                    
+                    # 방법 2: BeautifulSoup으로 직접 테이블 추출 (방법 1 실패 시)
+                    if sheet_name not in all_data:
+                        try:
+                            soup = BeautifulSoup(iframe_html, 'html.parser')
+                            
+                            # 모든 테이블 요소 찾기
+                            tables = soup.find_all('table')
+                            logger.info(f"{len(tables)}개 테이블 요소 발견")
+                            
+                            if tables:
+                                # 가장 큰 테이블 선택
+                                largest_table = max(tables, key=lambda t: len(t.find_all('tr')))
+                                
+                                # 테이블 데이터 추출
+                                df = extract_table_from_html_element(largest_table)
+                                
+                                if df is not None and not df.empty:
+                                    all_data[sheet_name] = df
+                                    logger.info(f"BeautifulSoup으로 테이블 추출 성공: {df.shape}")
+                                else:
+                                    logger.warning("BeautifulSoup으로 테이블 데이터 추출 실패")
+                            else:
+                                logger.warning("테이블 요소를 찾을 수 없음")
+                                
+                                # 테이블이 없을 경우 특별 처리 시도
+                                divs = soup.find_all('div', class_=lambda c: c and ('table' in c.lower() or 'grid' in c.lower()))
+                                if divs:
+                                    logger.info(f"{len(divs)}개 테이블형 div 요소 발견")
+                                    # 테이블형 div에서 데이터 추출 시도
+                                    df = extract_data_from_div_grid(divs[0])
+                                    if df is not None and not df.empty:
+                                        all_data[sheet_name] = df
+                                        logger.info(f"div에서 테이블 데이터 추출 성공: {df.shape}")
+                        except Exception as bs_err:
+                            logger.error(f"BeautifulSoup 테이블 추출 오류: {str(bs_err)}")
+                    
+                    # 방법 3: JavaScript로 테이블 데이터 추출 (방법 1, 2 실패 시)
+                    if sheet_name not in all_data:
+                        try:
+                            # JavaScript로 테이블 데이터 직접 추출
+                            table_data = driver.execute_script("""
+                                // 테이블 요소 찾기
+                                var tables = document.getElementsByTagName('table');
+                                if (tables.length === 0) return null;
+                                
+                                // 가장 큰 테이블 찾기
+                                var largestTable = tables[0];
+                                var maxRows = largestTable.rows.length;
+                                for (var i = 1; i < tables.length; i++) {
+                                    if (tables[i].rows.length > maxRows) {
+                                        largestTable = tables[i];
+                                        maxRows = tables[i].rows.length;
+                                    }
+                                }
+                                
+                                // 테이블 데이터 추출
+                                var data = [];
+                                for (var i = 0; i < largestTable.rows.length; i++) {
+                                    var row = largestTable.rows[i];
+                                    var rowData = [];
+                                    for (var j = 0; j < row.cells.length; j++) {
+                                        rowData.push(row.cells[j].innerText.trim());
+                                    }
+                                    data.push(rowData);
+                                }
+                                return data;
+                            """)
+                            
+                            if table_data:
+                                # 헤더와 데이터 분리
+                                headers = table_data[0] if table_data else []
+                                data_rows = table_data[1:] if len(table_data) > 1 else []
+                                
+                                # DataFrame 생성
+                                df = pd.DataFrame(data_rows, columns=headers)
+                                all_data[sheet_name] = df
+                                logger.info(f"JavaScript로 테이블 추출 성공: {df.shape}")
+                            else:
+                                logger.warning("JavaScript로 테이블 데이터를 찾을 수 없음")
+                        except Exception as js_err:
+                            logger.error(f"JavaScript 테이블 추출 오류: {str(js_err)}")
+                    
+                    # 기본 프레임으로 돌아가기
+                    driver.switch_to.default_content()
+                    
+                except Exception as iframe_err:
+                    logger.error(f"iframe 처리 중 오류: {str(iframe_err)}")
+                    # 기본 프레임으로 돌아가기 시도
+                    try:
+                        driver.switch_to.default_content()
+                    except:
+                        pass
+            
+            if all_data:
+                logger.info(f"{len(all_data)}개 시트에서 데이터 추출 완료")
+                return all_data
+            else:
+                logger.warning("모든 시트에서 데이터 추출 실패")
+                return None
+                
+        except Exception as e:
+            logger.error(f"시트 처리 중 오류 발생: {str(e)}")
+            return None
+    else:
+        logger.warning(f"Synap Document Viewer로 리디렉션되지 않음: {current_url}")
+        
+        # Excel 파일 다운로드 시도
+        try:
+            direct_download_url = f"https://www.msit.go.kr/bbs/fileDown.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+            logger.info(f"직접 다운로드 시도: {direct_download_url}")
+            
+            return download_and_process_file(direct_download_url)
+        except Exception as download_err:
+            logger.error(f"파일 다운로드 시도 중 오류: {str(download_err)}")
+            return None
+
+def extract_table_from_html_element(table_element):
+    """
+    BeautifulSoup 테이블 요소에서 DataFrame 추출
+    colspan, rowspan 속성 처리 포함
+    """
+    rows = []
+    headers = []
+    
+    # 헤더 행 처리
+    thead = table_element.find('thead')
+    if thead:
+        th_elements = thead.find_all('th')
+        headers = [th.get_text(strip=True) for th in th_elements]
+    
+    # 헤더가 없으면 첫 번째 행을 헤더로 시도
+    if not headers:
+        first_row = table_element.find('tr')
+        if first_row:
+            header_cells = first_row.find_all(['th', 'td'])
+            headers = [cell.get_text(strip=True) for cell in header_cells]
+            
+            # 숫자로만 이루어진 헤더나 빈 헤더는 열 인덱스로 대체
+            for i, header in enumerate(headers):
+                if header.isdigit() or not header:
+                    headers[i] = f"Column_{i+1}"
+    
+    # 데이터 행 처리
+    # 첫 번째 행이 헤더인 경우 건너뛰기
+    rows_to_process = table_element.find_all('tr')[1:] if headers else table_element.find_all('tr')
+    
+    # 행/열 병합 처리를 위한 그리드 추적
+    grid = {}  # (row, col) -> value
+    
+    for row_idx, row in enumerate(rows_to_process):
+        cells = row.find_all(['td', 'th'])
+        row_data = []
+        col_idx = 0
+        
+        # 이전 행에서 rowspan으로 확장된 셀 처리
+        while (row_idx, col_idx) in grid:
+            row_data.append(grid[(row_idx, col_idx)])
+            col_idx += 1
+            
+        for cell in cells:
+            # 현재 열에 이미 값이 있으면 다음 열로 이동
+            while (row_idx, col_idx) in grid:
+                col_idx += 1
+            
+            # 셀 값 추출
+            cell_value = cell.get_text(strip=True)
+            
+            # colspan 및 rowspan 속성 처리
+            colspan = int(cell.get('colspan', 1))
+            rowspan = int(cell.get('rowspan', 1))
+            
+            # 현재 셀 추가
+            row_data.append(cell_value)
+            
+            # rowspan이 있는 경우 다음 행에 값 추가
+            if rowspan > 1:
+                for r in range(1, rowspan):
+                    grid[(row_idx + r, col_idx)] = cell_value
+            
+            # colspan이 있는 경우 현재 행에 값 추가
+            if colspan > 1:
+                for c in range(1, colspan):
+                    row_data.append(cell_value)
+                    
+                    # rowspan과 colspan이 모두 있는 경우
+                    if rowspan > 1:
+                        for r in range(1, rowspan):
+                            grid[(row_idx + r, col_idx + c)] = cell_value
+            
+            col_idx += colspan
+        
+        # 빈 행 무시
+        if any(cell for cell in row_data):
+            rows.append(row_data)
+    
+    # 열 수 정규화 (모든 행이 같은 열 수를 갖도록)
+    max_cols = max([len(row) for row in rows]) if rows else 0
+    if headers:
+        # 헤더가 부족하면 추가
+        if len(headers) < max_cols:
+            for i in range(len(headers), max_cols):
+                headers.append(f"Column_{i+1}")
+        # 헤더가 너무 많으면 자르기
+        elif len(headers) > max_cols:
+            headers = headers[:max_cols]
+    else:
+        # 헤더가 없으면 생성
+        headers = [f"Column_{i+1}" for i in range(max_cols)]
+    
+    # 행 길이 정규화
+    normalized_rows = []
+    for row in rows:
+        if len(row) < max_cols:
+            normalized_rows.append(row + [''] * (max_cols - len(row)))
+        elif len(row) > max_cols:
+            normalized_rows.append(row[:max_cols])
+        else:
+            normalized_rows.append(row)
+    
+    # DataFrame 생성
+    df = pd.DataFrame(normalized_rows, columns=headers)
+    
+    # 데이터 전처리
+    # 빈 열 제거
+    df = df.loc[:, ~df.isna().all() & ~(df == '').all()]
+    
+    # 빈 행 제거
+    df = df.loc[~df.isna().all(axis=1) & ~(df == '').all(axis=1)]
+    
+    # 인덱스 재설정
+    df = df.reset_index(drop=True)
+    
+    return df
+
+
+def extract_data_from_div_grid(div_element):
+    """
+    div 기반 그리드에서 테이블 데이터 추출
+    (테이블 태그를 사용하지 않는 경우)
+    """
+    try:
+        # 행 역할을 하는 div 요소 찾기
+        row_divs = div_element.find_all('div', recursive=False)
+        if not row_divs:
+            # 직계 자식이 없는 경우 더 깊게 탐색
+            row_divs = div_element.find_all('div', class_=lambda c: c and ('row' in c.lower() or 'tr' in c.lower()))
+        
+        if not row_divs:
+            logger.warning("div 그리드에서 행을 찾을 수 없음")
+            return None
+        
+        # 데이터 수집
+        table_data = []
+        
+        for row_div in row_divs:
+            # 열 역할을 하는 자식 요소 찾기
+            cell_divs = row_div.find_all(['div', 'span'], recursive=False)
+            if not cell_divs:
+                # 직계 자식이 없는 경우 더 깊게 탐색
+                cell_divs = row_div.find_all(['div', 'span'], class_=lambda c: c and ('cell' in c.lower() or 'td' in c.lower()))
+            
+            row_data = [cell.get_text(strip=True) for cell in cell_divs]
+            if row_data:
+                table_data.append(row_data)
+        
+        if not table_data:
+            logger.warning("div 그리드에서 데이터를 추출할 수 없음")
+            return None
+        
+        # 헤더와 데이터 분리
+        headers = table_data[0]
+        data = table_data[1:]
+        
+        # 헤더 정규화
+        for i, header in enumerate(headers):
+            if not header:
+                headers[i] = f"Column_{i+1}"
+        
+        # DataFrame 생성
+        df = pd.DataFrame(data, columns=headers)
+        
+        # 데이터 전처리
+        # 빈 열 제거
+        df = df.loc[:, ~df.isna().all() & ~(df == '').all()]
+        
+        # 빈 행 제거
+        df = df.loc[~df.isna().all(axis=1) & ~(df == '').all(axis=1)]
+        
+        # 인덱스 재설정
+        df = df.reset_index(drop=True)
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"div 그리드 데이터 추출 중 오류: {str(e)}")
+        return None
+
+def download_and_process_file(download_url):
+    """
+    Excel/CSV 파일 직접 다운로드 및 처리
+    임시 파일 사용 및 예외 처리 강화
+    """
+    try:
+        # 세션 생성 (쿠키 유지)
+        session = requests.Session()
+        
+        # User-Agent 설정
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+            'Referer': 'https://www.msit.go.kr/',
+        }
+        
+        # 다운로드 시도
+        response = session.get(download_url, headers=headers, stream=True, timeout=30)
+        
+        if response.status_code != 200:
+            logger.error(f"파일 다운로드 실패, 상태 코드: {response.status_code}")
+            return None
+        
+        # Content-Type 확인
+        content_type = response.headers.get('Content-Type', '')
+        content_disposition = response.headers.get('Content-Disposition', '')
+        
+        logger.info(f"다운로드 Content-Type: {content_type}")
+        logger.info(f"Content-Disposition: {content_disposition}")
+        
+        # 파일 확장자 결정
+        file_ext = '.xlsx'  # 기본값
+        if 'excel' in content_type or '.xls' in content_disposition:
+            file_ext = '.xlsx'
+        elif 'sheet' in content_type or '.csv' in content_disposition:
+            file_ext = '.csv'
+        elif 'hwp' in content_type or '.hwp' in content_disposition:
+            logger.warning("한글 파일은 지원하지 않습니다")
+            return None
+        
+        # 임시 파일 생성
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            temp_file_path = temp_file.name
+            
+            # 파일 저장
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    temp_file.write(chunk)
+        
+        logger.info(f"파일 다운로드 완료: {temp_file_path}")
+        
+        # 파일 처리
+        all_data = {}
+        
+        if file_ext == '.csv':
+            # CSV 파일 처리
+            try:
+                df = pd.read_csv(temp_file_path, encoding='utf-8')
+                all_data['Sheet1'] = df
+                logger.info(f"CSV 파일 처리 완료: {df.shape}")
+            except UnicodeDecodeError:
+                # 인코딩 자동 감지 시도
+                try:
+                    import chardet
+                    with open(temp_file_path, 'rb') as f:
+                        result = chardet.detect(f.read())
+                    encoding = result['encoding']
+                    df = pd.read_csv(temp_file_path, encoding=encoding)
+                    all_data['Sheet1'] = df
+                    logger.info(f"CSV 파일 처리 완료 (인코딩: {encoding}): {df.shape}")
+                except Exception as e:
+                    logger.error(f"CSV 파일 인코딩 감지 실패: {str(e)}")
+        else:
+            # Excel 파일 처리
+            try:
+                # 엑셀 파일 열기
+                xl = pd.ExcelFile(temp_file_path)
+                
+                # 모든 시트 처리
+                for sheet_name in xl.sheet_names:
+                    df = pd.read_excel(xl, sheet_name=sheet_name)
+                    
+                    # 빈 시트 제외
+                    if not df.empty:
+                        all_data[sheet_name] = df
+                        logger.info(f"시트 '{sheet_name}' 처리 완료: {df.shape}")
+                
+            except Exception as excel_err:
+                logger.error(f"Excel 파일 처리 중 오류: {str(excel_err)}")
+        
+        # 임시 파일 삭제
+        try:
+            os.unlink(temp_file_path)
+            logger.info(f"임시 파일 삭제 완료: {temp_file_path}")
+        except Exception as unlink_err:
+            logger.warning(f"임시 파일 삭제 실패: {str(unlink_err)}")
+        
+        if all_data:
+            return all_data
+        else:
+            logger.warning("파일에서 데이터를 추출할 수 없습니다")
+            return None
+            
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"파일 다운로드 요청 중 오류: {str(req_err)}")
+        return None
+    except Exception as e:
+        logger.error(f"파일 다운로드 및 처리 중 오류: {str(e)}")
+        return None
 
 def extract_table_from_html(html_content):
     """HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
