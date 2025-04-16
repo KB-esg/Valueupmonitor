@@ -1655,168 +1655,188 @@ class MSITMonitor:
             except Exception as simple_err:
                 logger.error(f"단순화된 텔레그램 메시지 전송 중 오류: {str(simple_err)}")
 
-async def run_monitor(self, days_range=4, check_sheets=True):
-    """모니터링 실행 (향상된 버전)"""
-    driver = None
-    gs_client = None
+    async def run_monitor(self, days_range=4, check_sheets=True):
+        """모니터링 실행 (향상된 버전)"""
+        driver = None
+        gs_client = None
     
-    try:
-        # 시작 시간 기록
-        start_time = time.time()
-        logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
-
-        # 스크린샷 디렉토리 생성
-        screenshots_dir = Path("./screenshots")
-        screenshots_dir.mkdir(exist_ok=True)
-
-        # WebDriver 초기화
-        driver = self.setup_driver()
-        logger.info("WebDriver 초기화 완료")
-        
-        # Google Sheets 클라이언트 초기화
-        if check_sheets and self.gspread_creds:
-            gs_client = self.setup_gspread_client()
-            if gs_client:
-                logger.info("Google Sheets 클라이언트 초기화 완료")
-            else:
-                logger.warning("Google Sheets 클라이언트 초기화 실패")
-        
-        # 랜딩 페이지 접속 후 '통계정보' 버튼 클릭하여 쿠키/세션 정보 설정
         try:
-            landing_url = "https://www.msit.go.kr"
-            driver.get(landing_url)
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "skip_nav"))
-            )
-            logger.info("랜딩 페이지 접속 완료 - 쿠키 및 세션 정보 획득")
-            
+            # 시작 시간 기록
+            start_time = time.time()
+            logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
+
+            # 스크린샷 디렉토리 생성
+            screenshots_dir = Path("./screenshots")
+            screenshots_dir.mkdir(exist_ok=True)
+
+            # WebDriver 초기화
+            driver = self.setup_driver()
+            logger.info("WebDriver 초기화 완료")
+        
+            # Google Sheets 클라이언트 초기화
+            if check_sheets and self.gspread_creds:
+                gs_client = self.setup_gspread_client()
+                if gs_client:
+                    logger.info("Google Sheets 클라이언트 초기화 완료")
+                else:
+                    logger.warning("Google Sheets 클라이언트 초기화 실패")
+        
+            # 랜딩 페이지 접속 후 '통계정보' 버튼 클릭하여 쿠키/세션 정보 설정
             try:
-                driver.save_screenshot("landing_page.png")
-                logger.info("랜딩 페이지 스크린샷 저장 완료")
-            except Exception as ss_err:
-                logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
+                landing_url = "https://www.msit.go.kr"
+                driver.get(landing_url)
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "skip_nav"))
+                )
+                logger.info("랜딩 페이지 접속 완료 - 쿠키 및 세션 정보 획득")
             
-            # 통계정보 링크 찾기 및 클릭
-            stats_link_selectors = [
-                "a[href*='mId=99'][href*='mPid=74']",
-                "a:contains('통계정보')"
-            ]
-            
-            stats_link_found = False
-            for selector in stats_link_selectors:
                 try:
-                    if ':contains' in selector:
-                        # XPath로 텍스트 포함 요소 검색
-                        links = driver.find_elements(By.XPATH, "//a[contains(text(), '통계정보')]")
-                    else:
-                        # CSS 선택자 검색
-                        links = driver.find_elements(By.CSS_SELECTOR, selector)
-                    
-                    if links:
-                        stats_link = links[0]
-                        logger.info("통계정보 링크 발견, 클릭 시도")
-                        stats_link.click()
-                        WebDriverWait(driver, 10).until(EC.url_contains("/bbs/list.do"))
-                        stats_link_found = True
-                        logger.info("통계정보 페이지로 이동 완료")
-                        break
-                except Exception as link_err:
-                    logger.warning(f"통계정보 링크 클릭 실패: {str(link_err)}")
+                    driver.save_screenshot("landing_page.png")
+                    logger.info("랜딩 페이지 스크린샷 저장 완료")
+                except Exception as ss_err:
+                    logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
             
-            if not stats_link_found:
-                logger.warning("통계정보 링크를 찾을 수 없음, 직접 URL로 접속")
+                # 통계정보 링크 찾기 및 클릭
+                stats_link_selectors = [
+                    "a[href*='mId=99'][href*='mPid=74']",
+                    "a:contains('통계정보')"
+                ]
+            
+                stats_link_found = False
+                for selector in stats_link_selectors:
+                    try:
+                        if ':contains' in selector:
+                            # XPath로 텍스트 포함 요소 검색
+                            links = driver.find_elements(By.XPATH, "//a[contains(text(), '통계정보')]")
+                        else:
+                            # CSS 선택자 검색
+                            links = driver.find_elements(By.CSS_SELECTOR, selector)
+                    
+                        if links:
+                            stats_link = links[0]
+                            logger.info("통계정보 링크 발견, 클릭 시도")
+                            stats_link.click()
+                            WebDriverWait(driver, 10).until(EC.url_contains("/bbs/list.do"))
+                            stats_link_found = True
+                            logger.info("통계정보 페이지로 이동 완료")
+                            break
+                    except Exception as link_err:
+                        logger.warning(f"통계정보 링크 클릭 실패: {str(link_err)}")
+            
+                if not stats_link_found:
+                    logger.warning("통계정보 링크를 찾을 수 없음, 직접 URL로 접속")
+                    driver.get(self.stats_url)
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+                    )
+            
+            except Exception as e:
+                logger.error(f"랜딩 또는 통계정보 버튼 클릭 중 오류 발생, fallback으로 직접 접속: {str(e)}")
                 driver.get(self.stats_url)
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
                 )
-            
-        except Exception as e:
-            logger.error(f"랜딩 또는 통계정보 버튼 클릭 중 오류 발생, fallback으로 직접 접속: {str(e)}")
-            driver.get(self.stats_url)
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-            )
         
-        logger.info("MSIT 웹사이트 접근 완료")
+            logger.info("MSIT 웹사이트 접근 완료")
         
-        # 스크린샷 저장 (디버깅용)
-        try:
-            driver.save_screenshot("stats_page.png")
-            logger.info("통계정보 페이지 스크린샷 저장 완료")
-        except Exception as ss_err:
-            logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
+            # 스크린샷 저장 (디버깅용)
+            try:
+                driver.save_screenshot("stats_page.png")
+                logger.info("통계정보 페이지 스크린샷 저장 완료")
+            except Exception as ss_err:
+                logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
         
-        # 모든 게시물 및 통신 통계 게시물 추적
-        all_posts = []
-        telecom_stats_posts = []
-        continue_search = True
-        page_num = 1
+            # 모든 게시물 및 통신 통계 게시물 추적
+            all_posts = []
+            telecom_stats_posts = []
+            continue_search = True
+            page_num = 1
         
-        # 페이지 파싱
-        while continue_search:
-            logger.info(f"페이지 {page_num} 파싱 중...")
+            # 페이지 파싱
+            while continue_search:
+                logger.info(f"페이지 {page_num} 파싱 중...")
             
-            page_posts, stats_posts, should_continue = self.parse_page(driver, days_range=days_range)
-            all_posts.extend(page_posts)
-            telecom_stats_posts.extend(stats_posts)
+                page_posts, stats_posts, should_continue = self.parse_page(driver, days_range=days_range)
+                all_posts.extend(page_posts)
+                telecom_stats_posts.extend(stats_posts)
             
-            logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
+                logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
             
-            if not should_continue:
-                logger.info(f"날짜 범위 밖의 게시물 발견. 검색 중단")
-                break
-                
-            if self.has_next_page(driver):
-                if self.go_to_next_page(driver):
-                    page_num += 1
-                else:
-                    logger.warning(f"페이지 {page_num}에서 다음 페이지로 이동 실패")
+                if not should_continue:
+                    logger.info(f"날짜 범위 밖의 게시물 발견. 검색 중단")
                     break
-            else:
-                logger.info(f"마지막 페이지 ({page_num}) 도달")
-                break
+                
+                if self.has_next_page(driver):
+                    if self.go_to_next_page(driver):
+                        page_num += 1
+                    else:
+                        logger.warning(f"페이지 {page_num}에서 다음 페이지로 이동 실패")
+                        break
+                else:
+                    logger.info(f"마지막 페이지 ({page_num}) 도달")
+                    break
         
         # 통신 통계 게시물 처리
-        data_updates = []
+            data_updates = []
         
-        if gs_client and telecom_stats_posts and check_sheets:
-            logger.info(f"{len(telecom_stats_posts)}개 통신 통계 게시물 처리 중")
+            if gs_client and telecom_stats_posts and check_sheets:
+                logger.info(f"{len(telecom_stats_posts)}개 통신 통계 게시물 처리 중")
             
-            for i, post in enumerate(telecom_stats_posts):
-                try:
-                    logger.info(f"게시물 {i+1}/{len(telecom_stats_posts)} 처리 중: {post['title']}")
+                for i, post in enumerate(telecom_stats_posts):
+                    try:
+                        logger.info(f"게시물 {i+1}/{len(telecom_stats_posts)} 처리 중: {post['title']}")
                     
                     # 바로보기 링크 파라미터 추출
-                    file_params = self.find_view_link_params(driver, post)
+                        file_params = self.find_view_link_params(driver, post)
                     
-                    if not file_params:
-                        logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
-                        continue
+                        if not file_params:
+                            logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
+                            continue
                     
                     # 바로보기 링크가 있는 경우
-                    if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                        # iframe 직접 접근하여 데이터 추출
-                        sheets_data = self.access_iframe_direct(driver, file_params)
+                        if 'atch_file_no' in file_params and 'file_ord' in file_params:
+                            # iframe 직접 접근하여 데이터 추출
+                            sheets_data = self.access_iframe_direct(driver, file_params)
                         
-                        if sheets_data:
-                            # Google Sheets 업데이트
-                            update_data = {
-                                'sheets': sheets_data,
-                                'post_info': post
-                            }
+                            if sheets_data:
+                                # Google Sheets 업데이트
+                                update_data = {
+                                    'sheets': sheets_data,
+                                    'post_info': post
+                                }
                             
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
+                                if 'date' in file_params:
+                                    update_data['date'] = file_params['date']
                             
-                            success = self.update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
+                                success = self.update_google_sheets(gs_client, update_data)
+                                if success:
+                                    logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
+                                    data_updates.append(update_data)
+                                else:
+                                    logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
                             else:
-                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
-                        else:
-                            logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
+                                logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
                             
+                            # 대체 데이터 생성
+                                placeholder_df = self.create_placeholder_dataframe(post)
+                                if not placeholder_df.empty:
+                                    update_data = {
+                                        'dataframe': placeholder_df,
+                                        'post_info': post
+                                    }
+                                
+                                    if 'date' in file_params:
+                                        update_data['date'] = file_params['date']
+                                
+                                    success = self.update_google_sheets(gs_client, update_data)
+                                    if success:
+                                        logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                        data_updates.append(update_data)
+                    
+                        # 게시물 내용만 있는 경우
+                        elif 'content' in file_params:
+                            logger.info(f"게시물 내용으로 처리 중: {post['title']}")
+                        
                             # 대체 데이터 생성
                             placeholder_df = self.create_placeholder_dataframe(post)
                             if not placeholder_df.empty:
@@ -1824,81 +1844,61 @@ async def run_monitor(self, days_range=4, check_sheets=True):
                                     'dataframe': placeholder_df,
                                     'post_info': post
                                 }
-                                
+                            
                                 if 'date' in file_params:
                                     update_data['date'] = file_params['date']
-                                
+                            
                                 success = self.update_google_sheets(gs_client, update_data)
                                 if success:
-                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                    logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
                     
-                    # 게시물 내용만 있는 경우
-                    elif 'content' in file_params:
-                        logger.info(f"게시물 내용으로 처리 중: {post['title']}")
-                        
-                        # 대체 데이터 생성
-                        placeholder_df = self.create_placeholder_dataframe(post)
-                        if not placeholder_df.empty:
-                            update_data = {
-                                'dataframe': placeholder_df,
-                                'post_info': post
-                            }
-                            
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
-                            
-                            success = self.update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
-                    
                     # API 속도 제한 방지를 위한 지연
-                    time.sleep(2)
+                        time.sleep(2)
                 
-                except Exception as e:
-                    logger.error(f"게시물 처리 중 오류: {str(e)}")
+                    except Exception as e:
+                        logger.error(f"게시물 처리 중 오류: {str(e)}")
         
         # 종료 시간 및 실행 시간 계산
-        end_time = time.time()
-        execution_time = end_time - start_time
-        logger.info(f"실행 시간: {execution_time:.2f}초")
+            end_time = time.time()
+            execution_time = end_time - start_time
+            logger.info(f"실행 시간: {execution_time:.2f}초")
         
         # 텔레그램 알림 전송
-        if all_posts or data_updates:
-            await self.send_telegram_message(all_posts, data_updates)
-            logger.info(f"알림 전송 완료: {len(all_posts)}개 게시물, {len(data_updates)}개 업데이트")
-        else:
-            logger.info(f"최근 {days_range}일 내 새 게시물이 없습니다")
+            if all_posts or data_updates:
+                await self.send_telegram_message(all_posts, data_updates)
+                logger.info(f"알림 전송 완료: {len(all_posts)}개 게시물, {len(data_updates)}개 업데이트")
+            else:
+                logger.info(f"최근 {days_range}일 내 새 게시물이 없습니다")
             
             # 결과 없음 알림 (선택적)
-            if days_range > 7:  # 장기간 검색한 경우에만 알림
-                await self.bot.send_message(
-                    chat_id=int(self.chat_id),
-                    text=f"📊 MSIT 통신 통계 모니터링: 최근 {days_range}일 내 새 게시물이 없습니다. ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
-                )
+                if days_range > 7:  # 장기간 검색한 경우에만 알림
+                    await self.bot.send_message(
+                        chat_id=int(self.chat_id),
+                        text=f"📊 MSIT 통신 통계 모니터링: 최근 {days_range}일 내 새 게시물이 없습니다. ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
+                    )
     
-    except Exception as e:
-        logger.error(f"모니터링 중 오류 발생: {str(e)}")
+        except Exception as e:
+            logger.error(f"모니터링 중 오류 발생: {str(e)}")
         
-        try:
-            # 오류 알림 전송
-            error_post = {
-                'title': f"모니터링 오류: {str(e)}",
-                'date': datetime.now().strftime('%Y. %m. %d'),
-                'department': 'System Error'
-            }
-            await self.send_telegram_message([error_post])
-        except Exception as telegram_err:
-            logger.error(f"오류 알림 전송 중 추가 오류: {str(telegram_err)}")
+            try:
+                # 오류 알림 전송
+                error_post = {
+                    'title': f"모니터링 오류: {str(e)}",
+                    'date': datetime.now().strftime('%Y. %m. %d'),
+                    'department': 'System Error'
+                }
+                await self.send_telegram_message([error_post])
+            except Exception as telegram_err:
+                logger.error(f"오류 알림 전송 중 추가 오류: {str(telegram_err)}")
     
-    finally:
-        # 리소스 정리
-        if driver:
-            driver.quit()
-            logger.info("WebDriver 종료")
+        finally:
+            # 리소스 정리
+            if driver:
+                driver.quit()
+                logger.info("WebDriver 종료")
         
-        logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
+            logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
 
 async def main():
     """메인 함수: 환경 변수 처리 및 모니터링 실행"""
