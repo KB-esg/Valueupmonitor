@@ -407,7 +407,7 @@ class MSITMonitor:
             logger.error(f"다음 페이지 이동 중 에러: {str(e)}")
             return False
 
-    def parse_page(self, driver, days_range=4):
+    def parse_page(self, driver, page_num=1, days_range=4):
         """현재 페이지에서 관련 게시물 파싱"""
         all_posts = []
         telecom_stats_posts = []
@@ -1759,7 +1759,7 @@ class MSITMonitor:
             while continue_search:
                 logger.info(f"페이지 {page_num} 파싱 중...")
             
-                page_posts, stats_posts, should_continue = self.parse_page(driver, days_range=days_range)
+                page_posts, stats_posts, should_continue = self.parse_page(driver, page_num, days_range=days_range)
                 all_posts.extend(page_posts)
                 telecom_stats_posts.extend(stats_posts)
             
