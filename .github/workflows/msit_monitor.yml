@@ -178,6 +178,30 @@ jobs:
         # 확인을 위해 첫 10줄 출력
         echo "수정된 setup_driver 함수 확인:"
         grep -A 5 "def setup_driver" msit_monitor.py
+    
+
+    - name: Fix indentation issues
+      run: |
+        cat > fix_indentation.py << 'EOF'
+        #!/usr/bin/env python
+    
+        def convert_tabs_to_spaces():
+            with open('msit_monitor.py', 'r') as file:
+                content = file.read()
+        
+            # Convert all tabs to 4 spaces
+            fixed_content = content.replace('\t', '    ')
+        
+            with open('msit_monitor.py', 'w') as file:
+                file.write(fixed_content)
+        
+            print("All tabs converted to spaces in the file")
+    
+        if __name__ == "__main__":
+            convert_tabs_to_spaces()
+        EOF
+    
+        python fix_indentation.py
 
     - name: Create screenshot script
       run: |
