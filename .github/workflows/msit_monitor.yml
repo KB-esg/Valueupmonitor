@@ -39,17 +39,21 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    - name: Install Chrome and ChromeDriver
+    - name: Install Chrome
       run: |
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
-        CHROME_VERSION=$(google-chrome --version | cut -d ' ' -f 3 | cut -d '.' -f 1)
-        wget -q "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION" -O chromedriver-version.txt
-        CHROMEDRIVER_VERSION=$(cat chromedriver-version.txt)
-        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip" -O chromedriver.zip
-        unzip -q chromedriver.zip
-        chmod +x chromedriver
-        sudo mv chromedriver /usr/local/bin/
+
+    - name: Install ChromeDriver (using setup-chromedriver action)
+      uses: browser-actions/setup-chrome@v1
+      
+    - name: Install ChromeDriver (using webdriver-manager)
+      run: |
+        pip install webdriver-manager
+        echo "ChromeDriver installation path $(which chromedriver)"
+        # For debugging
+        ls -la /usr/local/bin/ | grep chrome
+        ls -la $(which chromedriver) || echo "ChromeDriver 직접 접근 불가"
 
     - name: Install Xvfb
       run: sudo apt-get install -y xvfb
@@ -57,7 +61,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth
+        pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager
 
     - name: Create downloads directory
       run: mkdir -p downloads
@@ -71,6 +75,7 @@ jobs:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
+        from webdriver_manager.chrome import ChromeDriverManager
         import time
         import sys
         import os
@@ -82,8 +87,10 @@ jobs:
             options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option("useAutomationExtension", False)
-            service = Service('/usr/local/bin/chromedriver')
-            driver = webdriver.Chrome(service=service, options=options)
+            
+            # ChromeDriverManager 사용
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            
             try:
                 if url:
                     driver.get(url)
@@ -139,6 +146,36 @@ jobs:
         export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
         sleep 2
+        # msit_monitor.py 파일 수정
+        echo "import sys; print('Python version:', sys.version)" > check_version.py
+        python check_version.py
+        # msit_monitor.py 파일 수정
+        cat > msit_monitor_patch.py << 'EOF'
+        import re
+        import os
+
+        # 원본 파일 읽기
+        with open('msit_monitor.py', 'r', encoding='utf-8') as file:
+            content = file.read()
+
+        # WebDriverManager 사용으로 수정
+        content = re.sub(
+            r"service = Service\(['\"](.+?)['\"]\)",
+            "from webdriver_manager.chrome import ChromeDriverManager\n        service = Service(ChromeDriverManager().install())",
+            content
+        )
+
+        # 수정된 내용 저장
+        with open('msit_monitor.py', 'w', encoding='utf-8') as file:
+            file.write(content)
+
+        print("msit_monitor.py 파일이 성공적으로 패치되었습니다.")
+        EOF
+
+        # 패치 스크립트 실행
+        python msit_monitor_patch.py
+        
+        # 모니터링 실행
         python msit_monitor.py
 
     - name: Take screenshots (always)
@@ -146,32 +183,40 @@ jobs:
       run: |
         export DISPLAY=:99
         # 필요한 종속성 확인 및 설치
-        pip list | grep -q selenium || pip install selenium
+        pip list | grep -q selenium || pip install selenium webdriver-manager
         
         # 간단한 스크린샷 스크립트 생성
-        echo 'from selenium import webdriver
+        cat > simple_screenshot.py << 'EOF'
+        from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
         from selenium.webdriver.chrome.options import Options
+        from webdriver_manager.chrome import ChromeDriverManager
         import time
 
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        service = Service("/usr/local/bin/chromedriver")
+        
+        # ChromeDriverManager 사용
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         
         try:
+            print("Opening MSIT page...")
             driver.get("https://www.msit.go.kr")
             time.sleep(5)
             driver.save_screenshot("msit_page.png")
             
+            print("Opening MSIT stats page...")
             driver.get("https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99")
             time.sleep(5)
             driver.save_screenshot("msit_stats_page.png")
+            print("Screenshots completed successfully")
         except Exception as e:
             print(f"스크린샷 오류: {str(e)}")
         finally:
-            driver.quit()' > simple_screenshot.py
+            driver.quit()
+        EOF
         
         # 스크립트 실행
         python simple_screenshot.py
