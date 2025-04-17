@@ -2284,275 +2284,7 @@ def update_google_sheets(client, data):
         logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
         return False
 
-def update_google_sheets_with_full_table(client, sheet_name, dataframe, post_info=None):
-    """추출된 전체 표 데이터를 Google Sheets에 업데이트하는 함수
-    
-    Args:
-        client: gspread 클라이언트 인스턴스
-        sheet_name: 워크시트 이름
-        dataframe: 업데이트할 데이터프레임
-        post_info: 게시물 정보 (선택 사항)
-        
-    Returns:
-        bool: 성공 여부
-    """
-    import pandas as pd
-    import gspread
-    import time
-    import logging
-    import re
-    from datetime import datetime
-    from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
-    
-    logger = logging.getLogger('msit_monitor')
-    
-    if dataframe is None or dataframe.empty:
-        logger.error("업데이트할 데이터가 없습니다")
-        return False
-    
-    try:
-        logger.info(f"Google Sheets 업데이트 시작: {sheet_name}")
-        
-        # 날짜 정보 추출 (있는 경우)
-        date_info = ""
-        if post_info and 'title' in post_info:
-            # 제목에서 날짜 정보 추출
-            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
-            if date_match:
-                year = date_match.group(1)
-                month = date_match.group(2)
-                date_info = f"{year}년 {month}월"
-                logger.info(f"게시물에서 날짜 정보 추출: {date_info}")
-        
-        # 시트 이름에 날짜 정보 추가 (있는 경우)
-        original_sheet_name = sheet_name
-        if date_info:
-            sheet_name = f"{sheet_name}_{date_info}"
-        
-        # 시트 이름 길이 제한 (gspread 제한: 100자)
-        if len(sheet_name) > 95:
-            # 날짜 정보 유지하면서 이름 축약
-            timestamp = datetime.now().strftime("%Y%m%d")
-            sheet_name = f"{original_sheet_name[:60]}_{timestamp}"
-            logger.info(f"시트 이름이 너무 깁니다. 축약된 이름 사용: {sheet_name}")
-        
-        # 스프레드시트 찾기 또는 생성 (최대 3번 재시도)
-        spreadsheet = None
-        retries = 0
-        max_retries = 3
-        
-        while retries < max_retries and spreadsheet is None:
-            try:
-                # ID로 스프레드시트 찾기 시도
-                if 'spreadsheet_id' in globals() and spreadsheet_id:
-                    try:
-                        spreadsheet = client.open_by_key(spreadsheet_id)
-                        logger.info(f"ID로 스프레드시트 찾음: {spreadsheet.title}")
-                    except Exception as e:
-                        logger.warning(f"ID로 스프레드시트 찾기 실패: {str(e)}")
-                
-                # 이름으로 스프레드시트 찾기 시도
-                if spreadsheet is None:
-                    try:
-                        spreadsheet = client.open("MSIT 통신 통계")
-                        logger.info(f"이름으로 스프레드시트 찾음: {spreadsheet.title}")
-                    except SpreadsheetNotFound:
-                        # 스프레드시트 생성
-                        spreadsheet = client.create("MSIT 통신 통계")
-                        logger.info(f"새 스프레드시트 생성: {spreadsheet.title}")
-                break
-                
-            except APIError as api_err:
-                retries += 1
-                logger.warning(f"Google Sheets API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
-                
-                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                    # 지수 백오프
-                    wait_time = 2 ** retries
-                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"스프레드시트 접근 중 오류: {str(api_err)}")
-                    if retries >= max_retries:
-                        return False
-            
-            except Exception as e:
-                retries += 1
-                logger.error(f"스프레드시트 접근 중 오류: {str(e)}")
-                time.sleep(2)
-                if retries >= max_retries:
-                    return False
-        
-        if spreadsheet is None:
-            logger.error("스프레드시트를 찾거나 생성할 수 없습니다")
-            return False
-        
-        # 워크시트 찾기 또는 생성
-        worksheet = None
-        retries = 0
-        
-        while retries < max_retries and worksheet is None:
-            try:
-                # 기존 워크시트 찾기
-                try:
-                    worksheet = spreadsheet.worksheet(sheet_name)
-                    logger.info(f"기존 워크시트 찾음: {sheet_name}")
-                    
-                    # 기존 데이터 삭제 (전체 데이터 교체를 위해)
-                    worksheet.clear()
-                    logger.info(f"기존 워크시트 데이터 삭제 완료")
-                except WorksheetNotFound:
-                    # 새 워크시트 생성
-                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
-                    logger.info(f"새 워크시트 생성: {sheet_name}")
-                
-                break
-            
-            except APIError as api_err:
-                retries += 1
-                logger.warning(f"워크시트 접근 중 API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
-                
-                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                    wait_time = 2 ** retries
-                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"워크시트 접근 중 오류: {str(api_err)}")
-                    if retries >= max_retries:
-                        return False
-            
-            except Exception as e:
-                retries += 1
-                logger.error(f"워크시트 접근 중 오류: {str(e)}")
-                time.sleep(2)
-                if retries >= max_retries:
-                    return False
-        
-        if worksheet is None:
-            logger.error("워크시트를 찾거나 생성할 수 없습니다")
-            return False
-        
-        # 데이터프레임 처리 및 업로드
-        try:
-            # 데이터프레임 전처리
-            df = dataframe.copy()
-            df = df.fillna('')  # NaN 값을 빈 문자열로 변환
-            
-            # 모든 값을 문자열로 변환
-            for col in df.columns:
-                df[col] = df[col].astype(str)
-            
-            # 헤더와 값 분리
-            headers = df.columns.tolist()
-            values = df.values.tolist()
-            
-            # 모든 데이터를 2D 배열로 준비 (헤더 포함)
-            all_values = [headers] + values
-            
-            # 배치 업데이트
-            logger.info(f"워크시트에 {len(all_values)}행 {len(headers)}열 데이터 업데이트 중...")
-            
-            # API 제한을 고려한 청크 단위 업데이트
-            chunk_size = 1000  # 한 번에 업데이트할 최대 행 수
-            
-            for i in range(0, len(all_values), chunk_size):
-                chunk = all_values[i:i + chunk_size]
-                start_row = i + 1  # 1-based index
-                end_row = start_row + len(chunk) - 1
-                
-                try:
-                    # 청크 단위로 업데이트
-                    worksheet.update(f'A{start_row}:{chr(65 + len(headers) - 1)}{end_row}', chunk)
-                    logger.info(f"청크 업데이트 완료: {start_row}~{end_row}행")
-                    
-                    # API 속도 제한 방지
-                    time.sleep(2)
-                    
-                except APIError as chunk_err:
-                    logger.warning(f"청크 업데이트 중 API 오류: {str(chunk_err)}")
-                    
-                    if "RESOURCE_EXHAUSTED" in str(chunk_err) or "RATE_LIMIT_EXCEEDED" in str(chunk_err):
-                        logger.info("API 속도 제한 감지. 행 단위 업데이트로 전환...")
-                        
-                        # 행 단위 업데이트로 전환
-                        for j, row_data in enumerate(chunk):
-                            row_num = start_row + j
-                            try:
-                                worksheet.update(f'A{row_num}:{chr(65 + len(headers) - 1)}{row_num}', [row_data])
-                                logger.info(f"행 단위 업데이트 완료: {row_num}행")
-                                time.sleep(1)  # 각 행마다 대기
-                            except Exception as row_err:
-                                logger.error(f"{row_num}행 업데이트 실패: {str(row_err)}")
-                    else:
-                        raise
-            
-            # 출처 정보 추가 (있는 경우)
-            if post_info and ('url' in post_info or 'title' in post_info):
-                footer_row = len(all_values) + 2  # 데이터 이후 빈 행 하나 추가
-                
-                footer_data = []
-                if 'title' in post_info:
-                    footer_data.append(["출처: " + post_info['title']])
-                
-                if 'url' in post_info:
-                    footer_data.append(["URL: " + post_info['url']])
-                
-                if 'date' in post_info:
-                    footer_data.append(["날짜: " + post_info['date']])
-                
-                try:
-                    for i, row_data in enumerate(footer_data):
-                        worksheet.update(f'A{footer_row + i}', [row_data])
-                    
-                    logger.info("출처 정보 추가 완료")
-                except Exception as footer_err:
-                    logger.warning(f"출처 정보 추가 실패: {str(footer_err)}")
-            
-            # 서식 설정
-            try:
-                # 헤더 행 서식 지정
-                worksheet.format('A1:Z1', {
-                    "backgroundColor": {
-                        "red": 0.9,
-                        "green": 0.9,
-                        "blue": 0.9
-                    },
-                    "horizontalAlignment": "CENTER",
-                    "textFormat": {
-                        "bold": True
-                    }
-                })
-                
-                # 첫 번째 열 서식 지정 (항목 이름)
-                worksheet.format(f'A1:A{len(all_values)}', {
-                    "textFormat": {
-                        "bold": True
-                    }
-                })
-                
-                logger.info("서식 설정 완료")
-            except Exception as format_err:
-                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
-            
-            # 열 너비 자동 조정 시도
-            try:
-                for i, col_width in enumerate([150] + [100] * (len(headers) - 1)):
-                    col_letter = chr(65 + i)
-                    worksheet.columns_auto_resize(i, i)
-                    logger.info(f"{col_letter}열 너비 자동 조정")
-            except Exception as width_err:
-                logger.warning(f"열 너비 조정 중 오류: {str(width_err)}")
-            
-            logger.info(f"Google Sheets 업데이트 완료: {sheet_name}")
-            return True
-            
-        except Exception as update_err:
-            logger.error(f"워크시트 데이터 업데이트 중 오류: {str(update_err)}")
-            return False
-    
-    except Exception as e:
-        logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
-        return False
+
 
 def update_single_sheet(spreadsheet, sheet_name, df, date_str):
     """단일 시트 업데이트"""
@@ -3271,7 +3003,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                 try:
                     logger.info(f"게시물 {i+1}/{len(telecom_stats_posts)} 처리 중: {post['title']}")
                     
-                    # 바로보기 링크 파라미터 추출 (수정된 방식)
+                    # 바로보기 링크 파라미터 추출
                     file_params = find_view_link_params(driver, post)
                     
                     if not file_params:
@@ -3280,23 +3012,73 @@ async def run_monitor(days_range=4, check_sheets=True):
                     
                     # 바로보기 링크가 있는 경우
                     if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                        # 수정된 부분: 전체 표 캡처 및 OCR 처리
-                        logger.info(f"전체 표 캡처 시도: {post['title']}")
+                        # 우선적으로 iframe 직접 접근 시도
+                        sheets_data = access_iframe_direct(driver, file_params)
                         
-                        # 바로보기 URL 생성
-                        view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
-                        logger.info(f"바로보기 URL: {view_url}")
-                        
-                        # 페이지 접속
-                        driver.get(view_url)
-                        time.sleep(5)  # 로딩 대기
-                        
-                        # 전체 표 캡처
-                        screenshots = capture_full_table(driver, f"table_{file_params['atch_file_no']}_{file_params['file_ord']}.png")
-                        
-                        if screenshots:
+                        if sheets_data:
+                            # 성공적으로 iframe에서 데이터 추출됨
+                            logger.info(f"iframe에서 데이터 추출 성공: {len(sheets_data)}개 시트")
+                            
+                            # Google Sheets 업데이트
+                            update_data = {
+                                'sheets': sheets_data,
+                                'post_info': post
+                            }
+                            
+                            if 'date' in file_params:
+                                update_data['date'] = file_params['date']
+                            
+                            # 기존 update_google_sheets 함수 사용
+                            success = update_google_sheets(gs_client, update_data)
+                            if success:
+                                logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
+                                data_updates.append(update_data)
+                            else:
+                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
+                                
+                                # 실패 시 새로운 함수로 재시도
+                                logger.info(f"새로운 방식으로 업데이트 재시도 중...")
+                                
+                                # 첫 번째 시트만 사용
+                                first_sheet_name = next(iter(sheets_data))
+                                first_df = sheets_data[first_sheet_name]
+                                
+                                report_type = determine_report_type(post['title'])
+                                success = update_google_sheets_with_full_table(
+                                    client=gs_client,
+                                    sheet_name=report_type,
+                                    dataframe=first_df,
+                                    post_info=post
+                                )
+                                
+                                if success:
+                                    logger.info(f"새로운 방식으로 업데이트 성공: {post['title']}")
+                                    data_updates.append({
+                                        'post_info': post,
+                                        'dataframe': first_df
+                                    })
+                        else:
+                            # iframe 접근 실패 시에만 OCR 시도
+                            logger.info(f"iframe 접근 실패, OCR 시도 중: {post['title']}")
+                            
+                            # 바로보기 URL 생성
+                            view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+                            logger.info(f"바로보기 URL: {view_url}")
+                            
+                            # 페이지 접속
+                            driver.get(view_url)
+                            time.sleep(5)  # 로딩 대기
+                            
+                            # 전체 표 캡처
+                            screenshot_path = f"table_{file_params['atch_file_no']}_{file_params['file_ord']}.png"
+                            driver.save_screenshot(screenshot_path)
+                            logger.info(f"전체 페이지 스크린샷 저장: {screenshot_path}")
+                            
+                            # 다른 방식으로도 시도해 봄
+                            screenshots = capture_full_table(driver, screenshot_path)
+                            
                             # OCR로 데이터 추출
-                            extracted_dataframes = extract_data_from_screenshot(screenshots)
+                            extracted_dataframes = extract_data_from_screenshot(screenshots if screenshots else screenshot_path)
                             
                             if extracted_dataframes and len(extracted_dataframes) > 0:
                                 # 추출 성공
@@ -3308,92 +3090,42 @@ async def run_monitor(days_range=4, check_sheets=True):
                                 
                                 # 전체 표 데이터를 Google Sheets에 업데이트
                                 success = update_google_sheets_with_full_table(
-                                    client=gs_client, 
-                                    sheet_name=report_type, 
-                                    dataframe=df, 
+                                    client=gs_client,
+                                    sheet_name=report_type,
+                                    dataframe=df,
                                     post_info=post
                                 )
                                 
                                 if success:
-                                    logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
+                                    logger.info(f"OCR 데이터로 Google Sheets 업데이트 성공: {post['title']}")
                                     data_updates.append({
                                         'post_info': post,
-                                        'dataframe': df,
-                                        'sheets': {report_type: df}
+                                        'dataframe': df
                                     })
-                                else:
-                                    logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
                             else:
                                 logger.warning(f"OCR 데이터 추출 실패: {post['title']}")
-                                
-                                # 기존 방식으로 폴백 (iframe 직접 접근)
-                                logger.info("기존 방식으로 폴백 시도")
-                                sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
-                                
-                                if sheets_data:
-                                    # Google Sheets 업데이트 (기존 방식)
-                                    update_data = {
-                                        'sheets': sheets_data,
-                                        'post_info': post
-                                    }
-                                    
-                                    if 'date' in file_params:
-                                        update_data['date'] = file_params['date']
-                                    
-                                    success = update_google_sheets(gs_client, update_data)
-                                    if success:
-                                        logger.info(f"기존 방식으로 Google Sheets 업데이트 성공: {post['title']}")
-                                        data_updates.append(update_data)
-                                    else:
-                                        logger.warning(f"기존 방식으로 Google Sheets 업데이트 실패: {post['title']}")
-                                else:
-                                    logger.warning(f"기존 방식으로도 데이터 추출 실패: {post['title']}")
-                                    
-                                    # 대체 데이터 생성
-                                    placeholder_df = create_placeholder_dataframe(post)
-                                    if not placeholder_df.empty:
-                                        update_data = {
-                                            'dataframe': placeholder_df,
-                                            'post_info': post
-                                        }
-                                        
-                                        if 'date' in file_params:
-                                            update_data['date'] = file_params['date']
-                                        
-                                        # 대체 데이터로 전체 표 업데이트 시도
-                                        success = update_google_sheets_with_full_table(
-                                            client=gs_client, 
-                                            sheet_name=determine_report_type(post['title']), 
-                                            dataframe=placeholder_df, 
-                                            post_info=post
-                                        )
-                                        
-                                        if success:
-                                            logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
-                                            data_updates.append(update_data)
-                        else:
-                            logger.warning(f"전체 표 캡처 실패: {post['title']}")
-                            
-                            # 기존 방식으로 폴백
-                            logger.info("기존 방식으로 폴백 시도")
-                            sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
-                            
-                            if sheets_data:
-                                # Google Sheets 업데이트 (기존 방식)
+                                # 대체 데이터 생성
+                                placeholder_df = create_placeholder_dataframe(post)
                                 update_data = {
-                                    'sheets': sheets_data,
+                                    'dataframe': placeholder_df,
                                     'post_info': post
                                 }
                                 
                                 if 'date' in file_params:
                                     update_data['date'] = file_params['date']
                                 
-                                success = update_google_sheets(gs_client, update_data)
+                                success = update_google_sheets_with_full_table(
+                                    client=gs_client,
+                                    sheet_name=determine_report_type(post['title']),
+                                    dataframe=placeholder_df,
+                                    post_info=post
+                                )
+                                
                                 if success:
-                                    logger.info(f"기존 방식으로 Google Sheets 업데이트 성공: {post['title']}")
+                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
                     
-                    # 게시물 내용만 있는 경우 (기존 로직 유지)
+                    # 게시물 내용만 있는 경우
                     elif 'content' in file_params:
                         logger.info(f"게시물 내용으로 처리 중: {post['title']}")
                         
@@ -3419,7 +3151,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                                 logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
                                 data_updates.append(update_data)
                     
-                    # AJAX 데이터가 있는 경우 (기존 로직 유지)
+                    # AJAX 데이터가 있는 경우
                     elif 'ajax_data' in file_params:
                         logger.info(f"AJAX 데이터로 처리 중: {post['title']}")
                         
@@ -3437,9 +3169,9 @@ async def run_monitor(days_range=4, check_sheets=True):
                                 update_data['date'] = file_params['date']
                             
                             success = update_google_sheets_with_full_table(
-                                client=gs_client, 
-                                sheet_name=determine_report_type(post['title']), 
-                                dataframe=placeholder_df, 
+                                client=gs_client,
+                                sheet_name=determine_report_type(post['title']),
+                                dataframe=placeholder_df,
                                 post_info=post
                             )
                             
@@ -3519,6 +3251,302 @@ async def run_monitor(days_range=4, check_sheets=True):
         
         logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
 
+
+def update_google_sheets_with_full_table(client, sheet_name, dataframe, post_info=None):
+    """추출된 전체 표 데이터를 Google Sheets에 업데이트하는 함수
+    
+    Args:
+        client: gspread 클라이언트 인스턴스
+        sheet_name: 워크시트 이름
+        dataframe: 업데이트할 데이터프레임
+        post_info: 게시물 정보 (선택 사항)
+        
+    Returns:
+        bool: 성공 여부
+    """
+    import pandas as pd
+    import gspread
+    import time
+    import logging
+    import re
+    from datetime import datetime
+    from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
+    
+    logger = logging.getLogger('msit_monitor')
+    
+    if dataframe is None or dataframe.empty:
+        logger.error("업데이트할 데이터가 없습니다")
+        return False
+    
+    try:
+        logger.info(f"Google Sheets 업데이트 시작: {sheet_name}")
+        
+        # 날짜 정보 추출 (있는 경우)
+        date_info = ""
+        if post_info and 'title' in post_info:
+            # 제목에서 날짜 정보 추출
+            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
+            if date_match:
+                year = date_match.group(1)
+                month = date_match.group(2)
+                date_info = f"{year}년 {month}월"
+                logger.info(f"게시물에서 날짜 정보 추출: {date_info}")
+        
+        # 시트 이름에 날짜 정보 추가 (있는 경우)
+        original_sheet_name = sheet_name
+        if date_info:
+            sheet_name = f"{sheet_name}_{date_info}"
+        
+        # 시트 이름 길이 제한 (gspread 제한: 100자)
+        if len(sheet_name) > 95:
+            # 날짜 정보 유지하면서 이름 축약
+            timestamp = datetime.now().strftime("%Y%m%d")
+            sheet_name = f"{original_sheet_name[:60]}_{timestamp}"
+            logger.info(f"시트 이름이 너무 깁니다. 축약된 이름 사용: {sheet_name}")
+        
+        # 스프레드시트 찾기 또는 생성 (최대 3번 재시도)
+        spreadsheet = None
+        retries = 0
+        max_retries = 3
+        
+        while retries < max_retries and spreadsheet is None:
+            try:
+                # ID로 스프레드시트 찾기 시도
+                if 'CONFIG' in globals() and 'spreadsheet_id' in CONFIG and CONFIG['spreadsheet_id']:
+                    try:
+                        spreadsheet = client.open_by_key(CONFIG['spreadsheet_id'])
+                        logger.info(f"ID로 스프레드시트 찾음: {spreadsheet.title}")
+                    except Exception as e:
+                        logger.warning(f"ID로 스프레드시트 찾기 실패: {str(e)}")
+                
+                # 이름으로 스프레드시트 찾기 시도
+                if spreadsheet is None:
+                    try:
+                        spreadsheet = client.open("MSIT 통신 통계")
+                        logger.info(f"이름으로 스프레드시트 찾음: {spreadsheet.title}")
+                    except SpreadsheetNotFound:
+                        # 스프레드시트 생성
+                        spreadsheet = client.create("MSIT 통신 통계")
+                        logger.info(f"새 스프레드시트 생성: {spreadsheet.title}")
+                break
+                
+            except APIError as api_err:
+                retries += 1
+                logger.warning(f"Google Sheets API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
+                
+                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                    # 지수 백오프
+                    wait_time = 2 ** retries
+                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"스프레드시트 접근 중 오류: {str(api_err)}")
+                    if retries >= max_retries:
+                        return False
+            
+            except Exception as e:
+                retries += 1
+                logger.error(f"스프레드시트 접근 중 오류: {str(e)}")
+                time.sleep(2)
+                if retries >= max_retries:
+                    return False
+        
+        if spreadsheet is None:
+            logger.error("스프레드시트를 찾거나 생성할 수 없습니다")
+            return False
+        
+        # 워크시트 찾기 또는 생성
+        worksheet = None
+        retries = 0
+        
+        while retries < max_retries and worksheet is None:
+            try:
+                # 기존 워크시트 찾기
+                try:
+                    worksheet = spreadsheet.worksheet(sheet_name)
+                    logger.info(f"기존 워크시트 찾음: {sheet_name}")
+                    
+                    # 기존 데이터 삭제 (전체 데이터 교체를 위해)
+                    worksheet.clear()
+                    logger.info(f"기존 워크시트 데이터 삭제 완료")
+                except WorksheetNotFound:
+                    # 새 워크시트 생성
+                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
+                    logger.info(f"새 워크시트 생성: {sheet_name}")
+                
+                break
+            
+            except APIError as api_err:
+                retries += 1
+                logger.warning(f"워크시트 접근 중 API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
+                
+                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                    wait_time = 2 ** retries
+                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"워크시트 접근 중 오류: {str(api_err)}")
+                    if retries >= max_retries:
+                        return False
+            
+            except Exception as e:
+                retries += 1
+                logger.error(f"워크시트 접근 중 오류: {str(e)}")
+                time.sleep(2)
+                if retries >= max_retries:
+                    return False
+        
+        if worksheet is None:
+            logger.error("워크시트를 찾거나 생성할 수 없습니다")
+            return False
+        
+        # 데이터프레임 처리 및 업로드
+        try:
+            # 데이터프레임 전처리
+            df = dataframe.copy()
+            df = df.fillna('')  # NaN 값을 빈 문자열로 변환
+            
+            # 모든 값을 문자열로 변환
+            for col in df.columns:
+                df[col] = df[col].astype(str)
+            
+            # 헤더와 값 분리
+            headers = df.columns.tolist()
+            values = df.values.tolist()
+            
+            # 모든 데이터를 2D 배열로 준비 (헤더 포함)
+            all_values = [headers] + values
+            
+            # 배치 업데이트
+            logger.info(f"워크시트에 {len(all_values)}행 {len(headers)}열 데이터 업데이트 중...")
+            
+            # API 제한을 고려한 청크 단위 업데이트
+            chunk_size = 1000  # 한 번에 업데이트할 최대 행 수
+            
+            for i in range(0, len(all_values), chunk_size):
+                chunk = all_values[i:i + chunk_size]
+                start_row = i + 1  # 1-based index
+                end_row = start_row + len(chunk) - 1
+                
+                try:
+                    # 청크 단위로 업데이트 (수정된 방식으로)
+                    cell_range = f'A{start_row}:{chr(65 + len(headers) - 1)}{end_row}'
+                    worksheet.update(
+                        values=chunk,
+                        range_name=cell_range
+                    )
+                    logger.info(f"청크 업데이트 완료: {start_row}~{end_row}행")
+                    
+                    # API 속도 제한 방지
+                    time.sleep(2)
+                    
+                except APIError as chunk_err:
+                    logger.warning(f"청크 업데이트 중 API 오류: {str(chunk_err)}")
+                    
+                    if "RESOURCE_EXHAUSTED" in str(chunk_err) or "RATE_LIMIT_EXCEEDED" in str(chunk_err):
+                        logger.info("API 속도 제한 감지. 행 단위 업데이트로 전환...")
+                        
+                        # 행 단위 업데이트로 전환
+                        for j, row_data in enumerate(chunk):
+                            row_num = start_row + j
+                            try:
+                                cell_range = f'A{row_num}:{chr(65 + len(headers) - 1)}{row_num}'
+                                worksheet.update(
+                                    values=[row_data],
+                                    range_name=cell_range
+                                )
+                                logger.info(f"행 단위 업데이트 완료: {row_num}행")
+                                time.sleep(1)  # 각 행마다 대기
+                            except Exception as row_err:
+                                logger.error(f"{row_num}행 업데이트 실패: {str(row_err)}")
+                    else:
+                        raise
+            
+            # 출처 정보 추가 (있는 경우)
+            if post_info and ('url' in post_info or 'title' in post_info):
+                footer_row = len(all_values) + 2  # 데이터 이후 빈 행 하나 추가
+                
+                footer_data = []
+                if 'title' in post_info:
+                    footer_data.append(["출처: " + post_info['title']])
+                
+                if 'url' in post_info:
+                    footer_data.append(["URL: " + post_info['url']])
+                
+                if 'date' in post_info:
+                    footer_data.append(["날짜: " + post_info['date']])
+                
+                try:
+                    for i, row_data in enumerate(footer_data):
+                        cell_range = f'A{footer_row + i}'
+                        worksheet.update(
+                            values=[row_data],
+                            range_name=cell_range
+                        )
+                    
+                    logger.info("출처 정보 추가 완료")
+                except Exception as footer_err:
+                    logger.warning(f"출처 정보 추가 실패: {str(footer_err)}")
+            
+            # 서식 설정
+            try:
+                # 헤더 행 서식 지정
+                worksheet.format('A1:Z1', {
+                    "backgroundColor": {
+                        "red": 0.9,
+                        "green": 0.9,
+                        "blue": 0.9
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {
+                        "bold": True
+                    }
+                })
+                
+                # 첫 번째 열 서식 지정 (항목 이름)
+                worksheet.format(f'A1:A{len(all_values)}', {
+                    "textFormat": {
+                        "bold": True
+                    }
+                })
+                
+                logger.info("서식 설정 완료")
+            except Exception as format_err:
+                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
+            
+            # 열 너비 자동 조정 시도
+            try:
+                for i in range(min(len(headers), 26)):  # 최대 26열 (A-Z)까지만 처리
+                    col_letter = chr(65 + i)
+                    try:
+                        worksheet.columns_auto_resize(i, i)
+                        logger.info(f"{col_letter}열 너비 자동 조정")
+                    except Exception as col_err:
+                        logger.warning(f"{col_letter}열 너비 조정 실패: {str(col_err)}")
+                        # 계속 진행 (열 너비 조정 실패는 치명적 오류가 아님)
+            except Exception as width_err:
+                logger.warning(f"열 너비 조정 중 오류: {str(width_err)}")
+            
+            # 업데이트 후 확인 (추가된 검증 로직)
+            try:
+                verification = worksheet.get_all_values()
+                if not verification or len(verification) <= 1:  # 헤더만 있거나 비어있는 경우
+                    logger.warning("데이터 검증 경고: 시트가 비어 있거나 헤더만 있습니다")
+                else:
+                    logger.info(f"데이터 검증 완료: {len(verification)}행의 데이터 확인됨")
+            except Exception as verify_err:
+                logger.warning(f"데이터 검증 중 오류: {str(verify_err)}")
+            
+            logger.info(f"Google Sheets 업데이트 완료: {sheet_name}")
+            return True
+            
+        except Exception as update_err:
+            logger.error(f"워크시트 데이터 업데이트 중 오류: {str(update_err)}")
+            return False
+    
+    except Exception as e:
+        logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
+        return False
 
 async def main():
     """메인 함수: 환경 변수 처리 및 모니터링 실행"""
