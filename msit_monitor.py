@@ -467,8 +467,55 @@ def take_screenshot(driver, name, crop_area=None):
         logger.error(f"스크린샷 저장 중 오류: {str(e)}")
         return None
 
+
+
 def extract_data_from_screenshot(screenshot_path):
     """스크린샷에서 표 형태의 데이터를 추출하는 함수
+    
+    Args:
+        screenshot_path (str 또는 list): 스크린샷 파일 경로(들)
+        
+    Returns:
+        list: 추출된 데이터프레임 목록
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import cv2
+    import pytesseract
+    from PIL import Image, ImageEnhance, ImageFilter
+    import logging
+    
+    logger = logging.getLogger('msit_monitor')
+    
+    # 경로가 리스트인 경우 (원본과 크롭 이미지가 모두 있는 경우)
+    if isinstance(screenshot_path, list) and len(screenshot_path) > 0:
+        logger.info(f"여러 스크린샷 처리 중: {len(screenshot_path)}개")
+        results = []
+        
+        for path in screenshot_path:
+            if os.path.exists(path):
+                result = extract_single_screenshot(path)
+                if result and len(result) > 0:
+                    results.extend(result)
+        
+        # 결과가 있으면 반환
+        if results:
+            return results
+        
+        # 없으면 원본 이미지만 다시 처리
+        screenshot_path = screenshot_path[0] if len(screenshot_path) > 0 else None
+    
+    # 단일 경로 처리
+    if isinstance(screenshot_path, str) and os.path.exists(screenshot_path):
+        return extract_single_screenshot(screenshot_path)
+    
+    logger.error(f"유효한 스크린샷 경로가 아닙니다: {screenshot_path}")
+    return []
+
+
+def extract_single_screenshot(screenshot_path):
+    """단일 스크린샷에서 표 데이터 추출
     
     Args:
         screenshot_path (str): 스크린샷 파일 경로
@@ -494,6 +541,19 @@ def extract_data_from_screenshot(screenshot_path):
         if image is None:
             logger.error(f"이미지를 로드할 수 없습니다: {screenshot_path}")
             return []
+        
+        # 이미지 크기 확인
+        height, width, _ = image.shape
+        logger.info(f"이미지 크기: {width}x{height}")
+        
+        # 이미지가 너무 큰 경우 크기 조정 (메모리 문제 방지)
+        max_dimension = 3000
+        if width > max_dimension or height > max_dimension:
+            scale_factor = max_dimension / max(width, height)
+            new_width = int(width * scale_factor)
+            new_height = int(height * scale_factor)
+            image = cv2.resize(image, (new_width, new_height))
+            logger.info(f"이미지 크기 조정: {new_width}x{new_height}")
         
         # 그레이스케일 변환
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -522,11 +582,11 @@ def extract_data_from_screenshot(screenshot_path):
         # 수직선과 수평선 병합
         table_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
         
-        # 셀 경계 찾기
-        contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
         # 처리된 이미지 저장 (디버깅용)
         cv2.imwrite(f"{screenshot_path}_processed.png", table_mask)
+        
+        # 셀 경계 찾기
+        contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         
         # 테이블 구조가 없는 경우 일반 OCR 시도
         if len(contours) < 10:  # 충분한 셀이 없는 경우
@@ -619,7 +679,9 @@ def extract_data_from_screenshot(screenshot_path):
                 if text:
                     row_data[j] = text
             
-            table_data.append(row_data)
+            # 의미 있는 데이터가 있는 행만 추가
+            if any(cell.strip() for cell in row_data):
+                table_data.append(row_data)
         
         # Pandas DataFrame 생성
         df = pd.DataFrame(table_data)
@@ -672,6 +734,15 @@ def extract_text_without_table_structure(screenshot_path):
         
         # 이미지 로드 및 전처리
         image = Image.open(screenshot_path)
+        
+        # 이미지 너무 큰 경우 크기 조정
+        max_dimension = 3000
+        if image.width > max_dimension or image.height > max_dimension:
+            scale_factor = max_dimension / max(image.width, image.height)
+            new_width = int(image.width * scale_factor)
+            new_height = int(image.height * scale_factor)
+            image = image.resize((new_width, new_height))
+            logger.info(f"이미지 크기 조정: {new_width}x{new_height}")
         
         # 이미지 향상
         enhancer = ImageEnhance.Contrast(image)
@@ -2213,6 +2284,275 @@ def update_google_sheets(client, data):
         logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
         return False
 
+def update_google_sheets_with_full_table(client, sheet_name, dataframe, post_info=None):
+    """추출된 전체 표 데이터를 Google Sheets에 업데이트하는 함수
+    
+    Args:
+        client: gspread 클라이언트 인스턴스
+        sheet_name: 워크시트 이름
+        dataframe: 업데이트할 데이터프레임
+        post_info: 게시물 정보 (선택 사항)
+        
+    Returns:
+        bool: 성공 여부
+    """
+    import pandas as pd
+    import gspread
+    import time
+    import logging
+    import re
+    from datetime import datetime
+    from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
+    
+    logger = logging.getLogger('msit_monitor')
+    
+    if dataframe is None or dataframe.empty:
+        logger.error("업데이트할 데이터가 없습니다")
+        return False
+    
+    try:
+        logger.info(f"Google Sheets 업데이트 시작: {sheet_name}")
+        
+        # 날짜 정보 추출 (있는 경우)
+        date_info = ""
+        if post_info and 'title' in post_info:
+            # 제목에서 날짜 정보 추출
+            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
+            if date_match:
+                year = date_match.group(1)
+                month = date_match.group(2)
+                date_info = f"{year}년 {month}월"
+                logger.info(f"게시물에서 날짜 정보 추출: {date_info}")
+        
+        # 시트 이름에 날짜 정보 추가 (있는 경우)
+        original_sheet_name = sheet_name
+        if date_info:
+            sheet_name = f"{sheet_name}_{date_info}"
+        
+        # 시트 이름 길이 제한 (gspread 제한: 100자)
+        if len(sheet_name) > 95:
+            # 날짜 정보 유지하면서 이름 축약
+            timestamp = datetime.now().strftime("%Y%m%d")
+            sheet_name = f"{original_sheet_name[:60]}_{timestamp}"
+            logger.info(f"시트 이름이 너무 깁니다. 축약된 이름 사용: {sheet_name}")
+        
+        # 스프레드시트 찾기 또는 생성 (최대 3번 재시도)
+        spreadsheet = None
+        retries = 0
+        max_retries = 3
+        
+        while retries < max_retries and spreadsheet is None:
+            try:
+                # ID로 스프레드시트 찾기 시도
+                if 'spreadsheet_id' in globals() and spreadsheet_id:
+                    try:
+                        spreadsheet = client.open_by_key(spreadsheet_id)
+                        logger.info(f"ID로 스프레드시트 찾음: {spreadsheet.title}")
+                    except Exception as e:
+                        logger.warning(f"ID로 스프레드시트 찾기 실패: {str(e)}")
+                
+                # 이름으로 스프레드시트 찾기 시도
+                if spreadsheet is None:
+                    try:
+                        spreadsheet = client.open("MSIT 통신 통계")
+                        logger.info(f"이름으로 스프레드시트 찾음: {spreadsheet.title}")
+                    except SpreadsheetNotFound:
+                        # 스프레드시트 생성
+                        spreadsheet = client.create("MSIT 통신 통계")
+                        logger.info(f"새 스프레드시트 생성: {spreadsheet.title}")
+                break
+                
+            except APIError as api_err:
+                retries += 1
+                logger.warning(f"Google Sheets API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
+                
+                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                    # 지수 백오프
+                    wait_time = 2 ** retries
+                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"스프레드시트 접근 중 오류: {str(api_err)}")
+                    if retries >= max_retries:
+                        return False
+            
+            except Exception as e:
+                retries += 1
+                logger.error(f"스프레드시트 접근 중 오류: {str(e)}")
+                time.sleep(2)
+                if retries >= max_retries:
+                    return False
+        
+        if spreadsheet is None:
+            logger.error("스프레드시트를 찾거나 생성할 수 없습니다")
+            return False
+        
+        # 워크시트 찾기 또는 생성
+        worksheet = None
+        retries = 0
+        
+        while retries < max_retries and worksheet is None:
+            try:
+                # 기존 워크시트 찾기
+                try:
+                    worksheet = spreadsheet.worksheet(sheet_name)
+                    logger.info(f"기존 워크시트 찾음: {sheet_name}")
+                    
+                    # 기존 데이터 삭제 (전체 데이터 교체를 위해)
+                    worksheet.clear()
+                    logger.info(f"기존 워크시트 데이터 삭제 완료")
+                except WorksheetNotFound:
+                    # 새 워크시트 생성
+                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
+                    logger.info(f"새 워크시트 생성: {sheet_name}")
+                
+                break
+            
+            except APIError as api_err:
+                retries += 1
+                logger.warning(f"워크시트 접근 중 API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
+                
+                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                    wait_time = 2 ** retries
+                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"워크시트 접근 중 오류: {str(api_err)}")
+                    if retries >= max_retries:
+                        return False
+            
+            except Exception as e:
+                retries += 1
+                logger.error(f"워크시트 접근 중 오류: {str(e)}")
+                time.sleep(2)
+                if retries >= max_retries:
+                    return False
+        
+        if worksheet is None:
+            logger.error("워크시트를 찾거나 생성할 수 없습니다")
+            return False
+        
+        # 데이터프레임 처리 및 업로드
+        try:
+            # 데이터프레임 전처리
+            df = dataframe.copy()
+            df = df.fillna('')  # NaN 값을 빈 문자열로 변환
+            
+            # 모든 값을 문자열로 변환
+            for col in df.columns:
+                df[col] = df[col].astype(str)
+            
+            # 헤더와 값 분리
+            headers = df.columns.tolist()
+            values = df.values.tolist()
+            
+            # 모든 데이터를 2D 배열로 준비 (헤더 포함)
+            all_values = [headers] + values
+            
+            # 배치 업데이트
+            logger.info(f"워크시트에 {len(all_values)}행 {len(headers)}열 데이터 업데이트 중...")
+            
+            # API 제한을 고려한 청크 단위 업데이트
+            chunk_size = 1000  # 한 번에 업데이트할 최대 행 수
+            
+            for i in range(0, len(all_values), chunk_size):
+                chunk = all_values[i:i + chunk_size]
+                start_row = i + 1  # 1-based index
+                end_row = start_row + len(chunk) - 1
+                
+                try:
+                    # 청크 단위로 업데이트
+                    worksheet.update(f'A{start_row}:{chr(65 + len(headers) - 1)}{end_row}', chunk)
+                    logger.info(f"청크 업데이트 완료: {start_row}~{end_row}행")
+                    
+                    # API 속도 제한 방지
+                    time.sleep(2)
+                    
+                except APIError as chunk_err:
+                    logger.warning(f"청크 업데이트 중 API 오류: {str(chunk_err)}")
+                    
+                    if "RESOURCE_EXHAUSTED" in str(chunk_err) or "RATE_LIMIT_EXCEEDED" in str(chunk_err):
+                        logger.info("API 속도 제한 감지. 행 단위 업데이트로 전환...")
+                        
+                        # 행 단위 업데이트로 전환
+                        for j, row_data in enumerate(chunk):
+                            row_num = start_row + j
+                            try:
+                                worksheet.update(f'A{row_num}:{chr(65 + len(headers) - 1)}{row_num}', [row_data])
+                                logger.info(f"행 단위 업데이트 완료: {row_num}행")
+                                time.sleep(1)  # 각 행마다 대기
+                            except Exception as row_err:
+                                logger.error(f"{row_num}행 업데이트 실패: {str(row_err)}")
+                    else:
+                        raise
+            
+            # 출처 정보 추가 (있는 경우)
+            if post_info and ('url' in post_info or 'title' in post_info):
+                footer_row = len(all_values) + 2  # 데이터 이후 빈 행 하나 추가
+                
+                footer_data = []
+                if 'title' in post_info:
+                    footer_data.append(["출처: " + post_info['title']])
+                
+                if 'url' in post_info:
+                    footer_data.append(["URL: " + post_info['url']])
+                
+                if 'date' in post_info:
+                    footer_data.append(["날짜: " + post_info['date']])
+                
+                try:
+                    for i, row_data in enumerate(footer_data):
+                        worksheet.update(f'A{footer_row + i}', [row_data])
+                    
+                    logger.info("출처 정보 추가 완료")
+                except Exception as footer_err:
+                    logger.warning(f"출처 정보 추가 실패: {str(footer_err)}")
+            
+            # 서식 설정
+            try:
+                # 헤더 행 서식 지정
+                worksheet.format('A1:Z1', {
+                    "backgroundColor": {
+                        "red": 0.9,
+                        "green": 0.9,
+                        "blue": 0.9
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {
+                        "bold": True
+                    }
+                })
+                
+                # 첫 번째 열 서식 지정 (항목 이름)
+                worksheet.format(f'A1:A{len(all_values)}', {
+                    "textFormat": {
+                        "bold": True
+                    }
+                })
+                
+                logger.info("서식 설정 완료")
+            except Exception as format_err:
+                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
+            
+            # 열 너비 자동 조정 시도
+            try:
+                for i, col_width in enumerate([150] + [100] * (len(headers) - 1)):
+                    col_letter = chr(65 + i)
+                    worksheet.columns_auto_resize(i, i)
+                    logger.info(f"{col_letter}열 너비 자동 조정")
+            except Exception as width_err:
+                logger.warning(f"열 너비 조정 중 오류: {str(width_err)}")
+            
+            logger.info(f"Google Sheets 업데이트 완료: {sheet_name}")
+            return True
+            
+        except Exception as update_err:
+            logger.error(f"워크시트 데이터 업데이트 중 오류: {str(update_err)}")
+            return False
+    
+    except Exception as e:
+        logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
+        return False
 
 def update_single_sheet(spreadsheet, sheet_name, df, date_str):
     """단일 시트 업데이트"""
@@ -2398,6 +2738,194 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
         logger.error(f"데이터프레임으로 워크시트 업데이트 중 오류: {str(e)}")
         return False
 
+def capture_full_table(driver, screenshot_path="full_table.png"):
+    """전체 표가 보이도록 스크린샷을 캡처하는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        screenshot_path: 스크린샷 저장 경로
+        
+    Returns:
+        str: 캡처된 스크린샷 경로 또는 None (실패 시)
+    """
+    import time
+    import logging
+    from selenium.webdriver.common.by import By
+    
+    logger = logging.getLogger('msit_monitor')
+    
+    try:
+        logger.info("전체 표 캡처 시작")
+        
+        # 원본 창 크기 저장
+        original_size = driver.get_window_size()
+        
+        # 표 요소 찾기 (여러 선택자 시도)
+        table_selectors = [
+            "table", 
+            ".board_list", 
+            ".view_cont table", 
+            "div[class*='table']", 
+            "div.innerWrap table",
+            "#innerWrap table"
+        ]
+        
+        table_element = None
+        for selector in table_selectors:
+            try:
+                tables = driver.find_elements(By.CSS_SELECTOR, selector)
+                if tables:
+                    # 가장 큰 테이블 선택 (일반적으로 주요 데이터 테이블)
+                    table_element = max(tables, key=lambda t: t.size['width'] * t.size['height'])
+                    logger.info(f"테이블 요소 발견: {selector}")
+                    break
+            except Exception as e:
+                logger.warning(f"선택자 '{selector}'로 테이블 찾기 실패: {str(e)}")
+        
+        if not table_element:
+            logger.warning("테이블 요소를 찾을 수 없음")
+            
+            # iframe 내부 확인
+            try:
+                iframe_selectors = ["iframe", "#innerWrap", "iframe#innerWrap"]
+                for selector in iframe_selectors:
+                    iframes = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if iframes:
+                        logger.info(f"iframe 발견: {selector}, 내부 확인 중")
+                        driver.switch_to.frame(iframes[0])
+                        
+                        # iframe 내부에서 테이블 찾기
+                        for selector in table_selectors:
+                            try:
+                                tables = driver.find_elements(By.CSS_SELECTOR, selector)
+                                if tables:
+                                    table_element = max(tables, key=lambda t: t.size['width'] * t.size['height'])
+                                    logger.info(f"iframe 내부에서 테이블 발견: {selector}")
+                                    break
+                            except Exception as e:
+                                continue
+                        
+                        # iframe에서 표를 찾지 못하면 기본 프레임으로 복귀
+                        if not table_element:
+                            driver.switch_to.default_content()
+                        else:
+                            break
+            except Exception as iframe_err:
+                logger.warning(f"iframe 접근 중 오류: {str(iframe_err)}")
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+        
+        # 전체 페이지 캡처 (표 요소를 찾지 못한 경우)
+        if not table_element:
+            logger.warning("표 요소를 찾지 못했습니다. 전체 페이지 캡처를 진행합니다.")
+            
+            # 전체 페이지 높이 구하기
+            total_height = driver.execute_script("return document.body.scrollHeight")
+            
+            # 필요한 경우 창 크기 조정
+            driver.set_window_size(1920, total_height + 100)  # 여유 공간 추가
+            
+            # 스크롤하면서 페이지가 완전히 로드되도록 함
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+            
+            driver.execute_script(f"window.scrollTo(0, {total_height});")
+            time.sleep(1)
+            
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+            
+            # 전체 페이지 스크린샷
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"전체 페이지 스크린샷 저장: {screenshot_path}")
+            
+            # 원래 창 크기로 복원
+            driver.set_window_size(original_size['width'], original_size['height'])
+            
+            return screenshot_path
+        
+        # 표 요소가 있는 경우
+        logger.info(f"발견된 표 크기: {table_element.size}")
+        
+        # 표 위치 및 크기 가져오기
+        table_location = table_element.location
+        table_size = table_element.size
+        
+        # 표 좌표 계산
+        table_x = table_location['x']
+        table_y = table_location['y']
+        table_width = table_size['width']
+        table_height = table_size['height']
+        
+        # 표가 너무 크면 전체 페이지 높이를 조정
+        window_height = max(table_y + table_height + 100, 1080)  # 최소 1080px
+        
+        # 창 크기 조정
+        driver.set_window_size(max(table_width + 200, 1920), window_height)  # 여유 공간 추가
+        
+        # 표가 보이도록 스크롤
+        driver.execute_script(f"window.scrollTo(0, {max(0, table_y - 100)});")
+        time.sleep(2)  # 스크롤 및 렌더링 대기
+        
+        # 페이지 전체 스크린샷
+        driver.save_screenshot(screenshot_path)
+        logger.info(f"표 포함 스크린샷 저장: {screenshot_path}")
+        
+        # 표 영역만 크롭 (선택 사항)
+        try:
+            from PIL import Image
+            
+            img = Image.open(screenshot_path)
+            
+            # 스크롤 후 위치 재계산 (필요하면)
+            current_scroll = driver.execute_script("return window.pageYOffset;")
+            cropped_y = table_y - current_scroll
+            
+            # 표 영역 크롭
+            # 실패 가능성이 있으므로 try 내부에 작성
+            if cropped_y >= 0 and table_width > 0 and table_height > 0:
+                crop_box = (table_x, cropped_y, table_x + table_width, cropped_y + table_height)
+                cropped_img = img.crop(crop_box)
+                
+                # 크롭된 이미지 저장
+                cropped_path = screenshot_path.replace('.png', '_cropped.png')
+                cropped_img.save(cropped_path)
+                logger.info(f"표 영역 크롭 이미지 저장: {cropped_path}")
+                
+                # 원본과 크롭 이미지 모두 반환
+                return [screenshot_path, cropped_path]
+            else:
+                logger.warning(f"유효하지 않은 크롭 영역: x={table_x}, y={cropped_y}, w={table_width}, h={table_height}")
+                return screenshot_path
+        except Exception as crop_err:
+            logger.warning(f"이미지 크롭 중 오류: {str(crop_err)}")
+            return screenshot_path
+        
+    except Exception as e:
+        logger.error(f"전체 표 캡처 중 오류: {str(e)}")
+        
+        # 오류 발생해도 일반 스크린샷은 시도
+        try:
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"오류 발생 후 일반 스크린샷 저장: {screenshot_path}")
+            return screenshot_path
+        except:
+            logger.error("스크린샷 저장 실패")
+            return None
+    finally:
+        # 항상 원래 창 크기로 복원
+        try:
+            driver.set_window_size(original_size['width'], original_size['height'])
+        except:
+            pass
+        
+        # iframe에서 나오기
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
 
 async def send_telegram_message(posts, data_updates=None):
     """텔레그램으로 알림 메시지 전송"""
