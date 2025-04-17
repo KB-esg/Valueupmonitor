@@ -54,7 +54,7 @@ jobs:
         if [ -f requirements.txt ]; then
           pip install -r requirements.txt
         else
-          pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager pytesseract
+          pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager pytesseract opencv-python
         fi
 
     - name: Create directories
