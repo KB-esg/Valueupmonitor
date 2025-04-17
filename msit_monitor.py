@@ -1262,159 +1262,383 @@ def try_ajax_access(driver, post):
         
     except Exception as e:
         logger.error(f"AJAX 접근 시도 중 오류: {str(e)}")
-        return None onclick 속성으로 찾기
-                if not view_links:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
+        return None
+        
+def create_placeholder_dataframe(post_info):
+    """데이터 추출 실패 시 기본 데이터프레임 생성"""
+    try:
+        # 날짜 정보 추출
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2)
+            
+            # 보고서 유형 결정
+            report_type = determine_report_type(post_info['title'])
+            
+            # 기본 데이터프레임 생성
+            df = pd.DataFrame({
+                '구분': [f'{year}년 {month}월 통계'],
+                '값': ['데이터를 추출할 수 없습니다'],
+                '비고': [f'{post_info["title"]} - 접근 오류'],
+                '링크': [post_info.get('url', '링크 없음')]
+            })
+            
+            logger.info(f"플레이스홀더 데이터프레임 생성: {year}년 {month}월 {report_type}")
+            return df
+            
+        return pd.DataFrame({
+            '구분': ['알 수 없음'],
+            '값': ['데이터 추출 실패'],
+            '비고': [f'게시물: {post_info["title"]} - 날짜 정보 없음']
+        })  # 날짜 정보가 없으면 최소 정보 포함
+        
+    except Exception as e:
+        logger.error(f"플레이스홀더 데이터프레임 생성 중 오류: {str(e)}")
+        # 오류 발생 시도 최소한의 정보 포함
+        return pd.DataFrame({
+            '구분': ['오류 발생'],
+            '업데이트 상태': ['데이터프레임 생성 실패'],
+            '비고': [f'오류: {str(e)}']
+        })
+
+
+
+def access_iframe_with_ocr_fallback(driver, file_params):
+    """iframe 직접 접근 시도 후 실패시 OCR 추출 사용"""
+    # 기존 iframe 접근 방식 시도
+    sheets_data = access_iframe_direct(driver, file_params)
+    
+    # 정상적으로 데이터 추출에 성공한 경우
+    if sheets_data:
+        logger.info("iframe 직접 접근으로 데이터 추출 성공")
+        return sheets_data
+    
+    # OCR 기능이 비활성화된 경우 건너뛰기
+    if not CONFIG['ocr_enabled']:
+        logger.info("OCR 기능이 비활성화되어 건너뜀")
+        return None
+    
+    # 실패한 경우 OCR 접근법 시도
+    logger.info("iframe 직접 접근 실패, OCR 접근법 시도")
+    
+    try:
+        # 현재 페이지 스크린샷 캡처
+        screenshot_path = f"document_view_ocr_{int(time.time())}.png"
+        driver.save_screenshot(screenshot_path)
+        logger.info(f"OCR용 스크린샷 저장: {screenshot_path}")
+        
+        # OCR을 통한 데이터 추출
+        ocr_data_list = extract_data_from_screenshot(screenshot_path)
+        
+        if ocr_data_list:
+            # 결과 모으기
+            result = {}
+            for i, df in enumerate(ocr_data_list):
+                if not df.empty:
+                    sheet_name = f"OCR_테이블_{i+1}"
+                    result[sheet_name] = df
+                    logger.info(f"OCR 테이블 {i+1}: {df.shape[0]}행 {df.shape[1]}열")
+            
+            if result:
+                logger.info(f"OCR 전체 {len(result)}개 테이블 추출 성공")
+                return result
+        
+        logger.warning("OCR 데이터 추출 실패")
+        return None
+        
+    except Exception as e:
+        logger.error(f"OCR 접근법 중 오류: {str(e)}")
+        return None
+
+def access_iframe_direct(driver, file_params):
+    """iframe에 직접 접근하여 데이터 추출"""
+    if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
+        logger.error("파일 파라미터가 없습니다.")
+        return None
+    
+    atch_file_no = file_params['atch_file_no']
+    file_ord = file_params['file_ord']
+    
+    # 바로보기 URL 구성
+    view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
+    logger.info(f"바로보기 URL: {view_url}")
+    
+    # 여러 번 재시도
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # 페이지 로드
+            driver.get(view_url)
+            time.sleep(5)  # 초기 대기
+            
+            # 현재 URL 확인
+            current_url = driver.current_url
+            logger.info(f"현재 URL: {current_url}")
+           
+            # 스크린샷 저장
+            take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
+            
+            # 현재 페이지 스크린샷 저장 (디버깅용)
+            try:
+                driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
+                logger.info(f"문서 뷰어 스크린샷 저장: document_view_{atch_file_no}_{file_ord}.png")
+            except Exception as ss_err:
+                logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
+            
+            # 시스템 점검 페이지 감지
+            if "시스템 점검 안내" in driver.page_source:
+                if attempt < max_retries - 1:
+                    logger.warning("시스템 점검 중입니다. 나중에 다시 시도합니다.")
+                    time.sleep(5)  # 더 오래 대기
+                    continue
+                else:
+                    logger.warning("시스템 점검 중입니다. 문서를 열 수 없습니다.")
+                    return None
+            
+            # SynapDocViewServer 또는 문서 뷰어 감지
+            if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
+                logger.info("문서 뷰어 감지됨")
                 
-                # 3. 텍스트로 찾기
-                if not view_links:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+                # 현재 창 핸들 저장
+                original_handle = driver.current_window_handle
                 
-                # 4. class 속성으로 찾기
-                if not view_links:
-                    view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
+                # 새 창이 열렸는지 확인
+                window_handles = driver.window_handles
+                if len(window_handles) > 1:
+                    logger.info(f"새 창이 열렸습니다. 전환 시도...")
+                    for handle in window_handles:
+                        if handle != original_handle:
+                            driver.switch_to.window(handle)
+                            break
                 
-                # 5. 제목에 포함된 키워드로 관련 링크 찾기
-                if not view_links and '통계' in post['title']:
-                    all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if 
-                                any(ext in (link.get_attribute('href') or '')  
-                                   for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
-                
-                if view_links:
-                    view_link = view_links[0]
-                    onclick_attr = view_link.get_attribute('onclick')
-                    href_attr = view_link.get_attribute('href')
+                # 시트 탭 찾기
+                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                if sheet_tabs:
+                    logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+                    all_sheets = {}
                     
-                    logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}, href: {href_attr}")
-                    
-                    # getExtension_path('49234', '1') 형식에서 매개변수 추출
-                    if onclick_attr and 'getExtension_path' in onclick_attr:
-                        match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
-                        if match:
-                            atch_file_no = match.group(1)
-                            file_ord = match.group(2)
-                            
-                            # 날짜 정보 추출
-                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                            if date_match:
-                                year = int(date_match.group(1))
-                                month = int(date_match.group(2))
-                                
-                                return {
-                                    'atch_file_no': atch_file_no,
-                                    'file_ord': file_ord,
-                                    'date': {'year': year, 'month': month},
-                                    'post_info': post
-                                }
-                            
-                            return {
-                                'atch_file_no': atch_file_no,
-                                'file_ord': file_ord,
-                                'post_info': post
-                            }
-                    # 직접 다운로드 URL인 경우 처리
-                    elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
-                        logger.info(f"직접 다운로드 링크 발견: {href_attr}")
+                    for i, tab in enumerate(sheet_tabs):
+                        sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+                        logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
                         
-                        # 날짜 정보 추출
-                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                        if date_match:
-                            year = int(date_match.group(1))
-                            month = int(date_match.group(2))
-                            
-                            return {
-                                'download_url': href_attr,
-                                'date': {'year': year, 'month': month},
-                                'post_info': post
-                            }
-                
-                # 바로보기 링크를 찾을 수 없는 경우
-                logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
-                
-                # 게시물 내용 추출 시도
-                try:
-                    # 다양한 선택자로 내용 찾기
-                    content_selectors = [
-                        "div.view_cont", 
-                        ".view_content", 
-                        ".bbs_content",
-                        ".bbs_detail_content",
-                        "div[class*='view'] div[class*='cont']"
-                    ]
-                    
-                    content = ""
-                    for selector in content_selectors:
+                        # 첫 번째가 아닌 시트는 클릭하여 전환
+                        if i > 0:
+                            try:
+                                tab.click()
+                                time.sleep(3)  # 시트 전환 대기
+                            except Exception as click_err:
+                                logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
+                                continue
+                        
                         try:
-                            content_elem = driver.find_element(By.CSS_SELECTOR, selector)
-                            content = content_elem.text if content_elem else ""
-                            if content.strip():
-                                logger.info(f"게시물 내용 추출 성공 (길이: {len(content)})")
-                                break
-                        except:
+                            # iframe 찾기
+                            iframe = WebDriverWait(driver, 40).until(
+                                EC.presence_of_element_located((By.ID, "innerWrap"))
+                            )
+                            
+                            # iframe으로 전환
+                            driver.switch_to.frame(iframe)
+                            
+                            # 페이지 소스 가져오기
+                            iframe_html = driver.page_source
+                            
+                            # 테이블 추출
+                            df = extract_table_from_html(iframe_html)
+                            
+                            # 기본 프레임으로 복귀
+                            driver.switch_to.default_content()
+                            
+                            if df is not None and not df.empty:
+                                all_sheets[sheet_name] = df
+                                logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            else:
+                                logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                                
+                                # 테이블 추출 실패 시 OCR 시도
+                                if CONFIG['ocr_enabled']:
+                                    # 현재 화면 캡처
+                                    ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
+                                    driver.save_screenshot(ocr_screenshot)
+                                    
+                                    # OCR로 데이터 추출
+                                    ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                                    if ocr_data and len(ocr_data) > 0:
+                                        all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
+                                        logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
+                        except Exception as iframe_err:
+                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                            try:
+                                # 오류 발생 시 기본 프레임으로 복귀
+                                driver.switch_to.default_content()
+                            except:
+                                pass
+                    
+                    if all_sheets:
+                        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
+                        return all_sheets
+                    else:
+                        logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
-                    
-                    # 날짜 정보 추출
-                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                    if date_match:
-                        year = int(date_match.group(1))
-                        month = int(date_match.group(2))
+                        else:
+                            return None
+                else:
+                    logger.info("시트 탭 없음, 단일 iframe 처리 시도")
+                    try:
+                        iframe = WebDriverWait(driver, 40).until(
+                            EC.presence_of_element_located((By.ID, "innerWrap"))
+                        )
+                        driver.switch_to.frame(iframe)
+                        html_content = driver.page_source
+                        df = extract_table_from_html(html_content)
+                        driver.switch_to.default_content()
                         
-                        return {
-                            'content': content if content else "내용 없음",
-                            'date': {'year': year, 'month': month},
-                            'post_info': post
-                        }
+                        if df is not None and not df.empty:
+                            logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            return {"기본 시트": df}
+                        else:
+                            logger.warning("단일 iframe에서 테이블 추출 실패")
+                            
+                            # OCR 시도
+                            if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
+                                # 현재 화면 캡처
+                                ocr_screenshot = f"single_iframe_{int(time.time())}.png"
+                                driver.save_screenshot(ocr_screenshot)
+                                
+                                # OCR로 데이터 추출
+                                ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                                if ocr_data and len(ocr_data) > 0:
+                                    logger.info(f"OCR로 데이터 추출 성공")
+                                    return {"OCR 추출": ocr_data[0]}
+                            
+                            if attempt < max_retries - 1:
+                                logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                                continue
+                            else:
+                                return None
+                    except Exception as iframe_err:
+                        logger.error(f"단일 iframe 처리 중 오류: {str(iframe_err)}")
+                        try:
+                            driver.switch_to.default_content()
+                        except:
+                            pass
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                            continue
+                        else:
+                            return None
+            else:
+                logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                try:
+                    # 현재 창 핸들 저장 (팝업이 있을 수 있음)
+                    original_handle = driver.current_window_handle
                     
-                except Exception as content_err:
-                    logger.warning(f"게시물 내용 추출 중 오류: {str(content_err)}")
-                
-                # 날짜 정보 추출
-                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                if date_match:
-                    year = int(date_match.group(1))
-                    month = int(date_match.group(2))
+                    # 새 창이 열렸는지 확인
+                    window_handles = driver.window_handles
+                    if len(window_handles) > 1:
+                        logger.info(f"새 창이 열렸습니다. 전환 시도...")
+                        for handle in window_handles:
+                            if handle != original_handle:
+                                driver.switch_to.window(handle)
+                                break
                     
-                    return {
-                        'content': "내용 없음",
-                        'date': {'year': year, 'month': month},
-                        'post_info': post
-                    }
-                
-                return None
-                
-            except Exception as e:
-                logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
-                
-                # 오류 발생 시에도 날짜 정보 추출 시도
-                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                if date_match:
-                    year = int(date_match.group(1))
-                    month = int(date_match.group(2))
+                    # pandas의 read_html 사용
+                    tables = pd.read_html(driver.page_source)
                     
-                    return {
-                        'content': f"오류 발생: {str(e)}",
-                        'date': {'year': year, 'month': month},
-                        'post_info': post
-                    }
-                    
-                return None
-                
+                    if tables:
+                        largest_table = max(tables, key=lambda t: t.size)
+                        logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
+                        return {"기본 테이블": largest_table}
+                    else:
+                        logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
+                        
+                        # OCR 시도
+                        if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
+                            # 현재 화면 캡처
+                            ocr_screenshot = f"html_page_{int(time.time())}.png"
+                            driver.save_screenshot(ocr_screenshot)
+                            
+                            # OCR로 데이터 추출
+                            ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                            if ocr_data and len(ocr_data) > 0:
+                                logger.info(f"OCR로 HTML 페이지 데이터 추출 성공")
+                                return {"OCR 추출": ocr_data[0]}
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                            continue
+                        else:
+                            return None
+                except Exception as table_err:
+                    logger.error(f"HTML 테이블 추출 중 오류: {str(table_err)}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                        continue
+                    else:
+                        return None
+        
         except Exception as e:
-            logger.error(f"게시물 클릭 접근 중 오류: {str(e)}")
+            logger.error(f"iframe 전환 및 데이터 추출 중 오류: {str(e)}")
+            
+            # 디버깅 정보 출력
+            try:
+                # HTML 미리보기 출력
+                html_snippet = driver.page_source[:5000]
+                logger.error(f"오류 발생 시 페이지 HTML (first 5000 characters):\n{html_snippet}")
+                
+                # <script> 태그 내용도 별도 출력
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                script_tags = soup.find_all('script')
+                if script_tags:
+                    logger.error("오류 발생 시 <script> 태그 내용:")
+                    for script in script_tags:
+                        logger.error(script.prettify())
+                
+                # 기본 프레임으로 복귀
+                driver.switch_to.default_content()
+            except:
+                pass
             
             if attempt < max_retries - 1:
                 logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                time.sleep(retry_delay * 2)
+                time.sleep(3)
+                continue
             else:
-                # 직접 URL 접근 방식으로 대체
-                logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                return direct_access_view_link_params(driver, post)
+                return None
     
-    # 모든 시도 실패 시 직접 URL 접근 방식으로 대체
-    return direct_access_view_link_params(driver, post)
+    return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def extract_table_from_html(html_content):
     """HTML 내용에서 테이블 추출 (colspan 및 rowspan 처리 포함)"""
