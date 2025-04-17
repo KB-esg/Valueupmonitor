@@ -1949,171 +1949,170 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
             worksheet.update_cell(1, 1, "항목")
             time.sleep(1)  # API 속도 제한 방지
         
-            # 날짜 열 확인
-            headers = worksheet.row_values(1)
+        # 날짜 열 확인
+        headers = worksheet.row_values(1)
         
-            # 빈 헤더 채우기
-            if not headers or len(headers) == 0:
-                worksheet.update_cell(1, 1, "항목")
-                headers = ["항목"]
-                time.sleep(1)  # API 속도 제한 방지
+        # 빈 헤더 채우기
+        if not headers or len(headers) == 0:
+            worksheet.update_cell(1, 1, "항목")
+            headers = ["항목"]
+            time.sleep(1)  # API 속도 제한 방지
         
-            if date_str in headers:
-                col_idx = headers.index(date_str) + 1
-                logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
-            else:
-                # 새 날짜 열 추가
-                col_idx = len(headers) + 1
-                worksheet.update_cell(1, col_idx, date_str)
-                logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
-                time.sleep(1)  # API 속도 제한 방지
+        if date_str in headers:
+            col_idx = headers.index(date_str) + 1
+            logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
+        else:
+            # 새 날짜 열 추가
+            col_idx = len(headers) + 1
+            worksheet.update_cell(1, col_idx, date_str)
+            logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
+            time.sleep(1)  # API 속도 제한 방지
         
-            # 데이터프레임 형식 검증 및 정리
-            if df.shape[1] < 2:
-                logger.warning(f"데이터프레임 열이 부족합니다: {df.shape[1]} 열. 최소 2열 필요")
-                
-                # 최소 열 추가
-                if df.shape[1] == 1:
-                    col_name = df.columns[0]
-                    df['값'] = df[col_name]
-                else:
-                    # 데이터프레임이 비어있는 경우
-                    df = pd.DataFrame({
-                        '항목': ['데이터 없음'],
-                        '값': ['업데이트 실패']
-                    })
-        
-            # 데이터프레임으로 시트 업데이트 (배치 처리)
-            update_sheet_from_dataframe(worksheet, df, col_idx)
-        
-            logger.info(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 완료")
-            return True
-        
-        except gspread.exceptions.APIError as api_err:
-            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
-                logger.info("대기 후 재시도 중...")
-                time.sleep(5)  # 더 긴 대기 시간
+        # 데이터프레임 형식 검증 및 정리
+        if df.shape[1] < 2:
+            logger.warning(f"데이터프레임 열이 부족합니다: {df.shape[1]} 열. 최소 2열 필요")
             
-                # 간소화된 방식으로 재시도
+            # 최소 열 추가
+            if df.shape[1] == 1:
+                col_name = df.columns[0]
+                df['값'] = df[col_name]
+            else:
+                # 데이터프레임이 비어있는 경우
+                df = pd.DataFrame({
+                    '항목': ['데이터 없음'],
+                    '값': ['업데이트 실패']
+                })
+        
+        # 데이터프레임으로 시트 업데이트 (배치 처리)
+        update_sheet_from_dataframe(worksheet, df, col_idx)
+        
+        logger.info(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 완료")
+        return True
+        
+    except gspread.exceptions.APIError as api_err:
+        if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+            logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
+            logger.info("대기 후 재시도 중...")
+            time.sleep(5)  # 더 긴 대기 시간
+            
+            # 간소화된 방식으로 재시도
+            try:
+                # 워크시트 찾기 또는 생성
                 try:
-                    # 워크시트 찾기 또는 생성
-                    try:
-                        worksheet = spreadsheet.worksheet(sheet_name)
-                    except gspread.exceptions.WorksheetNotFound:
-                        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-                        worksheet.update_cell(1, 1, "항목")
-                    
-                    # 날짜 열 위치 결정 (단순화)
-                    headers = worksheet.row_values(1)
-                    if date_str in headers:
-                        col_idx = headers.index(date_str) + 1
-                    else:
-                        col_idx = len(headers) + 1
-                        worksheet.update_cell(1, col_idx, date_str)
+                    worksheet = spreadsheet.worksheet(sheet_name)
+                except gspread.exceptions.WorksheetNotFound:
+                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
+                    worksheet.update_cell(1, 1, "항목")
+                
+                # 날짜 열 위치 결정 (단순화)
+                headers = worksheet.row_values(1)
+                if date_str in headers:
+                    col_idx = headers.index(date_str) + 1
+                else:
+                    col_idx = len(headers) + 1
+                    worksheet.update_cell(1, col_idx, date_str)
                 
                 # 최소한의 데이터만 업데이트
-                    if df.shape[0] > 0:
-                        first_col_name = df.columns[0]
-                        items = df[first_col_name].astype(str).tolist()[:10]  # 처음 10개 항목
-                        values = ["업데이트 성공"] * len(items)
+                if df.shape[0] > 0:
+                    first_col_name = df.columns[0]
+                    items = df[first_col_name].astype(str).tolist()[:10]  # 처음 10개 항목
+                    values = ["업데이트 성공"] * len(items)
                     
-                        for i, (item, value) in enumerate(zip(items, values)):
-                            row_idx = i + 2  # 헤더 행 이후
-                            worksheet.update_cell(row_idx, 1, item)
-                            worksheet.update_cell(row_idx, col_idx, value)
-                            time.sleep(1)  # 더 긴 지연 시간
+                    for i, (item, value) in enumerate(zip(items, values)):
+                        row_idx = i + 2  # 헤더 행 이후
+                        worksheet.update_cell(row_idx, 1, item)
+                        worksheet.update_cell(row_idx, col_idx, value)
+                        time.sleep(1)  # 더 긴 지연 시간
                 
-                    logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
-                    return True
+                logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
+                return True
                 
-                except Exception as retry_err:
-                    logger.error(f"재시도 중 오류: {str(retry_err)}")
-                    return False
-            else:
-                logger.error(f"Google Sheets API 오류: {str(api_err)}")
+            except Exception as retry_err:
+                logger.error(f"재시도 중 오류: {str(retry_err)}")
                 return False
-            
-        except Exception as e:
-            logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
+        else:
+            logger.error(f"Google Sheets API 오류: {str(api_err)}")
             return False
+            
+    except Exception as e:
+        logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
+        return False
 
-
-    def update_sheet_from_dataframe(worksheet, df, col_idx):
-        """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
-        try:
-            # 기존 항목 (첫 번째 열) 가져오기
-            existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
+def update_sheet_from_dataframe(worksheet, df, col_idx):
+    """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
+    try:
+        # 기존 항목 (첫 번째 열) 가져오기
+        existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
         
-            if df.shape[0] > 0:
-                # 데이터프레임에서 항목과 값 추출
-                # 첫 번째 열은 항목, 두 번째 열은 값으로 가정
-                if df.shape[1] >= 2:
-                    df = df.fillna('')  # NaN 값 처리
-                    item_col = df.columns[0]
-                    value_col = df.columns[1]
+        if df.shape[0] > 0:
+            # 데이터프레임에서 항목과 값 추출
+            # 첫 번째 열은 항목, 두 번째 열은 값으로 가정
+            if df.shape[1] >= 2:
+                df = df.fillna('')  # NaN 값 처리
+                item_col = df.columns[0]
+                value_col = df.columns[1]
                 
-                    new_items = df[item_col].astype(str).tolist()
-                    values = df[value_col].astype(str).tolist()
+                new_items = df[item_col].astype(str).tolist()
+                values = df[value_col].astype(str).tolist()
                 
-                    # 배치 업데이트 준비
-                    cell_updates = []
-                    new_rows = []
+                # 배치 업데이트 준비
+                cell_updates = []
+                new_rows = []
                 
-                    for i, (item, value) in enumerate(zip(new_items, values)):
-                        if item and item.strip():  # 빈 항목 제외
+                for i, (item, value) in enumerate(zip(new_items, values)):
+                    if item and item.strip():  # 빈 항목 제외
                         # 항목이 이미 존재하는지 확인
-                            if item in existing_items:
-                                row_idx = existing_items.index(item) + 2  # 헤더와, 0-인덱스 보정
-                            else:
+                        if item in existing_items:
+                            row_idx = existing_items.index(item) + 2  # 헤더와, 0-인덱스 보정
+                        else:
                             # 새 항목은 끝에 추가
-                                row_idx = len(existing_items) + 2
-                                new_rows.append(item)  # 새 행 추적
+                            row_idx = len(existing_items) + 2
+                            new_rows.append(item)  # 새 행 추적
                             
                             # 항목 업데이트
-                                cell_updates.append({
-                                    'range': f'A{row_idx}',
-                                    'values': [[item]]
-                                })
-                                existing_items.append(item)
+                            cell_updates.append({
+                                'range': f'A{row_idx}',
+                                'values': [[item]]
+                            })
+                            existing_items.append(item)
                         
                         # 값 업데이트
-                            value_to_update = "" if pd.isna(value) else value
-                            cell_updates.append({
-                                'range': f'{chr(64 + col_idx)}{row_idx}',
-                                'values': [[value_to_update]]
-                            })
+                        value_to_update = "" if pd.isna(value) else value
+                        cell_updates.append({
+                            'range': f'{chr(64 + col_idx)}{row_idx}',
+                            'values': [[value_to_update]]
+                        })
                 
                 # 일괄 업데이트 실행 (API 호출 제한 방지를 위한 분할)
-                    if cell_updates:
-                        batch_size = 10  # 한 번에 처리할 업데이트 수
-                        for i in range(0, len(cell_updates), batch_size):
-                            batch = cell_updates[i:i+batch_size]
-                            try:
-                                worksheet.batch_update(batch)
-                                logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
-                                time.sleep(2)  # API 속도 제한 방지
-                            except gspread.exceptions.APIError as api_err:
-                                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                                    logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                                    time.sleep(10)  # 더 긴 대기
+                if cell_updates:
+                    batch_size = 10  # 한 번에 처리할 업데이트 수
+                    for i in range(0, len(cell_updates), batch_size):
+                        batch = cell_updates[i:i+batch_size]
+                        try:
+                            worksheet.batch_update(batch)
+                            logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
+                            time.sleep(2)  # API 속도 제한 방지
+                        except gspread.exceptions.APIError as api_err:
+                            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                                logger.warning(f"API 속도 제한 발생: {str(api_err)}")
+                                time.sleep(10)  # 더 긴 대기
                                 # 더 작은 배치로 재시도
-                                    for update in batch:
-                                        try:
-                                            worksheet.batch_update([update])
-                                            time.sleep(3)
-                                        except Exception as single_err:
-                                            logger.error(f"단일 업데이트 실패: {str(single_err)}")
-                                else:
-                                    logger.error(f"일괄 업데이트 실패: {str(api_err)}")
+                                for update in batch:
+                                    try:
+                                        worksheet.batch_update([update])
+                                        time.sleep(3)
+                                    except Exception as single_err:
+                                        logger.error(f"단일 업데이트 실패: {str(single_err)}")
+                            else:
+                                logger.error(f"일괄 업데이트 실패: {str(api_err)}")
                     
-                        logger.info(f"{len(cell_updates)}개 셀 업데이트 완료 (새 항목: {len(new_rows)}개)")
-                        
-            return True
+                    logger.info(f"{len(cell_updates)}개 셀 업데이트 완료 (새 항목: {len(new_rows)}개)")
+                    
+        return True
         
-        except Exception as e:
-            logger.error(f"데이터프레임으로 워크시트 업데이트 중 오류: {str(e)}")
-            return False
+    except Exception as e:
+        logger.error(f"데이터프레임으로 워크시트 업데이트 중 오류: {str(e)}")
+        return False
 
 
 async def send_telegram_message(posts, data_updates=None):
