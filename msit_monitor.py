@@ -2039,12 +2039,12 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
             return False
 
 
-    def update_sheet_from_dataframe(worksheet, df, col_idx):
-        """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
-        try:
-            # 기존 항목 (첫 번째 열) 가져오기
-            existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
-        
+def update_sheet_from_dataframe(worksheet, df, col_idx):
+    """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
+    try:
+        # 기존 항목 (첫 번째 열) 가져오기
+        existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
+    
             if df.shape[0] > 0:
                 # 데이터프레임에서 항목과 값 추출
                 # 첫 번째 열은 항목, 두 번째 열은 값으로 가정
