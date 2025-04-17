@@ -9,3 +9,5 @@ lxml
 html5lib
 selenium-stealth
 webdriver-manager
+opencv-python
+pytesseract
