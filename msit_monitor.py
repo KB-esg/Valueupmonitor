@@ -2371,7 +2371,6 @@ async def run_monitor(days_range=4, check_sheets=True):
                     WebDriverWait(driver, 15).until(
                         EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
                     )
-                    
                     logger.info("통계정보 페이지 직접 접속 성공")
                 except TimeoutException:
                     logger.warning("통계정보 페이지 로드 시간 초과, 계속 진행")
