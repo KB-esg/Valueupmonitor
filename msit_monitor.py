@@ -3280,33 +3280,108 @@ async def run_monitor(days_range=4, check_sheets=True):
                     
                     # 바로보기 링크가 있는 경우
                     if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                        # iframe 직접 접근하여 데이터 추출 (OCR 폴백 포함)
-                        sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
+                        # 수정된 부분: 전체 표 캡처 및 OCR 처리
+                        logger.info(f"전체 표 캡처 시도: {post['title']}")
                         
-                        if sheets_data:
-                            # Google Sheets 업데이트
-                            update_data = {
-                                'sheets': sheets_data,
-                                'post_info': post
-                            }
+                        # 바로보기 URL 생성
+                        view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+                        logger.info(f"바로보기 URL: {view_url}")
+                        
+                        # 페이지 접속
+                        driver.get(view_url)
+                        time.sleep(5)  # 로딩 대기
+                        
+                        # 전체 표 캡처
+                        screenshots = capture_full_table(driver, f"table_{file_params['atch_file_no']}_{file_params['file_ord']}.png")
+                        
+                        if screenshots:
+                            # OCR로 데이터 추출
+                            extracted_dataframes = extract_data_from_screenshot(screenshots)
                             
-                            if 'date' in file_params:
-                                update_data['date'] = file_params['date']
-                            
-                            success = update_google_sheets(gs_client, update_data)
-                            if success:
-                                logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
-                                data_updates.append(update_data)
+                            if extracted_dataframes and len(extracted_dataframes) > 0:
+                                # 추출 성공
+                                df = extracted_dataframes[0]  # 첫 번째 데이터프레임 사용
+                                logger.info(f"OCR 데이터 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                                
+                                # 보고서 유형 결정
+                                report_type = determine_report_type(post['title'])
+                                
+                                # 전체 표 데이터를 Google Sheets에 업데이트
+                                success = update_google_sheets_with_full_table(
+                                    client=gs_client, 
+                                    sheet_name=report_type, 
+                                    dataframe=df, 
+                                    post_info=post
+                                )
+                                
+                                if success:
+                                    logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
+                                    data_updates.append({
+                                        'post_info': post,
+                                        'dataframe': df,
+                                        'sheets': {report_type: df}
+                                    })
+                                else:
+                                    logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
                             else:
-                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
+                                logger.warning(f"OCR 데이터 추출 실패: {post['title']}")
+                                
+                                # 기존 방식으로 폴백 (iframe 직접 접근)
+                                logger.info("기존 방식으로 폴백 시도")
+                                sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
+                                
+                                if sheets_data:
+                                    # Google Sheets 업데이트 (기존 방식)
+                                    update_data = {
+                                        'sheets': sheets_data,
+                                        'post_info': post
+                                    }
+                                    
+                                    if 'date' in file_params:
+                                        update_data['date'] = file_params['date']
+                                    
+                                    success = update_google_sheets(gs_client, update_data)
+                                    if success:
+                                        logger.info(f"기존 방식으로 Google Sheets 업데이트 성공: {post['title']}")
+                                        data_updates.append(update_data)
+                                    else:
+                                        logger.warning(f"기존 방식으로 Google Sheets 업데이트 실패: {post['title']}")
+                                else:
+                                    logger.warning(f"기존 방식으로도 데이터 추출 실패: {post['title']}")
+                                    
+                                    # 대체 데이터 생성
+                                    placeholder_df = create_placeholder_dataframe(post)
+                                    if not placeholder_df.empty:
+                                        update_data = {
+                                            'dataframe': placeholder_df,
+                                            'post_info': post
+                                        }
+                                        
+                                        if 'date' in file_params:
+                                            update_data['date'] = file_params['date']
+                                        
+                                        # 대체 데이터로 전체 표 업데이트 시도
+                                        success = update_google_sheets_with_full_table(
+                                            client=gs_client, 
+                                            sheet_name=determine_report_type(post['title']), 
+                                            dataframe=placeholder_df, 
+                                            post_info=post
+                                        )
+                                        
+                                        if success:
+                                            logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                            data_updates.append(update_data)
                         else:
-                            logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
+                            logger.warning(f"전체 표 캡처 실패: {post['title']}")
                             
-                            # 대체 데이터 생성
-                            placeholder_df = create_placeholder_dataframe(post)
-                            if not placeholder_df.empty:
+                            # 기존 방식으로 폴백
+                            logger.info("기존 방식으로 폴백 시도")
+                            sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
+                            
+                            if sheets_data:
+                                # Google Sheets 업데이트 (기존 방식)
                                 update_data = {
-                                    'dataframe': placeholder_df,
+                                    'sheets': sheets_data,
                                     'post_info': post
                                 }
                                 
@@ -3315,10 +3390,10 @@ async def run_monitor(days_range=4, check_sheets=True):
                                 
                                 success = update_google_sheets(gs_client, update_data)
                                 if success:
-                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                    logger.info(f"기존 방식으로 Google Sheets 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
                     
-                    # 게시물 내용만 있는 경우
+                    # 게시물 내용만 있는 경우 (기존 로직 유지)
                     elif 'content' in file_params:
                         logger.info(f"게시물 내용으로 처리 중: {post['title']}")
                         
@@ -3333,12 +3408,18 @@ async def run_monitor(days_range=4, check_sheets=True):
                             if 'date' in file_params:
                                 update_data['date'] = file_params['date']
                             
-                            success = update_google_sheets(gs_client, update_data)
+                            success = update_google_sheets_with_full_table(
+                                client=gs_client, 
+                                sheet_name=determine_report_type(post['title']), 
+                                dataframe=placeholder_df, 
+                                post_info=post
+                            )
+                            
                             if success:
                                 logger.info(f"내용 기반 데이터로 업데이트 성공: {post['title']}")
                                 data_updates.append(update_data)
                     
-                    # AJAX 데이터가 있는 경우
+                    # AJAX 데이터가 있는 경우 (기존 로직 유지)
                     elif 'ajax_data' in file_params:
                         logger.info(f"AJAX 데이터로 처리 중: {post['title']}")
                         
@@ -3355,7 +3436,13 @@ async def run_monitor(days_range=4, check_sheets=True):
                             if 'date' in file_params:
                                 update_data['date'] = file_params['date']
                             
-                            success = update_google_sheets(gs_client, update_data)
+                            success = update_google_sheets_with_full_table(
+                                client=gs_client, 
+                                sheet_name=determine_report_type(post['title']), 
+                                dataframe=placeholder_df, 
+                                post_info=post
+                            )
+                            
                             if success:
                                 logger.info(f"AJAX 데이터로 업데이트 성공: {post['title']}")
                                 data_updates.append(update_data)
