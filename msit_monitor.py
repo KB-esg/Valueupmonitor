@@ -4079,450 +4079,509 @@ async def run_monitor(days_range=4, check_sheets=True):
             
             # 결과 없음 알림 (선택적)
             if days_range > 7:  # 장기간 검색한 경우에만 알림
-                bot = telegram.Bot(token=CONFIG['telegram_token'])
-                                    chat_id=int(CONFIG['chat_id']),
-                    text=f"📊 MSIT 통신 통계 모니터링: 최근 {days_range}일 내 새 게시물이 없습니다. ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
-                )
-    
-    except Exception as e:
-        logger.error(f"모니터링 중 오류 발생: {str(e)}")
-        
-        try:
-            # 오류 스크린샷 저장
-            if driver:
                 try:
-                    driver.save_screenshot("error_screenshot.png")
-                    logger.info("오류 발생 시점 스크린샷 저장 완료")
-                except Exception as ss_err:
-                    logger.error(f"오류 스크린샷 저장 실패: {str(ss_err)}")
-            
-            # 오류 알림 전송
-            bot = telegram.Bot(token=CONFIG['telegram_token'])
-            error_post = {
-                'title': f"모니터링 오류: {str(e)}",
-                'date': datetime.now().strftime('%Y. %m. %d'),
-                'department': 'System Error'
-            }
-            await send_telegram_message([error_post])
-            logger.info("오류 알림 전송 완료")
-        except Exception as telegram_err:
-            logger.error(f"오류 알림 전송 중 추가 오류: {str(telegram_err)}")
-    
-    finally:
-        # 리소스 정리
-        if driver:
-            driver.quit()
-            logger.info("WebDriver 종료")
+                    bot = telegram.Bot(token=CONFIG['telegram_token'])
+                    await bot.send_message(
+                        chat_id=int(CONFIG['chat_id']),
+                        text=f"MSIT 통신 통계 모니터링 결과: 최근 {days_range}일 내 새 게시물이 없습니다."
+                    )
+                except Exception as telegram_err:
+                    logger.error(f"텔레그램 알림 전송 중 오류: {str(telegram_err)}")
         
-        logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
-
-
-async def main():
-    """메인 함수: 환경 변수 처리 및 모니터링 실행"""
-    # 환경 변수 가져오기 (향상된 버전)
-    try:
-        days_range = int(os.environ.get('DAYS_RANGE', '4'))
-    except ValueError:
-        logger.warning("잘못된 DAYS_RANGE 형식. 기본값 4일 사용")
-        days_range = 4
+        return all_posts, telecom_stats_posts, data_updates
         
-    check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
-    check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
-    
-    spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
-    
-    # OCR 설정 확인
-    ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
-    CONFIG['ocr_enabled'] = ocr_enabled_str in ('true', 'yes', '1', 'y')
-    
-    # 환경 설정 로그
-    logger.info(f"MSIT 모니터 시작 - days_range={days_range}, check_sheets={check_sheets}, ocr_enabled={CONFIG['ocr_enabled']}")
-    logger.info(f"스프레드시트 이름: {spreadsheet_name}")
-    
-    # 전역 설정 업데이트
-    CONFIG['spreadsheet_name'] = spreadsheet_name
-    
-    # OCR 라이브러리 확인
-    if CONFIG['ocr_enabled']:
-        try:
-            import pytesseract
-            from PIL import Image, ImageEnhance, ImageFilter
-            import cv2
-            logger.info("OCR 관련 라이브러리 로드 성공")
-            
-            # Tesseract 가용성 확인
-            try:
-                pytesseract.get_tesseract_version()
-                logger.info("Tesseract OCR 설치 확인됨")
-            except Exception as tess_err:
-                logger.warning(f"Tesseract OCR 설치 확인 실패: {str(tess_err)}")
-                CONFIG['ocr_enabled'] = False
-                logger.warning("OCR 기능 비활성화")
-        except ImportError as import_err:
-            logger.warning(f"OCR 라이브러리 가져오기 실패: {str(import_err)}")
-            CONFIG['ocr_enabled'] = False
-            logger.warning("OCR 기능 비활성화")
-    
-    # 모니터링 실행
-    try:
-        await run_monitor(days_range=days_range, check_sheets=check_sheets)
     except Exception as e:
-        logging.error(f"메인 함수 오류: {str(e)}", exc_info=True)
-        
-        # 치명적 오류 시 텔레그램 알림 시도
+        logger.error(f"모니터링 실행 중 오류 발생: {str(e)}")
+        # 오류 알림 전송
         try:
             bot = telegram.Bot(token=CONFIG['telegram_token'])
             await bot.send_message(
                 chat_id=int(CONFIG['chat_id']),
-                text=f"⚠️ *MSIT 모니터링 치명적 오류*\n\n{str(e)}\n\n시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                parse_mode='Markdown'
+                text=f"MSIT 통신 통계 모니터링 중 오류 발생:\n{str(e)}"
             )
         except Exception as telegram_err:
-            logger.error(f"텔레그램 메시지 전송 중 추가 오류: {str(telegram_err)}")
+            logger.error(f"텔레그램 오류 알림 전송 중 추가 오류: {str(telegram_err)}")
+        
+        return [], [], []
+        
+    finally:
+        # 리소스 정리
+        if driver:
+            try:
+                driver.quit()
+                logger.info("WebDriver 세션 종료 완료")
+            except Exception as driver_err:
+                logger.error(f"WebDriver 세션 종료 중 오류: {str(driver_err)}")
 
-def update_google_sheets_with_full_table(client, sheet_name, dataframe, post_info=None):
-    """추출된 전체 표 데이터를 Google Sheets에 업데이트하는 함수
-    
-    Args:
-        client: gspread 클라이언트 인스턴스
-        sheet_name: 워크시트 이름
-        dataframe: 업데이트할 데이터프레임
-        post_info: 게시물 정보 (선택 사항)
-        
-    Returns:
-        bool: 성공 여부
-    """
-    import pandas as pd
-    import gspread
-    import time
-    import logging
-    import re
-    from datetime import datetime
-    from gspread.exceptions import APIError, SpreadsheetNotFound, WorksheetNotFound
-    
-    logger = logging.getLogger('msit_monitor')
-    
-    if dataframe is None or dataframe.empty:
-        logger.error("업데이트할 데이터가 없습니다")
+def update_google_sheets(client, update_data):
+    """Google Sheets 업데이트 (sheets 데이터 기반)"""
+    if not client or not update_data:
+        logger.error("Google Sheets 클라이언트 또는 업데이트 데이터가 없습니다.")
         return False
-    
+        
     try:
-        logger.info(f"Google Sheets 업데이트 시작: {sheet_name}")
+        logger.info(f"Google Sheets 업데이트 시작: {update_data['post_info']['title']}")
         
-        # 날짜 정보 추출 (있는 경우)
-        date_info = ""
-        if post_info and 'title' in post_info:
-            # 제목에서 날짜 정보 추출
-            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
-            if date_match:
-                year = date_match.group(1)
-                month = date_match.group(2)
-                date_info = f"{year}년 {month}월"
-                logger.info(f"게시물에서 날짜 정보 추출: {date_info}")
-        
-        # 시트 이름에 날짜 정보 추가 (있는 경우)
-        original_sheet_name = sheet_name
-        if date_info:
-            sheet_name = f"{sheet_name}_{date_info}"
-        
-        # 시트 이름 길이 제한 (gspread 제한: 100자)
-        if len(sheet_name) > 95:
-            # 날짜 정보 유지하면서 이름 축약
-            timestamp = datetime.now().strftime("%Y%m%d")
-            sheet_name = f"{original_sheet_name[:60]}_{timestamp}"
-            logger.info(f"시트 이름이 너무 깁니다. 축약된 이름 사용: {sheet_name}")
-        
-        # 스프레드시트 찾기 또는 생성 (최대 3번 재시도)
-        spreadsheet = None
-        retries = 0
-        max_retries = 3
-        
-        while retries < max_retries and spreadsheet is None:
-            try:
-                # ID로 스프레드시트 찾기 시도
-                if 'CONFIG' in globals() and 'spreadsheet_id' in CONFIG and CONFIG['spreadsheet_id']:
-                    try:
-                        spreadsheet = client.open_by_key(CONFIG['spreadsheet_id'])
-                        logger.info(f"ID로 스프레드시트 찾음: {spreadsheet.title}")
-                    except Exception as e:
-                        logger.warning(f"ID로 스프레드시트 찾기 실패: {str(e)}")
-                
-                # 이름으로 스프레드시트 찾기 시도
-                if spreadsheet is None:
-                    try:
-                        spreadsheet = client.open("MSIT 통신 통계")
-                        logger.info(f"이름으로 스프레드시트 찾음: {spreadsheet.title}")
-                    except SpreadsheetNotFound:
-                        # 스프레드시트 생성
-                        spreadsheet = client.create("MSIT 통신 통계")
-                        logger.info(f"새 스프레드시트 생성: {spreadsheet.title}")
-                break
-                
-            except APIError as api_err:
-                retries += 1
-                logger.warning(f"Google Sheets API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
-                
-                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                    # 지수 백오프
-                    wait_time = 2 ** retries
-                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"스프레드시트 접근 중 오류: {str(api_err)}")
-                    if retries >= max_retries:
-                        return False
-            
-            except Exception as e:
-                retries += 1
-                logger.error(f"스프레드시트 접근 중 오류: {str(e)}")
-                time.sleep(2)
-                if retries >= max_retries:
-                    return False
-        
-        if spreadsheet is None:
-            logger.error("스프레드시트를 찾거나 생성할 수 없습니다")
+        if 'sheets' not in update_data:
+            logger.warning("업데이트할 시트 데이터가 없습니다.")
             return False
-        
-        # 워크시트 찾기 또는 생성
-        worksheet = None
-        retries = 0
-        
-        while retries < max_retries and worksheet is None:
-            try:
-                # 기존 워크시트 찾기
-                try:
-                    worksheet = spreadsheet.worksheet(sheet_name)
-                    logger.info(f"기존 워크시트 찾음: {sheet_name}")
-                    
-                    # 기존 데이터 삭제 (전체 데이터 교체를 위해)
-                    worksheet.clear()
-                    logger.info(f"기존 워크시트 데이터 삭제 완료")
-                except WorksheetNotFound:
-                    # 새 워크시트 생성
-                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
-                    logger.info(f"새 워크시트 생성: {sheet_name}")
-                
-                break
             
-            except APIError as api_err:
-                retries += 1
-                logger.warning(f"워크시트 접근 중 API 오류 (시도 {retries}/{max_retries}): {str(api_err)}")
-                
-                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                    wait_time = 2 ** retries
-                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"워크시트 접근 중 오류: {str(api_err)}")
-                    if retries >= max_retries:
-                        return False
-            
-            except Exception as e:
-                retries += 1
-                logger.error(f"워크시트 접근 중 오류: {str(e)}")
-                time.sleep(2)
-                if retries >= max_retries:
-                    return False
-        
-        if worksheet is None:
-            logger.error("워크시트를 찾거나 생성할 수 없습니다")
-            return False
-        
-        # 데이터프레임 처리 및 업로드
+        # 스프레드시트 열기
         try:
-            # 데이터프레임 전처리
-            df = dataframe.copy()
-            df = df.fillna('')  # NaN 값을 빈 문자열로 변환
-            
-            # 모든 값을 문자열로 변환
-            for col in df.columns:
-                df[col] = df[col].astype(str)
-            
-            # 헤더와 값 분리
-            headers = df.columns.tolist()
-            values = df.values.tolist()
-            
-            # 모든 데이터를 2D 배열로 준비 (헤더 포함)
-            all_values = [headers] + values
-            
-            # 배치 업데이트
-            logger.info(f"워크시트에 {len(all_values)}행 {len(headers)}열 데이터 업데이트 중...")
-            
-            # API 제한을 고려한 청크 단위 업데이트
-            chunk_size = 1000  # 한 번에 업데이트할 최대 행 수
-            
-            for i in range(0, len(all_values), chunk_size):
-                chunk = all_values[i:i + chunk_size]
-                start_row = i + 1  # 1-based index
-                end_row = start_row + len(chunk) - 1
-                
-                try:
-                    # 청크 단위로 업데이트 (수정된 방식으로)
-                    cell_range = f'A{start_row}:{chr(65 + len(headers) - 1)}{end_row}'
-                    worksheet.update(
-                        values=chunk,
-                        range_name=cell_range
-                    )
-                    logger.info(f"청크 업데이트 완료: {start_row}~{end_row}행")
-                    
-                    # API 속도 제한 방지
-                    time.sleep(2)
-                    
-                except APIError as chunk_err:
-                    logger.warning(f"청크 업데이트 중 API 오류: {str(chunk_err)}")
-                    
-                    if "RESOURCE_EXHAUSTED" in str(chunk_err) or "RATE_LIMIT_EXCEEDED" in str(chunk_err):
-                        logger.info("API 속도 제한 감지. 행 단위 업데이트로 전환...")
-                        
-                        # 행 단위 업데이트로 전환
-                        for j, row_data in enumerate(chunk):
-                            row_num = start_row + j
-                            try:
-                                cell_range = f'A{row_num}:{chr(65 + len(headers) - 1)}{row_num}'
-                                worksheet.update(
-                                    values=[row_data],
-                                    range_name=cell_range
-                                )
-                                logger.info(f"행 단위 업데이트 완료: {row_num}행")
-                                time.sleep(1)  # 각 행마다 대기
-                            except Exception as row_err:
-                                logger.error(f"{row_num}행 업데이트 실패: {str(row_err)}")
-                    else:
-                        raise
-            
-            # 출처 정보 추가 (있는 경우)
-            if post_info and ('url' in post_info or 'title' in post_info):
-                footer_row = len(all_values) + 2  # 데이터 이후 빈 행 하나 추가
-                
-                footer_data = []
-                if 'title' in post_info:
-                    footer_data.append(["출처: " + post_info['title']])
-                
-                if 'url' in post_info:
-                    footer_data.append(["URL: " + post_info['url']])
-                
-                if 'date' in post_info:
-                    footer_data.append(["날짜: " + post_info['date']])
-                
-                try:
-                    for i, row_data in enumerate(footer_data):
-                        cell_range = f'A{footer_row + i}'
-                        worksheet.update(
-                            values=[row_data],
-                            range_name=cell_range
-                        )
-                    
-                    logger.info("출처 정보 추가 완료")
-                except Exception as footer_err:
-                    logger.warning(f"출처 정보 추가 실패: {str(footer_err)}")
-            
-            # 서식 설정
-            try:
-                # 헤더 행 서식 지정
-                worksheet.format('A1:Z1', {
-                    "backgroundColor": {
-                        "red": 0.9,
-                        "green": 0.9,
-                        "blue": 0.9
-                    },
-                    "horizontalAlignment": "CENTER",
-                    "textFormat": {
-                        "bold": True
-                    }
-                })
-                
-                # 첫 번째 열 서식 지정 (항목 이름)
-                worksheet.format(f'A1:A{len(all_values)}', {
-                    "textFormat": {
-                        "bold": True
-                    }
-                })
-                
-                logger.info("서식 설정 완료")
-            except Exception as format_err:
-                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
-            
-            # 열 너비 자동 조정 시도
-            try:
-                for i in range(min(len(headers), 26)):  # 최대 26열 (A-Z)까지만 처리
-                    col_letter = chr(65 + i)
-                    try:
-                        worksheet.columns_auto_resize(i, i)
-                        logger.info(f"{col_letter}열 너비 자동 조정")
-                    except Exception as col_err:
-                        logger.warning(f"{col_letter}열 너비 조정 실패: {str(col_err)}")
-                        # 계속 진행 (열 너비 조정 실패는 치명적 오류가 아님)
-            except Exception as width_err:
-                logger.warning(f"열 너비 조정 중 오류: {str(width_err)}")
-            
-            # 업데이트 후 확인 (추가된 검증 로직)
-            try:
-                verification = worksheet.get_all_values()
-                if not verification or len(verification) <= 1:  # 헤더만 있거나 비어있는 경우
-                    logger.warning("데이터 검증 경고: 시트가 비어 있거나 헤더만 있습니다")
-                else:
-                    logger.info(f"데이터 검증 완료: {len(verification)}행의 데이터 확인됨")
-            except Exception as verify_err:
-                logger.warning(f"데이터 검증 중 오류: {str(verify_err)}")
-            
-            logger.info(f"Google Sheets 업데이트 완료: {sheet_name}")
-            return True
-            
-        except Exception as update_err:
-            logger.error(f"워크시트 데이터 업데이트 중 오류: {str(update_err)}")
+            spreadsheet = client.open_by_key(CONFIG['spreadsheet_id'])
+            logger.info(f"스프레드시트 열기 성공: {spreadsheet.title}")
+        except Exception as open_err:
+            logger.error(f"스프레드시트 열기 실패: {str(open_err)}")
             return False
-    
+            
+        # 각 시트 데이터 처리
+        sheets_updated = 0
+        for sheet_name, sheet_data in update_data['sheets'].items():
+            try:
+                # 시트 이름 정리 (유효한 워크시트 이름으로 변환)
+                clean_sheet_name = clean_sheet_name_for_gspread(sheet_name)
+                
+                # 시트 확인 또는 생성
+                try:
+                    worksheet = spreadsheet.worksheet(clean_sheet_name)
+                    logger.info(f"기존 워크시트 접근: {clean_sheet_name}")
+                except:
+                    # 워크시트가 없으면 생성
+                    worksheet = spreadsheet.add_worksheet(title=clean_sheet_name, rows=1000, cols=26)
+                    logger.info(f"새 워크시트 생성: {clean_sheet_name}")
+                
+                # 시트 초기화 (필요한 경우)
+                try:
+                    worksheet.clear()
+                    logger.info(f"워크시트 내용 초기화: {clean_sheet_name}")
+                except Exception as clear_err:
+                    logger.warning(f"워크시트 초기화 중 오류 (계속 진행): {str(clear_err)}")
+                
+                # 데이터프레임을 리스트로 변환
+                if isinstance(sheet_data, pd.DataFrame):
+                    # 헤더 포함하여 데이터 리스트로 변환
+                    all_values = [sheet_data.columns.tolist()]
+                    all_values.extend(sheet_data.values.tolist())
+                    
+                    # 날짜와 게시물 정보 추가
+                    all_values.insert(0, [""])  # 공백 행
+                    all_values.insert(0, [update_data['post_info']['title']])
+                    
+                    if 'date' in update_data:
+                        all_values.insert(1, [f"기준 날짜: {update_data['date']['year']}년 {update_data['date']['month']}월"])
+                    
+                    all_values.insert(len(all_values) if 'date' in update_data else 2, 
+                                     [f"게시일: {update_data['post_info']['date']}, URL: {update_data['post_info']['url']}"])
+                                    
+                    # 빈 셀을 빈 문자열로 변환
+                    for i, row in enumerate(all_values):
+                        all_values[i] = ['' if pd.isna(cell) else cell for cell in row]
+                    
+                    # 업데이트
+                    worksheet.update(all_values)
+                    logger.info(f"워크시트 업데이트 성공: {clean_sheet_name}, {len(all_values)}행")
+                    sheets_updated += 1
+                else:
+                    logger.warning(f"변환할 수 없는 시트 데이터 형식: {type(sheet_data)}")
+            except Exception as sheet_err:
+                logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(sheet_err)}")
+                continue
+        
+        return sheets_updated > 0
+        
     except Exception as e:
         logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
         return False
 
 
+def update_google_sheets_with_full_table(client, sheet_name, dataframe, post_info):
+    """데이터프레임을 사용하여 Google Sheets 전체 테이블 업데이트"""
+    if not client or dataframe is None or dataframe.empty:
+        logger.warning("Google Sheets 클라이언트 또는 데이터프레임이 없습니다.")
+        return False
+        
+    try:
+        logger.info(f"Google Sheets 전체 테이블 업데이트 시작: {post_info['title']}")
+        
+        # 스프레드시트 열기
+        try:
+            spreadsheet = client.open_by_key(CONFIG['spreadsheet_id'])
+            logger.info(f"스프레드시트 열기 성공: {spreadsheet.title}")
+        except Exception as open_err:
+            logger.error(f"스프레드시트 열기 실패: {str(open_err)}")
+            return False
+        
+        # 시트 이름 정리 (유효한 워크시트 이름으로 변환)
+        clean_sheet_name = clean_sheet_name_for_gspread(sheet_name)
+        
+        # 시트 확인 또는 생성
+        try:
+            worksheet = spreadsheet.worksheet(clean_sheet_name)
+            logger.info(f"기존 워크시트 접근: {clean_sheet_name}")
+        except:
+            # 워크시트가 없으면 생성
+            worksheet = spreadsheet.add_worksheet(title=clean_sheet_name, rows=1000, cols=26)
+            logger.info(f"새 워크시트 생성: {clean_sheet_name}")
+        
+        # 날짜 정보 추출
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
+        date_info = None
+        if date_match:
+            date_info = {
+                'year': int(date_match.group(1)),
+                'month': int(date_match.group(2))
+            }
+        
+        # 데이터프레임 전처리
+        # NaN 값을 빈 문자열로 변환
+        dataframe = dataframe.fillna('')
+        
+        # 모든 값을 문자열로 변환 (gspread 호환성)
+        for col in dataframe.columns:
+            dataframe[col] = dataframe[col].astype(str)
+            # 불필요한 '.0' 제거 (숫자 정리)
+            dataframe[col] = dataframe[col].replace(r'\.0$', '', regex=True)
+        
+        # 데이터프레임을 리스트로 변환
+        all_values = [dataframe.columns.tolist()]
+        all_values.extend(dataframe.values.tolist())
+        
+        # 메타데이터 추가
+        all_values.insert(0, [""])  # 공백 행
+        all_values.insert(0, [post_info['title']])
+        
+        if date_info:
+            all_values.insert(1, [f"기준 날짜: {date_info['year']}년 {date_info['month']}월"])
+        
+        # 최종 업데이트 정보 추가
+        metadata_row = [f"게시일: {post_info['date']}, URL: {post_info['url'] if 'url' in post_info else '없음'}"]
+        all_values.insert(len(all_values), [""])  # 공백 행
+        all_values.insert(len(all_values), metadata_row)
+        all_values.insert(len(all_values), [f"최종 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        
+        # 지수 백오프를 사용한 재시도 메커니즘
+        max_retries = 5
+        retry_count = 0
+        retry_delay = 1  # 초기 지연 시간 (초)
+        
+        while retry_count < max_retries:
+            try:
+                # 시트 크기 조정 (필요한 경우)
+                rows_needed = len(all_values)
+                cols_needed = max(len(row) for row in all_values)
+                
+                current_rows = worksheet.row_count
+                current_cols = worksheet.col_count
+                
+                if rows_needed > current_rows or cols_needed > current_cols:
+                    worksheet.resize(rows=max(rows_needed, current_rows), 
+                                   cols=max(cols_needed, current_cols))
+                    logger.info(f"워크시트 크기 조정: {current_rows}x{current_cols} -> {max(rows_needed, current_rows)}x{max(cols_needed, current_cols)}")
+                
+                # 시트 초기화
+                worksheet.clear()
+                
+                # 데이터 업데이트
+                worksheet.update(all_values)
+                logger.info(f"워크시트 업데이트 성공: {clean_sheet_name}, {len(all_values)}행")
+                
+                # 서식 지정 (옵션)
+                try:
+                    # 헤더 행 굵게 설정
+                    header_format = {"textFormat": {"bold": True}}
+                    header_range = f"1:3" # 첫 3행 (제목, 날짜 정보 포함)
+                    worksheet.format(header_range, header_format)
+                    
+                    # 메타데이터 행 기울임꼴로 설정
+                    meta_format = {"textFormat": {"italic": True}}
+                    meta_range = f"{len(all_values)-2}:{len(all_values)}"
+                    worksheet.format(meta_range, meta_format)
+                    
+                    logger.info("워크시트 서식 업데이트 완료")
+                except Exception as format_err:
+                    logger.warning(f"서식 적용 중 오류 (무시됨): {str(format_err)}")
+                
+                # 성공적으로 업데이트 완료
+                return True
+                
+            except Exception as update_err:
+                retry_count += 1
+                logger.warning(f"워크시트 업데이트 실패 (시도 {retry_count}/{max_retries}): {str(update_err)}")
+                
+                if retry_count < max_retries:
+                    # 지수 백오프
+                    sleep_time = retry_delay * (2 ** (retry_count - 1))
+                    logger.info(f"{sleep_time}초 후 재시도...")
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(f"최대 재시도 횟수에 도달했습니다: {str(update_err)}")
+                    return False
+                    
+        return False
+        
+    except Exception as e:
+        logger.error(f"Google Sheets 전체 테이블 업데이트 중 오류: {str(e)}")
+        return False
+
+
+def clean_sheet_name_for_gspread(sheet_name):
+    """시트 이름을 Google Sheets에 적합한 형식으로 변환"""
+    # 특수 문자 제거 또는 변환
+    cleaned = re.sub(r'[\\/*\[\]?:]', '_', str(sheet_name))
+    # 길이 제한 (31자 이내)
+    if len(cleaned) > 31:
+        cleaned = cleaned[:28] + '...'
+    return cleaned
+
+
 def determine_report_type(title):
-    """게시물 제목에서 보고서 유형 결정 (개선된 버전)"""
-    # 정확한 매칭 시도
+    """게시물 제목에서 보고서 유형 결정"""
     for report_type in CONFIG['report_types']:
         if report_type in title:
             return report_type
     
-    # 부분 매칭 시도 (키워드 기반)
-    # 가장 많은 키워드가 매칭되는 유형 선택
-    best_match = None
-    best_match_count = 0
-    
-    for report_type in CONFIG['report_types']:
-        # 보고서 유형의 주요 키워드 추출
-        keywords = [word for word in report_type.split() if len(word) > 1]
+    # 기본값 (일반적인 보고서 유형)
+    return "통신통계_기타"
+
+
+def create_placeholder_dataframe(post):
+    """게시물 정보를 이용한 대체 데이터프레임 생성"""
+    try:
+        # 날짜 정보 추출
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+        year = int(date_match.group(1)) if date_match else None
+        month = int(date_match.group(2)) if date_match else None
         
-        # 제목에 포함된 키워드 수 계산
-        match_count = sum(1 for keyword in keywords if keyword in title)
+        # 게시물 유형 결정
+        report_type = determine_report_type(post['title'])
         
-        # 더 많은 키워드가 매칭되면 해당 유형 선택
-        if match_count > best_match_count:
-            best_match = report_type
-            best_match_count = match_count
+        # 기본 데이터 생성
+        data = {
+            '게시물 제목': [post['title']],
+            '게시일': [post['date']],
+            '부서': [post.get('department', '정보 없음')],
+            'URL': [post.get('url', '정보 없음')],
+            '데이터 상태': ['수동 확인 필요'],
+        }
+        
+        if year and month:
+            data['기준년도'] = [year]
+            data['기준월'] = [month]
+        
+        # 보고서 유형별 추가 정보
+        if "이동전화" in report_type:
+            data['보고서 유형'] = ['이동전화 통계']
+        elif "유선통신" in report_type:
+            data['보고서 유형'] = ['유선통신 통계']
+        elif "무선통신" in report_type:
+            data['보고서 유형'] = ['무선통신 통계']
+        elif "트래픽" in report_type:
+            data['보고서 유형'] = ['데이터 트래픽 통계']
+        else:
+            data['보고서 유형'] = ['기타 통신 통계']
+        
+        return pd.DataFrame(data)
+    except Exception as e:
+        logger.error(f"대체 데이터프레임 생성 중 오류: {str(e)}")
+        # 최소한의 데이터만 포함한 데이터프레임 반환
+        return pd.DataFrame({
+            '게시물 제목': [post['title']],
+            '게시일': [post['date']],
+            '데이터 상태': ['오류 발생, 수동 확인 필요']
+        })
+
+
+async def send_telegram_message(all_posts, data_updates):
+    """텔레그램 알림 전송"""
+    if not CONFIG['telegram_token'] or not CONFIG['chat_id']:
+        logger.warning("텔레그램 토큰 또는 채팅 ID가 설정되지 않았습니다.")
+        return False
+        
+    try:
+        bot = telegram.Bot(token=CONFIG['telegram_token'])
+        
+        # 기본 메시지 구성
+        message = "📊 *MSIT 통신 통계 모니터링 결과*\n\n"
+        
+        # 새 게시물 요약
+        if all_posts:
+            message += f"📋 *새 게시물: {len(all_posts)}개*\n"
+            
+            # 게시물 종류별 분류
+            telecom_stats_count = len([p for p in all_posts if is_telecom_stats_post(p['title'])])
+            other_count = len(all_posts) - telecom_stats_count
+            
+            message += f"├ 통신 통계: {telecom_stats_count}개\n"
+            message += f"└ 기타 게시물: {other_count}개\n\n"
+        else:
+            message += "📋 *새 게시물이 없습니다.*\n\n"
+        
+        # 데이터 업데이트 요약
+        if data_updates:
+            message += f"🔄 *데이터 업데이트: {len(data_updates)}개*\n\n"
+            
+            # 최대 5개까지 상세 정보 표시
+            max_display = min(5, len(data_updates))
+            message += "*업데이트된 통계 목록:*\n"
+            
+            for i in range(max_display):
+                update = data_updates[i]
+                title = update['post_info']['title']
+                
+                # 제목 일부만 표시 (너무 길면 자름)
+                if len(title) > 50:
+                    title = title[:47] + "..."
+                    
+                message += f"{i+1}. {title}\n"
+            
+            # 더 있으면 생략 표시
+            if len(data_updates) > max_display:
+                message += f"... 외 {len(data_updates) - max_display}개\n"
+        else:
+            message += "🔄 *데이터 업데이트가 없습니다.*\n"
+        
+        # 메시지 전송
+        await bot.send_message(
+            chat_id=int(CONFIG['chat_id']),
+            text=message,
+            parse_mode='Markdown'
+        )
+        
+        # 상세 정보 (별도 메시지로 전송)
+        if data_updates and len(data_updates) > 0:
+            detail_message = "*📈 통신 통계 데이터 상세 업데이트*\n\n"
+            
+            for i, update in enumerate(data_updates[:3]):  # 최대 3개만 상세 정보 표시
+                title = update['post_info']['title']
+                post_date = update['post_info']['date']
+                
+                detail_message += f"*{i+1}. {title}*\n"
+                detail_message += f"  - 게시일: {post_date}\n"
+                
+                if 'dataframe' in update:
+                    df = update['dataframe']
+                    detail_message += f"  - 데이터: {df.shape[0]}행 {df.shape[1]}열\n"
+                elif 'sheets' in update:
+                    sheets = update['sheets']
+                    detail_message += f"  - 시트: {len(sheets)}개\n"
+                    for sheet_name in list(sheets.keys())[:2]:  # 최대 2개 시트만 표시
+                        sheet_data = sheets[sheet_name]
+                        if isinstance(sheet_data, pd.DataFrame):
+                            detail_message += f"    · {sheet_name}: {sheet_data.shape[0]}행 {sheet_data.shape[1]}열\n"
+                
+                # 구분선 추가
+                if i < min(2, len(data_updates) - 1):
+                    detail_message += "\n---\n\n"
+            
+            await bot.send_message(
+                chat_id=int(CONFIG['chat_id']),
+                text=detail_message,
+                parse_mode='Markdown'
+            )
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"텔레그램 메시지 전송 중 오류: {str(e)}")
+        return False
+
+
+def extract_table_from_html(html_content):
+    """HTML 내용에서 표 추출 (개선된 버전)"""
+    try:
+        # pandas read_html 사용
+        tables = pd.read_html(html_content, encoding='utf-8')
+        
+        if not tables:
+            logger.warning("HTML에서 표를 찾을 수 없습니다")
+            return None
+        
+        # 가장 큰 테이블 선택 (데이터가 가장 많은 테이블 선택)
+        largest_table = max(tables, key=lambda t: t.size)
+        
+        # 테이블 정리 (필요한 경우)
+        # 불필요한 행/열 제거 및 null 처리
+        largest_table = largest_table.dropna(how='all')
+        
+        # 행과 열이 전부 비어있지 않은지 확인
+        if largest_table.empty or largest_table.shape[0] == 0 or largest_table.shape[1] == 0:
+            logger.warning("추출된 테이블이 비어 있습니다")
+            return None
+        
+        # 헤더 정리 (필요한 경우)
+        # 첫 번째 행이 모두 NaN이 아니면 헤더로 사용
+        if not largest_table.iloc[0].isna().all():
+            new_header = largest_table.iloc[0]
+            largest_table = largest_table[1:]
+            largest_table.columns = new_header
+            largest_table = largest_table.reset_index(drop=True)
+        
+        logger.info(f"HTML에서 테이블 추출 성공: {largest_table.shape}")
+        return largest_table
+        
+    except ValueError as ve:
+        logger.warning(f"HTML 테이블 파싱 중 오류: {str(ve)}")
+        return None
+    except Exception as e:
+        logger.error(f"HTML 테이블 추출 중 오류: {str(e)}")
+        return None
+
+async def main():
+    """스크립트 메인 함수"""
+    import argparse
     
-    # 최소 1개 이상 키워드가 매칭되는 경우 해당 유형 반환
-    if best_match_count > 0:
-        return best_match
+    # 명령줄 인자 파싱
+    parser = argparse.ArgumentParser(description='MSIT 통신 통계 모니터링 스크립트')
+    parser.add_argument('--days', type=int, default=4,
+                        help='검색할 일 수 (기본값: 4)')
+    parser.add_argument('--no-sheets', action='store_true',
+                        help='Google Sheets 업데이트 비활성화')
+    parser.add_argument('--debug', action='store_true',
+                        help='디버그 모드 활성화')
     
-    # 특정 키워드 기반 분류
-    if "이동전화" in title or "모바일" in title:
-        return "이동전화 및 트래픽 통계"
-    elif "번호이동" in title:
-        return "이동전화 및 시내전화 번호이동 현황"
-    elif "유선" in title and "통신" in title:
-        return "유선통신서비스 가입 현황"
-    elif "무선" in title and "통신" in title:
-        return "무선통신서비스 가입 현황"
-    elif "부가통신" in title:
-        return "특수부가통신사업자현황"
-    elif "트래픽" in title:
-        return "무선데이터 트래픽 통계"
-    elif "유무선" in title or "유·무선" in title:
-        return "유·무선통신서비스 가입 현황 및 무선데이터 트래픽 통계"
+    args = parser.parse_args()
     
-    # 기본값 반환
-    return "기타 통신 통계"
+    # 디버그 모드 설정
+    if args.debug:
+        logging.getLogger('msit_monitor').setLevel(logging.DEBUG)
+        logger.info("디버그 모드 활성화됨")
+    
+    # 모니터링 실행
+    days_range = args.days
+    check_sheets = not args.no_sheets
+    
+    logger.info(f"모니터링 시작: days_range={days_range}, check_sheets={check_sheets}")
+    
+    try:
+        all_posts, telecom_posts, data_updates = await run_monitor(
+            days_range=days_range,
+            check_sheets=check_sheets
+        )
+        
+        # 결과 요약 출력
+        logger.info("=" * 40)
+        logger.info(f"모니터링 완료 결과:")
+        logger.info(f"  - 총 게시물: {len(all_posts)}개")
+        logger.info(f"  - 통신 통계 게시물: {len(telecom_posts)}개")
+        logger.info(f"  - 데이터 업데이트: {len(data_updates)}개")
+        logger.info("=" * 40)
+        
+        return 0  # 성공 코드
+    except Exception as e:
+        logger.error(f"메인 함수 실행 중 오류: {str(e)}")
+        return 1  # 오류 코드
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+    
+    # 비동기 메인 함수 실행
+    try:
+        exit_code = asyncio.run(main())
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        logger.info("사용자에 의해 중단됨")
+        sys.exit(130)  # 사용자 중단 코드
+    except Exception as e:
+        logger.critical(f"치명적 오류: {str(e)}")
+        sys.exit(1)  # 오류 코드
