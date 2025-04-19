@@ -4529,6 +4529,7 @@ def extract_table_from_html(html_content):
 async def main():
     """스크립트 메인 함수"""
     import argparse
+    import sys
     
     # 명령줄 인자 파싱
     parser = argparse.ArgumentParser(description='MSIT 통신 통계 모니터링 스크립트')
@@ -4574,6 +4575,7 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+    import sys
     
     # 비동기 메인 함수 실행
     try:
