@@ -5669,261 +5669,7 @@ def update_google_sheets(client, data):
         logger.error(f"Error updating Google Sheets: {str(e)}")
         return False
 
-def update_single_sheet(spreadsheet, sheet_name, df, date_str, post_info=None):
-    """
-    단일 시트 업데이트 개선 함수
-    
-    Args:
-        spreadsheet: gspread Spreadsheet 객체
-        sheet_name: 업데이트할 시트 이름
-        df: pandas DataFrame - 업데이트할 데이터
-        date_str: 날짜 문자열 (열 헤더로 사용)
-        post_info: 게시물 정보 (선택 사항)
-        
-    Returns:
-        bool: 업데이트 성공 여부
-    """
-    try:
-        # 시트 이름 정리 (특수문자 제거 등)
-        sheet_name = clean_sheet_name_for_gsheets(sheet_name)
-        logger.info(f"시트 업데이트 시작: '{sheet_name}', 날짜: {date_str}")
-        
-        # API 속도 제한 방지를 위한 지연 시간
-        time.sleep(1)
-        
-        # 워크시트 찾기 또는 생성
-        try:
-            worksheet = spreadsheet.worksheet(sheet_name)
-            logger.info(f"기존 워크시트 찾음: {sheet_name}")
-        except gspread.exceptions.WorksheetNotFound:
-            # 새 워크시트 생성
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
-            logger.info(f"새 워크시트 생성: {sheet_name}")
-            
-            # 헤더 행 설정
-            worksheet.update_cell(1, 1, "항목")
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 데이터 검증 및 전처리
-        if df is None or df.empty:
-            logger.warning(f"빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        # 데이터프레임 준비
-        df = validate_and_clean_dataframe(df)
-        if df.empty:
-            logger.warning(f"데이터 정제 후 빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        # 첫 열을 항목으로 사용
-        key_col = df.columns[0]
-        items = df[key_col].astype(str).tolist()
-        
-        # 두 번째 열을 값으로 사용 (없으면 첫 번째 열과 동일)
-        value_col = df.columns[1] if df.shape[1] >= 2 else key_col
-        values = df[value_col].astype(str).tolist()
-        
-        # 현재 워크시트 열 헤더 및 항목 가져오기
-        try:
-            headers = worksheet.row_values(1)
-            existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
-        except Exception as e:
-            logger.warning(f"워크시트 데이터 읽기 실패: {str(e)}")
-            headers = []
-            existing_items = []
-        
-        # 빈 헤더 채우기
-        if not headers or len(headers) == 0:
-            worksheet.update_cell(1, 1, "항목")
-            headers = ["항목"]
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 날짜 열 확인 (이미 존재하는지)
-        if date_str in headers:
-            col_idx = headers.index(date_str) + 1
-            logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
-        else:
-            # 새 날짜 열 추가
-            col_idx = len(headers) + 1
-            worksheet.update_cell(1, col_idx, date_str)
-            logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 배치 업데이트 준비
-        cell_updates = []
-        new_rows = []
-        
-        # 각 항목에 대해 업데이트 준비
-        for i, (item, value) in enumerate(zip(items, values)):
-            if not item or not item.strip():
-                continue  # 빈 항목 건너뛰기
-                
-            # 항목이 이미 존재하는지 확인
-            if item in existing_items:
-                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
-            else:
-                # 새 항목은 끝에 추가
-                row_idx = len(existing_items) + 2
-                new_rows.append(item)  # 새 행 추적
-                
-                # 항목 업데이트
-                cell_updates.append({
-                    'range': f'A{row_idx}',
-                    'values': [[item]]
-                })
-                existing_items.append(item)
-            
-            # 값 업데이트
-            value_str = value if pd.notna(value) else ""
-            cell_updates.append({
-                'range': f'{chr(64 + col_idx)}{row_idx}',
-                'values': [[value_str]]
-            })
-        
-        # 모든 열 데이터 추가 (2열 이상인 경우)
-        if df.shape[1] > 2:
-            logger.info(f"데이터프레임에 추가 열이 있습니다 ({df.shape[1]}개). 모든 열을 새 시트에 복사합니다.")
-            
-            # 추가 시트에 전체 데이터 저장
-            full_sheet_name = f"{sheet_name}_전체데이터_{date_str}"
-            try:
-                # 기존 워크시트가 있으면 삭제
-                try:
-                    spreadsheet.del_worksheet(spreadsheet.worksheet(full_sheet_name))
-                    logger.info(f"기존 전체 데이터 시트 삭제: {full_sheet_name}")
-                except gspread.exceptions.WorksheetNotFound:
-                    pass
-                
-                # 새 워크시트 생성
-                full_worksheet = spreadsheet.add_worksheet(title=full_sheet_name, rows=df.shape[0]+5, cols=df.shape[1]+2)
-                logger.info(f"전체 데이터용 새 워크시트 생성: {full_sheet_name}")
-                
-                # 전체 데이터 업로드
-                # 헤더 추가
-                cells = []
-                for i, col in enumerate(df.columns):
-                    cells.append(gspread.Cell(1, i+1, str(col)))
-                
-                # 데이터 추가
-                for i, row in enumerate(df.values, start=2):
-                    for j, value in enumerate(row, start=1):
-                        cells.append(gspread.Cell(i, j, str(value) if pd.notna(value) else ""))
-                
-                # 링크 정보 추가 (있는 경우)
-                url = post_info.get('url', '') if post_info else ''
-                if url:
-                    cells.append(gspread.Cell(1, df.shape[1]+1, "원본 링크"))
-                    cells.append(gspread.Cell(2, df.shape[1]+1, url))
-                
-                # 배치 업데이트
-                if cells:
-                    # 한 번에 너무 많은 셀 업데이트는 제한이 있으므로 분할
-                    batch_size = 500
-                    for i in range(0, len(cells), batch_size):
-                        batch = cells[i:i+batch_size]
-                        try:
-                            full_worksheet.update_cells(batch, value_input_option='RAW')
-                            logger.info(f"전체 데이터 {i+1}~{min(i+batch_size, len(cells))} 업데이트 완료")
-                            time.sleep(1)  # API 제한 방지
-                        except Exception as batch_err:
-                            logger.warning(f"전체 데이터 배치 업데이트 실패: {str(batch_err)}")
-                
-                logger.info(f"전체 데이터가 별도 시트에 저장됨: {full_sheet_name}")
-            except Exception as full_sheet_err:
-                logger.warning(f"전체 데이터 시트 생성 실패: {str(full_sheet_err)}")
-        
-        # 기본 시트 업데이트 실행
-        if cell_updates:
-            logger.info(f"총 {len(cell_updates)}개 셀 업데이트 준비 완료 (새 항목: {len(new_rows)}개)")
-            # 배치 크기 조정
-            batch_size = min(10, len(cell_updates))  # 최대 10개씩 처리
-            
-            for i in range(0, len(cell_updates), batch_size):
-                batch = cell_updates[i:i+batch_size]
-                try:
-                    worksheet.batch_update(batch)
-                    logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
-                    time.sleep(1)  # API 속도 제한 방지
-                except gspread.exceptions.APIError as api_err:
-                    # API 오류 처리
-                    if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                        logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                        time.sleep(5)  # 더 긴 대기
-                        
-                        # 더 작은 배치로 재시도
-                        for update in batch:
-                            try:
-                                worksheet.batch_update([update])
-                                time.sleep(2)  # 각 업데이트 사이 더 긴 대기
-                            except Exception as single_err:
-                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
-                    else:
-                        logger.error(f"일괄 업데이트 실패: {str(api_err)}")
-                        return False
-                except Exception as batch_err:
-                    logger.error(f"일괄 업데이트 중 오류: {str(batch_err)}")
-                    return False
-            
-            logger.info(f"워크시트 '{sheet_name}' 업데이트 완료")
-            return True
-        else:
-            logger.warning(f"워크시트 '{sheet_name}'에 업데이트할 셀이 없습니다")
-            return True  # 업데이트할 게 없어도 성공으로 처리
-        
-    except gspread.exceptions.APIError as api_err:
-        if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-            logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
-            logger.info("대기 후 최소 데이터 업데이트 시도...")
-            time.sleep(5)  # 더 긴 대기 시간
-            
-            # 간소화된 방식으로 재시도
-            try:
-                # 워크시트 찾기 또는 생성
-                try:
-                    worksheet = spreadsheet.worksheet(sheet_name)
-                except gspread.exceptions.WorksheetNotFound:
-                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-                    worksheet.update_cell(1, 1, "항목")
-                
-                # 날짜 열 위치 결정 (단순화)
-                headers = worksheet.row_values(1)
-                if date_str in headers:
-                    col_idx = headers.index(date_str) + 1
-                else:
-                    col_idx = len(headers) + 1
-                    worksheet.update_cell(1, col_idx, date_str)
-                
-                # 최소한의 데이터만 업데이트
-                if df.shape[0] > 0:
-                    first_col_name = df.columns[0]
-                    items = df[first_col_name].astype(str).tolist()[:5]  # 처음 5개 항목
-                    values = ["업데이트 성공"] * len(items)
-                    
-                    for i, (item, value) in enumerate(zip(items, values)):
-                        row_idx = i + 2  # 헤더 행 이후
-                        try:
-                            worksheet.update_cell(row_idx, 1, item)
-                            time.sleep(1)
-                            worksheet.update_cell(row_idx, col_idx, value)
-                            time.sleep(1)
-                        except Exception as cell_err:
-                            logger.warning(f"최소 데이터 셀 업데이트 실패: {str(cell_err)}")
-                
-                logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
-                return True
-                
-            except Exception as retry_err:
-                logger.error(f"재시도 중 오류: {str(retry_err)}")
-                return False
-        else:
-            logger.error(f"Google Sheets API 오류: {str(api_err)}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
-        return False
-
-
+# 시트 이름 생성 수정 부분 
 def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post_info=None):
     """
     Update multiple sheets in the spreadsheet.
@@ -6023,9 +5769,9 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
                     cols = ['데이터출처'] + cols
                     combined_df = combined_df[cols]
                 
-                # Update as a single sheet
-                combined_sheet_name = f"전체데이터_{clean_sheet_name_for_gsheets(report_type)}"
-                success = update_single_sheet(spreadsheet, combined_sheet_name, combined_df, date_str, post_info)
+                # Update as a single sheet - CHANGED: Use "Raw" in sheet name
+                combined_sheet_name = f"전체데이터_{clean_sheet_name_for_gsheets(report_type)}_Raw"
+                success = update_single_sheet_raw(spreadsheet, combined_sheet_name, combined_df, date_str, post_info)
                 if success:
                     logger.info(f"전체 데이터 통합 시트 생성 성공: {combined_sheet_name}")
         except Exception as combined_err:
@@ -6042,33 +5788,37 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
             # Clean sheet name to be valid
             clean_sheet_name = clean_sheet_name_for_gsheets(sheet_name)
             
+            # CHANGED: Add "Raw" suffix to sheet name instead of date
+            raw_sheet_name = f"{clean_sheet_name}_Raw"
+            
             # Check if this sheet already exists (to avoid unnecessary API calls)
-            sheet_exists = clean_sheet_name in existing_worksheets
+            sheet_exists = raw_sheet_name in existing_worksheets
             
             # Check data quality
             df = validate_and_clean_dataframe(df)
             if df.empty:
-                logger.warning(f"데이터프레임 {clean_sheet_name}이 정제 후 비어 있습니다")
+                logger.warning(f"데이터프레임 {raw_sheet_name}이 정제 후 비어 있습니다")
                 continue
                 
             # Log progress
-            logger.info(f"시트 업데이트 중 ({i+1}/{total_sheets}): {clean_sheet_name}")
+            logger.info(f"시트 업데이트 중 ({i+1}/{total_sheets}): {raw_sheet_name}")
             
             # Update the sheet
             try:
-                success = update_single_sheet(spreadsheet, clean_sheet_name, df, date_str, post_info)
+                # CHANGED: Use Raw update method
+                success = update_single_sheet_raw(spreadsheet, raw_sheet_name, df, date_str, post_info)
                 if success:
                     success_count += 1
-                    logger.info(f"시트 업데이트 성공: {clean_sheet_name}")
+                    logger.info(f"시트 업데이트 성공: {raw_sheet_name}")
                 else:
-                    logger.warning(f"시트 업데이트 실패: {clean_sheet_name}")
+                    logger.warning(f"시트 업데이트 실패: {raw_sheet_name}")
                 
                 # Add delay between sheet updates to avoid rate limiting
                 if i < total_sheets - 1:  # Skip delay after last sheet
                     delay = 2 + (i % 3)  # Vary delay slightly to avoid patterns
                     time.sleep(delay)
             except Exception as update_err:
-                logger.error(f"시트 {clean_sheet_name} 업데이트 중 오류: {str(update_err)}")
+                logger.error(f"시트 {raw_sheet_name} 업데이트 중 오류: {str(update_err)}")
         
         except Exception as sheet_err:
             logger.error(f"시트 {sheet_name} 처리 중 오류: {str(sheet_err)}")
@@ -6076,74 +5826,140 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
     logger.info(f"{success_count}/{total_sheets} 시트 업데이트 완료")
     return success_count > 0
 
-def update_metadata_sheet(metadata_sheet, metadata):
+# 새로운 함수: Raw 업데이트를 위한 시트 처리 함수
+def update_single_sheet_raw(spreadsheet, sheet_name, df, date_str, post_info=None):
     """
-    Update the metadata sheet with the provided information.
+    단일 시트를 Raw 모드로 업데이트 (기존 내용 삭제 후 새로 업데이트)
     
     Args:
-        metadata_sheet: gspread Worksheet object
-        metadata: Dictionary of metadata to update
+        spreadsheet: gspread Spreadsheet 객체
+        sheet_name: 업데이트할 시트 이름
+        df: pandas DataFrame - 업데이트할 데이터
+        date_str: 날짜 문자열
+        post_info: 게시물 정보 (선택 사항)
         
     Returns:
-        bool: True if update was successful, False otherwise
+        bool: 업데이트 성공 여부
     """
     try:
-        # Get existing keys
+        logger.info(f"Raw 모드로 시트 업데이트 시작: '{sheet_name}', 날짜: {date_str}")
+        
+        # API 속도 제한 방지를 위한 지연 시간
+        time.sleep(1)
+        
+        # 워크시트 찾기 또는 생성
         try:
-            keys = metadata_sheet.col_values(1)[1:]  # Skip header
-        except:
-            keys = []
+            # 기존 워크시트가 있으면 삭제하고 새로 생성
+            try:
+                existing_sheet = spreadsheet.worksheet(sheet_name)
+                spreadsheet.del_worksheet(existing_sheet)
+                logger.info(f"기존 워크시트 삭제: {sheet_name}")
+                time.sleep(2)  # 삭제 후 대기
+            except gspread.exceptions.WorksheetNotFound:
+                logger.info(f"기존 워크시트 없음: {sheet_name}")
             
-        # Current timestamp
-        timestamp = datetime.now().isoformat()
+            # 새 워크시트 생성
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=df.shape[0]+10, cols=df.shape[1]+5)
+            logger.info(f"새 워크시트 생성: {sheet_name} (행: {df.shape[0]+10}, 열: {df.shape[1]+5})")
+            
+        except Exception as ws_err:
+            logger.error(f"워크시트 생성 중 오류: {str(ws_err)}")
+            return False
         
-        # Build updates
-        updates = []
+        # 데이터 검증 및 전처리
+        if df is None or df.empty:
+            logger.warning(f"빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
+            return False
         
-        for key, value in metadata.items():
-            # Format the value if it's not a string
-            if isinstance(value, (list, dict)):
-                value = json.dumps(value)
-            else:
-                value = str(value)
-                
-            # Find or create row for this key
-            if key in keys:
-                row_idx = keys.index(key) + 2  # +2 for header and 0-index
-            else:
-                # Add new key at the end
-                row_idx = len(keys) + 2
-                keys.append(key)
-                
-                # Add key to first column
-                updates.append({
-                    'range': f'A{row_idx}',
-                    'values': [[key]]
+        # 데이터프레임 준비
+        df = validate_and_clean_dataframe(df)
+        if df.empty:
+            logger.warning(f"데이터 정제 후 빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
+            return False
+        
+        try:
+            # 전체 데이터를 한 번에 업로드
+            # 헤더 준비
+            header_values = [df.columns.tolist()]
+            
+            # 데이터 행 준비
+            data_values = df.values.tolist()
+            
+            # 모든 값을 합침
+            all_values = header_values + data_values
+            
+            # 배치 업데이트
+            worksheet.update(f'A1:{chr(64 + df.shape[1])}{df.shape[0] + 1}', all_values)
+            logger.info(f"워크시트 '{sheet_name}'에 전체 데이터 업데이트 완료: {df.shape[0]}행 {df.shape[1]}열")
+            
+            # 메타 정보 추가
+            meta_row = df.shape[0] + 3  # 데이터 이후 빈 행 두 개 건너뛰기
+            
+            meta_data = [
+                ["업데이트 정보"],
+                ["날짜", date_str],
+                ["업데이트 시간", datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+            ]
+            
+            # 게시물 정보가 있으면 추가
+            if post_info:
+                meta_data.append(["게시물 제목", post_info.get('title', '')])
+                meta_data.append(["게시물 URL", post_info.get('url', '')])
+            
+            # 메타 정보 업데이트
+            worksheet.update(f'A{meta_row}:B{meta_row + len(meta_data)}', meta_data)
+            logger.info(f"워크시트 '{sheet_name}'에 메타 정보 추가 완료")
+            
+            # 서식 설정 (선택 사항)
+            try:
+                # 헤더 행 강조
+                worksheet.format(f'A1:{chr(64 + df.shape[1])}1', {
+                    "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                    "textFormat": {"bold": True}
                 })
+                logger.info(f"워크시트 '{sheet_name}'의 헤더 행 서식 설정 완료")
+            except Exception as format_err:
+                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
             
-            # Update value and timestamp
-            updates.append({
-                'range': f'B{row_idx}:C{row_idx}',
-                'values': [[value, timestamp]]
-            })
+            return True
         
-        # Execute the updates
-        if updates:
-            for update in updates:
-                try:
-                    metadata_sheet.batch_update([update])
-                    time.sleep(1)  # Avoid rate limits
-                except Exception as update_err:
-                    logger.warning(f"Metadata update failed: {str(update_err)}")
-            
-            logger.info(f"Updated {len(metadata)} metadata entries")
-            return True
-        else:
-            logger.warning("No metadata to update")
-            return True
+        except gspread.exceptions.APIError as api_err:
+            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                logger.warning(f"API 속도 제한 발생: {str(api_err)}")
+                logger.info("분할 업데이트로 재시도...")
+                
+                # 작은 배치로 분할 업데이트
+                batch_size = 100  # 한 번에 100행씩 업데이트
+                
+                # 먼저 헤더 업데이트
+                worksheet.update('A1:1', [df.columns.tolist()])
+                time.sleep(2)  # API 제한 방지
+                
+                # 데이터 행 배치 업데이트
+                for i in range(0, df.shape[0], batch_size):
+                    end_idx = min(i + batch_size, df.shape[0])
+                    batch_range = f'A{i+2}:{chr(64 + df.shape[1])}{end_idx+1}'
+                    batch_data = df.iloc[i:end_idx].values.tolist()
+                    
+                    try:
+                        worksheet.update(batch_range, batch_data)
+                        logger.info(f"배치 {i+1}~{end_idx} 업데이트 완료")
+                        time.sleep(2)  # API 제한 방지
+                    except Exception as batch_err:
+                        logger.error(f"배치 {i+1}~{end_idx} 업데이트 중 오류: {str(batch_err)}")
+                
+                logger.info(f"워크시트 '{sheet_name}' 분할 업데이트 완료")
+                return True
+            else:
+                logger.error(f"API 오류: {str(api_err)}")
+                return False
+                
+        except Exception as update_err:
+            logger.error(f"데이터 업데이트 중 오류: {str(update_err)}")
+            return False
             
     except Exception as e:
-        logger.error(f"Error updating metadata: {str(e)}")
+        logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
         return False
 
 def ensure_metadata_sheet(spreadsheet):
