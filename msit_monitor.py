@@ -748,7 +748,7 @@ def extract_text_without_table_structure(screenshot_path):
                 df = pd.DataFrame(columns=clean_headers)
             
             # Clean data
-            df = df.replace(r'^\s*, '', regex=True)
+            df = df.replace(r'^\s*', '', regex=True)
             
             # Remove empty rows and columns
             df = df.replace('', np.nan)
