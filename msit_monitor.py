@@ -26,6 +26,17 @@ import telegram
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# OCR 관련 라이브러리 임포트 추가 (문제 해결을 위한 부분)
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+    import cv2
+    import pytesseract
+    OCR_IMPORTS_AVAILABLE = True
+except ImportError:
+    OCR_IMPORTS_AVAILABLE = False
+    logging.warning("OCR 관련 라이브러리 임포트 실패. OCR 기능은 사용할 수 없습니다.")
+
+
 # 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
@@ -408,6 +419,64 @@ def go_to_next_page(driver):
         logger.error(f"다음 페이지 이동 중 에러: {str(e)}")
         return False
 
+def save_html_for_debugging(driver, name_prefix, include_iframe=True):
+    """
+    Save HTML content for debugging purposes.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        name_prefix: Prefix for the file name
+        include_iframe: Whether to also save iframe content if available
+        
+    Returns:
+        None
+    """
+    timestamp = int(time.time())
+    
+    try:
+        # Save main page HTML
+        main_html = driver.page_source
+        html_path = f"{name_prefix}_{timestamp}_main.html"
+        
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(main_html)
+        
+        logger.info(f"Saved main page HTML: {html_path}")
+        
+        # Save iframe content if requested
+        if include_iframe:
+            try:
+                # Find all iframes
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                
+                for i, iframe in enumerate(iframes):
+                    try:
+                        # Switch to iframe
+                        driver.switch_to.frame(iframe)
+                        
+                        # Get iframe HTML
+                        iframe_html = driver.page_source
+                        iframe_path = f"{name_prefix}_{timestamp}_iframe_{i+1}.html"
+                        
+                        with open(iframe_path, 'w', encoding='utf-8') as f:
+                            f.write(iframe_html)
+                        
+                        logger.info(f"Saved iframe {i+1} HTML: {iframe_path}")
+                        
+                        # Switch back to main content
+                        driver.switch_to.default_content()
+                    except Exception as iframe_err:
+                        logger.warning(f"Error saving iframe {i+1} HTML: {str(iframe_err)}")
+                        try:
+                            driver.switch_to.default_content()
+                        except:
+                            pass
+            except Exception as iframes_err:
+                logger.warning(f"Error finding/processing iframes: {str(iframes_err)}")
+    
+    except Exception as e:
+        logger.error(f"Error saving HTML for debugging: {str(e)}")
+
 def take_screenshot(driver, name, crop_area=None):
     """특정 페이지의 스크린샷 저장 (선택적 영역 잘라내기)"""
     try:
@@ -468,23 +537,12 @@ def take_screenshot(driver, name, crop_area=None):
         return None
 
 def extract_data_from_screenshot(screenshot_path):
-    """스크린샷에서 표 형태의 데이터를 추출하는 함수
+    """스크린샷에서 표 형태의 데이터를 추출하는 함수"""
     
-    Args:
-        screenshot_path (str): 스크린샷 파일 경로
-        
-    Returns:
-        list: 추출된 데이터프레임 목록
-    """
-    import os
-    import numpy as np
-    import pandas as pd
-    import cv2
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter
-    import logging
-    
-    logger = logging.getLogger('msit_monitor')
+    # OCR 임포트가 사용 가능한지 확인
+    if not OCR_IMPORTS_AVAILABLE:
+        logger.error("OCR 라이브러리가 설치되지 않았습니다. OCR 추출을 사용할 수 없습니다.")
+        return []
     
     try:
         logger.info(f"이미지 파일에서 표 데이터 추출 시작: {screenshot_path}")
@@ -1610,327 +1668,454 @@ def create_placeholder_dataframe(post_info):
 
 def access_iframe_with_ocr_fallback(driver, file_params):
     """
-    Enhanced function to access iframe content with robust OCR fallback.
-    Tries multiple approaches to extract data from document viewer and uses optimized OCR
-    as a last resort.
+    iframe 직접 접근 시도 후 실패시 OCR 추출 사용
+    향상된 접근 방식과 다양한 추출 전략 포함
     
     Args:
-        driver: Selenium WebDriver instance
-        file_params: Dictionary containing file parameters
+        driver: Selenium WebDriver 인스턴스
+        file_params: 파일 파라미터를 포함한 딕셔너리
         
     Returns:
-        dict: Dictionary of sheet names to pandas DataFrames
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리 또는 None
     """
-    # First try direct iframe access
+    # 기존 iframe 접근 방식 시도
     sheets_data = access_iframe_direct(driver, file_params)
     
-    # If successful, return the data
+    # 정상적으로 데이터 추출에 성공한 경우
     if sheets_data and any(not df.empty for df in sheets_data.values()):
-        logger.info(f"Direct iframe access successful: {len(sheets_data)} sheets extracted")
+        logger.info(f"iframe 직접 접근으로 데이터 추출 성공: {len(sheets_data)}개 시트 추출")
         
-        # Validate data quality
+        # 데이터 품질 검증
         valid_sheets = {}
         for sheet_name, df in sheets_data.items():
             if df is not None and not df.empty:
-                # Basic quality check: ensure there's reasonable data
+                # 기본 품질 체크: 합리적인 데이터가 있는지 확인
                 if df.shape[0] >= 2 and df.shape[1] >= 2:
                     valid_sheets[sheet_name] = df
-                    logger.info(f"Sheet {sheet_name} validated: {df.shape[0]} rows, {df.shape[1]} columns")
+                    logger.info(f"시트 {sheet_name} 검증 완료: {df.shape[0]}행 {df.shape[1]}열")
                 else:
-                    logger.warning(f"Sheet {sheet_name} appears to have insufficient data: {df.shape}")
+                    logger.warning(f"시트 {sheet_name}의 데이터가 불충분합니다: {df.shape}")
         
-        # If we have valid sheets, return them
+        # 유효한 시트가 있으면 반환
         if valid_sheets:
             return valid_sheets
         else:
-            logger.warning("No valid sheets found in direct iframe access results")
+            logger.warning("iframe 직접 접근 결과에서 유효한 시트를 찾을 수 없습니다")
     else:
-        logger.warning("Direct iframe access failed or returned empty data")
+        logger.warning("iframe 직접 접근 실패 또는 빈 데이터 반환")
     
-    # OCR fallback is disabled, return None
+    # OCR 기능이 비활성화된 경우 건너뛰기
     if not CONFIG['ocr_enabled']:
-        logger.info("OCR fallback disabled, skipping")
+        logger.info("OCR 기능이 비활성화되어 건너뜀")
+        return None
+        
+    # OCR 관련 라이브러리 임포트 확인
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+        import cv2
+        import pytesseract
+        OCR_IMPORTS_AVAILABLE = True
+    except ImportError:
+        logger.warning("OCR 관련 라이브러리가 설치되지 않아 OCR 기능을 사용할 수 없습니다")
         return None
     
-    # OCR fallback
-    logger.info("Falling back to OCR-based extraction")
+    # OCR 폴백
+    logger.info("OCR 기반 추출로 폴백")
     
     try:
-        # Take multiple screenshots for different parts of the page
+        # 디버깅용 HTML 저장
+        if file_params.get('atch_file_no') and file_params.get('file_ord'):
+            prefix = f"before_ocr_{file_params['atch_file_no']}_{file_params['file_ord']}"
+        else:
+            prefix = f"before_ocr_{int(time.time())}"
+            
+        save_html_for_debugging(driver, prefix)
+        
+        # 다양한 부분에 대한 여러 스크린샷 촬영
         all_sheets = {}
         
-        # Take full page screenshot
+        # 전체 페이지 스크린샷
         full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
         driver.save_screenshot(full_page_screenshot)
-        logger.info(f"Captured full page screenshot: {full_page_screenshot}")
+        logger.info(f"전체 페이지 스크린샷 캡처: {full_page_screenshot}")
         
-        # Try to identify the main content area for targeted OCR
+        # 타겟 OCR을 위한 주요 콘텐츠 영역 식별 시도
         content_areas = find_content_areas(driver)
         
         if content_areas:
-            logger.info(f"Found {len(content_areas)} potential content areas for targeted OCR")
+            logger.info(f"타겟 OCR을 위한 {len(content_areas)}개의 잠재적 콘텐츠 영역 발견")
             
             for i, area in enumerate(content_areas):
                 try:
-                    # Take screenshot of this specific area
+                    # 특정 영역의 스크린샷 촬영
                     area_screenshot = capture_element_screenshot(driver, area, f"content_area_{i+1}")
                     
                     if area_screenshot:
-                        # Extract data using enhanced OCR
+                        # 향상된 OCR로 데이터 추출
                         ocr_data_list = extract_data_from_screenshot(area_screenshot)
                         
                         if ocr_data_list and any(not df.empty for df in ocr_data_list):
-                            logger.info(f"Successfully extracted data from content area {i+1}")
+                            logger.info(f"콘텐츠 영역 {i+1}에서 성공적으로 데이터 추출")
                             for j, df in enumerate(ocr_data_list):
                                 if df is not None and not df.empty:
-                                    sheet_name = f"OCR_Area{i+1}_Table{j+1}"
+                                    sheet_name = f"OCR_영역{i+1}_테이블{j+1}"
                                     all_sheets[sheet_name] = df
-                                    logger.info(f"Added {sheet_name}: {df.shape[0]} rows, {df.shape[1]} columns")
+                                    logger.info(f"{sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
                 except Exception as area_err:
-                    logger.error(f"Error processing content area {i+1}: {str(area_err)}")
+                    logger.error(f"콘텐츠 영역 {i+1} 처리 중 오류: {str(area_err)}")
         
-        # If we still don't have data, try full page OCR
+        # 여전히 데이터가 없으면 전체 페이지 OCR 시도
         if not all_sheets:
-            logger.info("No data from targeted areas, trying full page OCR")
+            logger.info("타겟 영역에서 데이터를 찾지 못함, 전체 페이지 OCR 시도")
             
             ocr_data_list = extract_data_from_screenshot(full_page_screenshot)
             
             if ocr_data_list:
                 for i, df in enumerate(ocr_data_list):
                     if df is not None and not df.empty:
-                        sheet_name = f"OCR_FullPage_Table{i+1}"
+                        sheet_name = f"OCR_전체페이지_테이블{i+1}"
                         all_sheets[sheet_name] = df
-                        logger.info(f"Added {sheet_name} from full page OCR: {df.shape[0]} rows, {df.shape[1]} columns")
+                        logger.info(f"전체 페이지 OCR에서 {sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
         
-        # If we have sheets, return them
+        # 시트가 있으면 반환
         if all_sheets:
             return all_sheets
         
-        # Final attempt - try text-only OCR
-        logger.info("Table structure detection failed, trying text-only OCR")
+        # 최종 시도 - 텍스트 전용 OCR
+        logger.info("표 구조 감지 실패, 텍스트 전용 OCR 시도")
         df = extract_text_without_table_structure(full_page_screenshot)
         
         if df is not None and not df.empty:
-            all_sheets["OCR_TextOnly"] = df
-            logger.info(f"Added text-only OCR data: {df.shape[0]} rows, {df.shape[1]} columns")
+            all_sheets["OCR_텍스트전용"] = df
+            logger.info(f"텍스트 전용 OCR 데이터 추가: {df.shape[0]}행 {df.shape[1]}열")
             return all_sheets
         
-        logger.warning("All OCR attempts failed")
+        # 기존 OCR 시도 (원래 코드와의 호환성)
+        logger.info("향상된 OCR 실패, 기존 OCR 접근 방식 시도")
+        try:
+            original_ocr_data_list = extract_data_from_screenshot(full_page_screenshot)
+            
+            if original_ocr_data_list:
+                # 결과 모으기
+                result = {}
+                for i, df in enumerate(original_ocr_data_list):
+                    if not df.empty:
+                        sheet_name = f"OCR_테이블_{i+1}"
+                        result[sheet_name] = df
+                        logger.info(f"OCR 테이블 {i+1}: {df.shape[0]}행 {df.shape[1]}열")
+                
+                if result:
+                    logger.info(f"OCR 전체 {len(result)}개 테이블 추출 성공")
+                    return result
+        except Exception as original_ocr_err:
+            logger.warning(f"기존 OCR 접근 방식도 실패: {str(original_ocr_err)}")
+        
+        logger.warning("모든 OCR 시도 실패")
         return None
         
     except Exception as e:
-        logger.error(f"Error in OCR fallback process: {str(e)}")
+        logger.error(f"OCR 폴백 프로세스 중 오류: {str(e)}")
         return None
 
 def access_iframe_direct(driver, file_params):
-    """
-    Enhanced function to access iframe content and extract data with better handling of
-    complex viewer structures and multiple retry strategies.
-    
-    Args:
-        driver: Selenium WebDriver instance
-        file_params: Dictionary containing file parameters (atch_file_no, file_ord)
-        
-    Returns:
-        dict: Dictionary of sheet names to pandas DataFrames, or None if extraction fails
-    """
+    """iframe에 직접 접근하여 데이터 추출"""
     if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
-        logger.error("File parameters missing or incomplete")
+        logger.error("파일 파라미터가 없습니다.")
         return None
     
     atch_file_no = file_params['atch_file_no']
     file_ord = file_params['file_ord']
     
-    # Construct the view URL
+    # 바로보기 URL 구성
     view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
-    logger.info(f"Accessing document view URL: {view_url}")
+    logger.info(f"바로보기 URL: {view_url}")
     
-    # Maximum retries for the entire process
+    # 여러 번 재시도
     max_retries = 3
-    all_sheets = {}
-    
     for attempt in range(max_retries):
         try:
-            logger.info(f"Document access attempt {attempt+1}/{max_retries}")
-            
-            # Navigate to the document view page
+            # 페이지 로드
             driver.get(view_url)
+            time.sleep(5)  # 초기 대기
             
-            # Take screenshot for debugging
-            screenshot_path = f"document_view_{atch_file_no}_{file_ord}_attempt_{attempt+1}.png"
-            driver.save_screenshot(screenshot_path)
-            logger.info(f"Saved document view screenshot: {screenshot_path}")
-            
-            # Check for system maintenance page
-            if "시스템 점검 안내" in driver.page_source:
-                logger.warning("System maintenance page detected")
-                if attempt < max_retries - 1:
-                    time.sleep(5)  # Wait before retry
-                    continue
-                else:
-                    logger.error("System under maintenance. Cannot access document.")
-                    return None
-            
-            # Check for access denied or error page
-            error_indicators = [
-                "접근이 거부되었습니다", 
-                "Access Denied",
-                "권한이 없습니다",
-                "Error", 
-                "오류가 발생했습니다"
-            ]
-            
-            if any(indicator in driver.page_source for indicator in error_indicators):
-                logger.warning("Access denied or error page detected")
-                if attempt < max_retries - 1:
-                    # Try a different approach - reset cookies and session
-                    reset_browser_context(driver)
-                    time.sleep(3)
-                    continue
-                else:
-                    logger.error("Access denied after multiple attempts")
-                    return None
-            
-            # Wait for page to load and stabilize
-            time.sleep(5)  # Initial wait
-            
-            # First, check if we landed in a document viewer system
+            # 현재 URL 확인
             current_url = driver.current_url
-            logger.info(f"Current URL after navigation: {current_url}")
+            logger.info(f"현재 URL: {current_url}")
+           
+            # 디버깅용 HTML 저장 (추가된 부분)
+            save_html_for_debugging(driver, f"document_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
             
-            # Check if we're in a document viewer system
-            in_doc_viewer = ('SynapDocViewServer' in current_url or 
-                            'doc.msit.go.kr' in current_url or
-                            'viewer' in current_url.lower())
+            # 스크린샷 저장
+            take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
             
-            # Handle window/tab management
-            original_window = driver.current_window_handle
-            if len(driver.window_handles) > 1:
-                logger.info(f"Multiple windows detected: {len(driver.window_handles)}")
-                
-                # Switch to the new window/tab
-                for handle in driver.window_handles:
-                    if handle != original_window:
-                        driver.switch_to.window(handle)
-                        logger.info(f"Switched to new window: {driver.current_url}")
-                        break
-            
-            # Different strategies based on the type of page we landed on
-            if in_doc_viewer:
-                logger.info("Document viewer detected - attempting viewer extraction")
-                sheets_data = extract_from_document_viewer(driver)
-                if sheets_data:
-                    return sheets_data
-            else:
-                logger.info("Standard HTML page detected - attempting direct extraction")
-                # Try different extraction strategies for regular HTML pages
-                
-                # Strategy 1: Look for embedded tables directly
-                try:
-                    tables = pd.read_html(driver.page_source)
-                    if tables:
-                        logger.info(f"Found {len(tables)} tables directly in the page")
-                        # Process and return the tables
-                        for i, table in enumerate(tables):
-                            if not table.empty:
-                                sheet_name = f"Table_{i+1}"
-                                all_sheets[sheet_name] = clean_dataframe(table)
-                                logger.info(f"Extracted table {i+1} with {table.shape[0]} rows, {table.shape[1]} columns")
-                        
-                        if all_sheets:
-                            return all_sheets
-                except Exception as table_err:
-                    logger.warning(f"Direct table extraction failed: {str(table_err)}")
-                
-                # Strategy 2: Look for iframes in the main page
-                try:
-                    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    if iframes:
-                        logger.info(f"Found {len(iframes)} iframes in the page")
-                        for i, iframe in enumerate(iframes):
-                            try:
-                                logger.info(f"Switching to iframe {i+1}/{len(iframes)}")
-                                driver.switch_to.frame(iframe)
-                                
-                                # Capture iframe content
-                                iframe_html = driver.page_source
-                                
-                                # Extract tables from the iframe content
-                                iframe_df = extract_table_from_html(iframe_html)
-                                
-                                # Switch back to main content
-                                driver.switch_to.default_content()
-                                
-                                if iframe_df is not None and not iframe_df.empty:
-                                    sheet_name = f"Frame_{i+1}"
-                                    all_sheets[sheet_name] = iframe_df
-                                    logger.info(f"Extracted data from iframe {i+1}: {iframe_df.shape[0]} rows, {iframe_df.shape[1]} columns")
-                            except Exception as iframe_err:
-                                logger.warning(f"Error accessing iframe {i+1}: {str(iframe_err)}")
-                                # Switch back to main content on error
-                                try:
-                                    driver.switch_to.default_content()
-                                except:
-                                    pass
-                        
-                        if all_sheets:
-                            return all_sheets
-                except Exception as frame_err:
-                    logger.warning(f"Iframe extraction failed: {str(frame_err)}")
-            
-            # If we reach here, try a more aggressive javascript-based approach
-            logger.info("Attempting JavaScript-based extraction")
-            js_extracted = extract_with_javascript(driver)
-            if js_extracted:
-                return js_extracted
-            
-            # Final fallback: OCR
-            if attempt == max_retries - 1 and CONFIG['ocr_enabled']:
-                logger.info("All direct extraction methods failed, falling back to OCR")
-                return None  # We'll let the caller handle OCR fallback
-                
-        except Exception as e:
-            logger.error(f"Error during document access attempt {attempt+1}: {str(e)}")
-            
-            # Try to recover
+            # 현재 페이지 스크린샷 저장 (디버깅용)
             try:
-                # Reset browser state
-                reset_browser_context(driver, delete_cookies=False)
+                driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
+                logger.info(f"문서 뷰어 스크린샷 저장: document_view_{atch_file_no}_{file_ord}.png")
+            except Exception as ss_err:
+                logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
+            
+            # 시스템 점검 페이지 감지
+            if "시스템 점검 안내" in driver.page_source:
+                if attempt < max_retries - 1:
+                    logger.warning("시스템 점검 중입니다. 나중에 다시 시도합니다.")
+                    time.sleep(5)  # 더 오래 대기
+                    continue
+                else:
+                    logger.warning("시스템 점검 중입니다. 문서를 열 수 없습니다.")
+                    return None
+            
+            # SynapDocViewServer 또는 문서 뷰어 감지
+            if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
+                logger.info("문서 뷰어 감지됨")
                 
-                # Switch back to default content if we might be stuck in a frame
-                try:
-                    driver.switch_to.default_content()
-                except:
-                    pass
+                # 현재 창 핸들 저장
+                original_handle = driver.current_window_handle
+                
+                # 새 창이 열렸는지 확인
+                window_handles = driver.window_handles
+                if len(window_handles) > 1:
+                    logger.info(f"새 창이 열렸습니다. 전환 시도...")
+                    for handle in window_handles:
+                        if handle != original_handle:
+                            driver.switch_to.window(handle)
+                            break
+                
+                # 시트 탭 찾기
+                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                if sheet_tabs:
+                    logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+                    all_sheets = {}
                     
-                # Switch back to original window if needed
-                if original_window in driver.window_handles:
-                    driver.switch_to.window(original_window)
+                    for i, tab in enumerate(sheet_tabs):
+                        sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
+                        logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
+                        
+                        # 첫 번째가 아닌 시트는 클릭하여 전환
+                        if i > 0:
+                            try:
+                                tab.click()
+                                time.sleep(3)  # 시트 전환 대기
+                            except Exception as click_err:
+                                logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
+                                continue
+                        
+                        try:
+                            # iframe 찾기
+                            iframe = WebDriverWait(driver, 40).until(
+                                EC.presence_of_element_located((By.ID, "innerWrap"))
+                            )
+                            
+                            # iframe으로 전환
+                            driver.switch_to.frame(iframe)
+                            
+                            # 페이지 소스 가져오기
+                            iframe_html = driver.page_source
+                            
+                            # iframe HTML 저장 (추가된 부분)
+                            iframe_html_path = f"iframe_content_{sheet_name}_{int(time.time())}.html"
+                            with open(iframe_html_path, 'w', encoding='utf-8') as f:
+                                f.write(iframe_html)
+                            logger.info(f"iframe 콘텐츠 HTML 저장 완료: {iframe_html_path}")
+                            
+                            # 테이블 추출
+                            df = extract_table_from_html(iframe_html)
+                            
+                            # 기본 프레임으로 복귀
+                            driver.switch_to.default_content()
+                            
+                            if df is not None and not df.empty:
+                                all_sheets[sheet_name] = df
+                                logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            else:
+                                logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                                
+                                # 테이블 추출 실패 시 OCR 시도
+                                if CONFIG['ocr_enabled']:
+                                    # 현재 화면 캡처
+                                    ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
+                                    driver.save_screenshot(ocr_screenshot)
+                                    
+                                    # OCR로 데이터 추출
+                                    ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                                    if ocr_data and len(ocr_data) > 0:
+                                        all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
+                                        logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
+                        except Exception as iframe_err:
+                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                            try:
+                                # 오류 발생 시 기본 프레임으로 복귀
+                                driver.switch_to.default_content()
+                            except:
+                                pass
+                    
+                    if all_sheets:
+                        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료")
+                        return all_sheets
+                    else:
+                        logger.warning("어떤 시트에서도 데이터를 추출하지 못했습니다.")
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                            continue
+                        else:
+                            return None
+                else:
+                    logger.info("시트 탭 없음, 단일 iframe 처리 시도")
+                    try:
+                        iframe = WebDriverWait(driver, 40).until(
+                            EC.presence_of_element_located((By.ID, "innerWrap"))
+                        )
+                        driver.switch_to.frame(iframe)
+                        
+                        # iframe HTML 저장 (추가된 부분)
+                        iframe_html_path = f"single_iframe_{int(time.time())}.html"
+                        html_content = driver.page_source
+                        with open(iframe_html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_content)
+                        logger.info(f"단일 iframe HTML 저장 완료: {iframe_html_path}")
+                        
+                        df = extract_table_from_html(html_content)
+                        driver.switch_to.default_content()
+                        
+                        if df is not None and not df.empty:
+                            logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            return {"기본 시트": df}
+                        else:
+                            logger.warning("단일 iframe에서 테이블 추출 실패")
+                            
+                            # OCR 시도
+                            if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
+                                # 현재 화면 캡처
+                                ocr_screenshot = f"single_iframe_{int(time.time())}.png"
+                                driver.save_screenshot(ocr_screenshot)
+                                
+                                # OCR로 데이터 추출
+                                ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                                if ocr_data and len(ocr_data) > 0:
+                                    logger.info(f"OCR로 데이터 추출 성공")
+                                    return {"OCR 추출": ocr_data[0]}
+                            
+                            if attempt < max_retries - 1:
+                                logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                                continue
+                            else:
+                                return None
+                    except Exception as iframe_err:
+                        logger.error(f"단일 iframe 처리 중 오류: {str(iframe_err)}")
+                        try:
+                            driver.switch_to.default_content()
+                        except:
+                            pass
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                            continue
+                        else:
+                            return None
+            else:
+                logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                try:
+                    # 현재 창 핸들 저장 (팝업이 있을 수 있음)
+                    original_handle = driver.current_window_handle
+                    
+                    # 새 창이 열렸는지 확인
+                    window_handles = driver.window_handles
+                    if len(window_handles) > 1:
+                        logger.info(f"새 창이 열렸습니다. 전환 시도...")
+                        for handle in window_handles:
+                            if handle != original_handle:
+                                driver.switch_to.window(handle)
+                                break
+                    
+                    # 일반 HTML 페이지 저장 (추가된 부분)
+                    html_page_path = f"html_page_{int(time.time())}.html"
+                    with open(html_page_path, 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    logger.info(f"HTML 페이지 저장 완료: {html_page_path}")
+                    
+                    # pandas의 read_html 사용
+                    tables = pd.read_html(driver.page_source)
+                    
+                    if tables:
+                        largest_table = max(tables, key=lambda t: t.size)
+                        logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
+                        return {"기본 테이블": largest_table}
+                    else:
+                        logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
+                        
+                        # OCR 시도
+                        if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
+                            # 현재 화면 캡처
+                            ocr_screenshot = f"html_page_{int(time.time())}.png"
+                            driver.save_screenshot(ocr_screenshot)
+                            
+                            # OCR로 데이터 추출
+                            ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                            if ocr_data and len(ocr_data) > 0:
+                                logger.info(f"OCR로 HTML 페이지 데이터 추출 성공")
+                                return {"OCR 추출": ocr_data[0]}
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                            continue
+                        else:
+                            return None
+                except Exception as table_err:
+                    logger.error(f"HTML 테이블 추출 중 오류: {str(table_err)}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                        continue
+                    else:
+                        return None
+        
+        except Exception as e:
+            logger.error(f"iframe 전환 및 데이터 추출 중 오류: {str(e)}")
+            
+            # 디버깅 정보 출력
+            try:
+                # HTML 미리보기 출력
+                html_snippet = driver.page_source[:5000]
+                logger.error(f"오류 발생 시 페이지 HTML (first 5000 characters):\n{html_snippet}")
+                
+                # <script> 태그 내용도 별도 출력
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                script_tags = soup.find_all('script')
+                if script_tags:
+                    logger.error("오류 발생 시 <script> 태그 내용:")
+                    for script in script_tags:
+                        logger.error(script.prettify())
+                
+                # 기본 프레임으로 복귀
+                driver.switch_to.default_content()
             except:
                 pass
-                
+            
             if attempt < max_retries - 1:
-                time.sleep(3)  # Wait before retry
+                logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                time.sleep(3)
                 continue
+            else:
+                return None
     
-    return all_sheets if all_sheets else None
+    return None
+
 
 
 
 def find_content_areas(driver):
     """
-    Find potential content areas in the page for targeted OCR.
+    페이지에서 타겟 OCR을 위한 잠재적 콘텐츠 영역 찾기.
     
     Args:
-        driver: Selenium WebDriver instance
+        driver: Selenium WebDriver 인스턴스
         
     Returns:
-        list: List of WebElement objects representing potential content areas
+        list: 잠재적 콘텐츠 영역을 나타내는 WebElement 객체 목록
     """
     try:
         content_areas = []
         
-        # Try to find the main content area first
+        # 먼저 주요 콘텐츠 영역 찾기
         content_selectors = [
             "div.view_cont",
             "div.content",
@@ -1948,129 +2133,129 @@ def find_content_areas(driver):
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements:
                     content_areas.extend(elements)
-                    logger.info(f"Found {len(elements)} content areas with selector: {selector}")
+                    logger.info(f"선택자: {selector}로 {len(elements)}개 콘텐츠 영역 발견")
             except:
                 continue
         
-        # Look for tables directly
+        # 테이블 직접 찾기
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
             if tables:
                 content_areas.extend(tables)
-                logger.info(f"Found {len(tables)} tables")
+                logger.info(f"{len(tables)}개 테이블 발견")
         except:
             pass
         
-        # Look for iframes that might contain content
+        # 콘텐츠가 포함될 수 있는 iframe 찾기
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             if iframes:
                 for iframe in iframes:
                     try:
-                        # Try to switch to iframe
+                        # iframe으로 전환
                         driver.switch_to.frame(iframe)
                         
-                        # Look for content inside iframe
+                        # iframe 내부에서 콘텐츠 찾기
                         inner_tables = driver.find_elements(By.TAG_NAME, "table")
                         if inner_tables:
-                            # Capture screenshot of iframe body
+                            # iframe body의 스크린샷 캡처
                             content_areas.append(driver.find_element(By.TAG_NAME, "body"))
-                            logger.info(f"Found content in iframe")
+                            logger.info(f"iframe에서 콘텐츠 발견")
                             
-                        # Switch back to main content
+                        # 메인 콘텐츠로 돌아가기
                         driver.switch_to.default_content()
                     except:
-                        # Switch back on error
+                        # 오류 발생 시 전환
                         try:
                             driver.switch_to.default_content()
                         except:
                             pass
         except:
-            # Ensure we're back in the main content
+            # 메인 콘텐츠로 돌아가기
             try:
                 driver.switch_to.default_content()
             except:
                 pass
         
-        # If no specific content areas found, use the body
+        # 특정 콘텐츠 영역을 찾지 못한 경우 body 사용
         if not content_areas:
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
                 content_areas.append(body)
-                logger.info("No specific content areas found, using full page body")
+                logger.info("특정 콘텐츠 영역을 찾지 못함, 전체 페이지 body 사용")
             except:
                 pass
         
         return content_areas
         
     except Exception as e:
-        logger.error(f"Error finding content areas: {str(e)}")
+        logger.error(f"콘텐츠 영역 찾기 오류: {str(e)}")
         return []
 
 
 
 def capture_element_screenshot(driver, element, name_prefix):
     """
-    Capture a screenshot of a specific element.
+    특정 요소의 스크린샷 캡처.
     
     Args:
-        driver: Selenium WebDriver instance
-        element: WebElement to capture
-        name_prefix: Prefix for the screenshot filename
+        driver: Selenium WebDriver 인스턴스
+        element: 캡처할 WebElement
+        name_prefix: 스크린샷 파일 이름의 접두사
         
     Returns:
-        str: Path to the screenshot file, or None if capture failed
+        str: 스크린샷 파일 경로 또는 캡처 실패 시 None
     """
     try:
-        # Get element location and size
+        # 요소의 위치와 크기 가져오기
         location = element.location
         size = element.size
         
-        # Take full page screenshot
+        # 전체 페이지 스크린샷
         temp_screenshot = f"temp_{name_prefix}_{int(time.time())}.png"
         driver.save_screenshot(temp_screenshot)
         
-        # Crop to element
+        # 요소 크롭
         from PIL import Image
         
-        # Open the screenshot
+        # 스크린샷 열기
         img = Image.open(temp_screenshot)
         
-        # Calculate element boundaries
+        # 요소 경계 계산
         left = location['x']
         top = location['y']
         right = location['x'] + size['width']
         bottom = location['y'] + size['height']
         
-        # Ensure coordinates are within image bounds
+        # 이미지 경계 내에 좌표가 있는지 확인
         img_width, img_height = img.size
         left = max(0, left)
         top = max(0, top)
         right = min(img_width, right)
         bottom = min(img_height, bottom)
         
-        # Crop the image
+        # 이미지 크롭
         if left < right and top < bottom:
             cropped_img = img.crop((left, top, right, bottom))
             
-            # Save the cropped image
+            # 크롭된 이미지 저장
             element_screenshot = f"{name_prefix}_{int(time.time())}.png"
             cropped_img.save(element_screenshot)
             
-            # Clean up temporary screenshot
+            # 임시 스크린샷 정리
             try:
                 os.remove(temp_screenshot)
             except:
                 pass
                 
-            logger.info(f"Captured element screenshot: {element_screenshot}")
+            logger.info(f"요소 스크린샷 캡처: {element_screenshot}")
             return element_screenshot
         else:
-            logger.warning(f"Invalid crop dimensions: ({left}, {top}, {right}, {bottom})")
+            logger.warning(f"유효하지 않은 크롭 치수: ({left}, {top}, {right}, {bottom})")
             return temp_screenshot
             
     except Exception as e:
-        logger.error(f"Error capturing element screenshot: {str(e)}")
+        logger.error(f"요소 스크린샷 캡처 오류: {str(e)}")
         return None
 
 def extract_from_document_viewer(driver):
