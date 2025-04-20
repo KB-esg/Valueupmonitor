@@ -7104,21 +7104,26 @@ async def send_telegram_message(posts, data_updates=None):
             logger.error(f"단순화된 텔레그램 메시지 전송 중 오류: {str(simple_err)}")
 
 
-async def run_monitor(days_range: int = 4, check_sheets: bool = True) -> None:
+async def run_monitor(days_range=4, check_sheets=True):
     """
     Enhanced monitoring function with improved document processing flow.
-
+    
     Args:
-        days_range (int): Number of days to look back for new posts.
-        check_sheets (bool): Whether to update Google Sheets.
+        days_range: Number of days to look back for new posts
+        check_sheets: Whether to update Google Sheets
+    
+    Returns:
+        None
     """
     driver = None
     gs_client = None
-
+    
     try:
+        # Start time recording
         start_time = time.time()
         logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
-             # Create screenshot directory
+
+        # Create screenshot directory
         screenshots_dir = Path("./screenshots")
         screenshots_dir.mkdir(exist_ok=True)
 
@@ -7157,23 +7162,7 @@ async def run_monitor(days_range: int = 4, check_sheets: bool = True) -> None:
             """, description="웹드라이버 감지 회피")
         except Exception as setup_err:
             logger.warning(f"웹드라이버 강화 설정 중 오류: {str(setup_err)}")
-
-        # OCR 설정 확인
-        try:
-            from PIL import Image, ImageEnhance, ImageFilter
-            import cv2
-            import pytesseract
-            # 특히 GitHub Actions에서 pytesseract 설정 확인
-            pytesseract_cmd = os.environ.get('PYTESSERACT_CMD', 'tesseract')
-            pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
-            logger.info(f"OCR 설정: tesseract_cmd={pytesseract_cmd}")
-            OCR_IMPORTS_AVAILABLE = True
-        except ImportError as e:
-            OCR_IMPORTS_AVAILABLE = False
-            logger.warning(f"OCR 관련 라이브러리 임포트 실패: {str(e)}")
         
-
-
         # Access landing page
         try:
             # Navigate to landing page
@@ -7440,27 +7429,6 @@ async def run_monitor(days_range: int = 4, check_sheets: bool = True) -> None:
                                 if success:
                                     logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
                                     data_updates.append(update_data)
-                            else:
-                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
-                        else:
-                            logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
-                            
-                            # ENHANCED: Create a better placeholder with diagnostic info
-                            placeholder_df = create_improved_placeholder_dataframe(post, file_params)
-                            
-                            if not placeholder_df.empty:
-                                update_data = {
-                                    'dataframe': placeholder_df,
-                                    'post_info': post
-                                }
-                                
-                                if 'date' in file_params:
-                                    update_data['date'] = file_params['date']
-                                
-                                success = update_google_sheets(gs_client, update_data)
-                                if success:
-                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
-                                    data_updates.append(update_data)
                     
                     # Handle content-only case
                     elif 'content' in file_params:
@@ -7563,28 +7531,6 @@ async def run_monitor(days_range: int = 4, check_sheets: bool = True) -> None:
                             logger.info("브라우저 완전 재설정 성공")
                         except Exception as reset_err:
                             logger.error(f"브라우저 재설정 실패: {str(reset_err)}")
-                        
-                        # Take screenshot for debugging
-                        try:
-                            driver.save_screenshot(f"error_recovery_{int(time.time())}.png")
-                        except:
-                            pass
-                        
-                        # Try reloading browser if recovery fails repeatedly
-                        if ':error_count' not in CONFIG:
-                            CONFIG[':error_count'] = 1
-                        else:
-                            CONFIG[':error_count'] += 1
-                            
-                        if CONFIG[':error_count'] >= 3:
-                            logger.warning("Repeated errors, attempting browser reset")
-                            try:
-                                driver.quit()
-                                driver = setup_driver()
-                                driver.get(CONFIG['stats_url'])
-                                CONFIG[':error_count'] = 0
-                            except Exception as reset_err:
-                                logger.error(f"Browser reset failed: {str(reset_err)}")
         
         # Calculate end time and execution time
         end_time = time.time()
@@ -7747,6 +7693,7 @@ def retry_with_backoff(func, max_retries=3, base_delay=2, *args, **kwargs):
     logger.error(f"{max_retries}번 시도 후 실패: {str(last_exception)}")
     raise last_exception
 
+        
 def process_in_chunks(large_data, chunk_size=1000, process_func=None):
     """
     대용량 데이터를 청크로 나누어 처리
