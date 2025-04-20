@@ -1678,7 +1678,7 @@ def access_iframe_with_ocr_fallback(driver, file_params):
     Returns:
         dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리 또는 None
     """
-    # 기존 iframe 접근 방식 시도
+    # 1. 기존 iframe 접근 방식 시도
     sheets_data = access_iframe_direct(driver, file_params)
     
     # 정상적으로 데이터 추출에 성공한 경우
@@ -1704,7 +1704,46 @@ def access_iframe_with_ocr_fallback(driver, file_params):
     else:
         logger.warning("iframe 직접 접근 실패 또는 빈 데이터 반환")
     
-    # 세 번째 시도: document.documentElement.innerHTML를 통한 추출
+    # 2. 전체 문서 전용 모드 활성화
+    try:
+        logger.info("전체 문서 보기 모드 활성화 시도")
+        
+        # 문서 뷰어 스케일 설정 (더 많은 콘텐츠 표시)
+        scale_script = """
+        try {
+            // Synap 뷰어일 경우
+            if (typeof localSynap !== 'undefined') {
+                // 축소하여 전체 문서가 보이도록 함
+                localSynap.setZoom(0.5);
+                return "Synap viewer zoom adjusted";
+            }
+            
+            // 일반 문서인 경우 CSS transform 사용
+            document.body.style.transform = 'scale(0.5)';
+            document.body.style.transformOrigin = 'top left';
+            
+            // 문서의 모든 스크롤 컨테이너 확장
+            var containers = document.querySelectorAll('.scroll-container, [style*="overflow"]');
+            for (var i = 0; i < containers.length; i++) {
+                containers[i].style.height = 'auto';
+                containers[i].style.maxHeight = 'none';
+                containers[i].style.overflow = 'visible';
+            }
+            
+            return "Document scale adjusted";
+        } catch (e) {
+            return "Error adjusting scale: " + e.message;
+        }
+        """
+        result = driver.execute_script(scale_script)
+        logger.info(f"스케일 조정 결과: {result}")
+        
+        # 잠시 대기하여 조정 적용
+        time.sleep(1)
+    except Exception as scale_err:
+        logger.warning(f"문서 스케일 조정 실패: {str(scale_err)}")
+    
+    # 3. 전체 HTML 내용을 JavaScript로 추출 시도
     try:
         logger.info("전체 HTML 내용을 JavaScript로 추출 시도")
         entire_html = driver.execute_script("return document.documentElement.innerHTML;")
@@ -1721,7 +1760,7 @@ def access_iframe_with_ocr_fallback(driver, file_params):
     except Exception as js_err:
         logger.warning(f"JavaScript HTML 추출 시도 실패: {str(js_err)}")
     
-    # 네 번째 시도: JavaScript로 직접 표 데이터 추출
+    # 4. JavaScript로 직접 표 데이터 추출
     try:
         logger.info("JavaScript로 표 데이터 직접 추출 시도")
         js_data = extract_with_javascript(driver)
@@ -1730,6 +1769,173 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             return js_data
     except Exception as js_err:
         logger.warning(f"JavaScript 표 데이터 추출 시도 실패: {str(js_err)}")
+    
+    # 5. 대체 방식: SynapDocViewServer 내부 데이터구조 접근 시도
+    try:
+        logger.info("Synap 문서 뷰어 내부 데이터 접근 시도")
+        synap_data_script = """
+        try {
+            if (typeof localSynap !== 'undefined') {
+                // Synap 문서 뷰어 내부 데이터 접근
+                var sheetIndex = window.sheetIndex || 0;
+                var tableData = {};
+                
+                // 시트 데이터 직접 접근 시도
+                if (typeof WM !== 'undefined' && WM.getSheets) {
+                    var sheets = WM.getSheets();
+                    if (sheets && sheets.length > 0) {
+                        return {
+                            success: true,
+                            sheets: sheets.map(function(sheet) {
+                                return {
+                                    name: sheet.getName() || 'Sheet',
+                                    data: sheet.getData ? sheet.getData() : null
+                                };
+                            })
+                        };
+                    }
+                }
+                
+                // mainTable 요소에서 데이터 추출
+                var mainTable = document.getElementById('mainTable');
+                if (mainTable) {
+                    var rows = mainTable.querySelectorAll('div[class*="tr"]');
+                    if (!rows || rows.length === 0) {
+                        rows = mainTable.children;
+                    }
+                    
+                    var tableData = [];
+                    for (var i = 0; i < rows.length; i++) {
+                        var cells = rows[i].querySelectorAll('div[class*="td"]');
+                        if (!cells || cells.length === 0) {
+                            cells = rows[i].children;
+                        }
+                        
+                        var rowData = [];
+                        for (var j = 0; j < cells.length; j++) {
+                            rowData.push(cells[j].textContent.trim());
+                        }
+                        
+                        if (rowData.length > 0) {
+                            tableData.push(rowData);
+                        }
+                    }
+                    
+                    if (tableData.length > 0) {
+                        return {
+                            success: true,
+                            currentSheet: {
+                                name: 'MainTable',
+                                data: tableData
+                            }
+                        };
+                    }
+                }
+                
+                return {
+                    success: false,
+                    error: 'Could not find data in Synap viewer'
+                };
+            }
+            
+            return {
+                success: false,
+                error: 'Not a Synap viewer'
+            };
+        } catch (e) {
+            return {
+                success: false,
+                error: e.message
+            };
+        }
+        """
+        
+        synap_result = driver.execute_script(synap_data_script)
+        if synap_result and synap_result.get('success', False):
+            # 시트 데이터 처리
+            sheets_data = {}
+            
+            if 'sheets' in synap_result:
+                for sheet_info in synap_result['sheets']:
+                    sheet_name = sheet_info.get('name', 'Unknown_Sheet')
+                    sheet_data = sheet_info.get('data', [])
+                    
+                    if sheet_data and len(sheet_data) > 0:
+                        # 첫 번째 행이 헤더, 나머지는 데이터로 처리
+                        headers = sheet_data[0]
+                        data = sheet_data[1:]
+                        
+                        # 헤더가 없으면 자동 생성
+                        if not headers or len(headers) == 0:
+                            max_cols = max(len(row) for row in data) if data else 0
+                            headers = [f"Column_{i}" for i in range(max_cols)]
+                        
+                        # DataFrame 생성
+                        df = pd.DataFrame(data, columns=headers)
+                        sheets_data[sheet_name] = df
+                        logger.info(f"Synap 내부 데이터에서 시트 '{sheet_name}' 추출: {df.shape[0]}행 {df.shape[1]}열")
+            
+            elif 'currentSheet' in synap_result:
+                sheet_info = synap_result['currentSheet']
+                sheet_name = sheet_info.get('name', 'Current_Sheet')
+                sheet_data = sheet_info.get('data', [])
+                
+                if sheet_data and len(sheet_data) > 0:
+                    # 첫 번째 행이 헤더, 나머지는 데이터로 처리
+                    headers = sheet_data[0]
+                    data = sheet_data[1:]
+                    
+                    # 헤더가 없으면 자동 생성
+                    if not headers or len(headers) == 0:
+                        max_cols = max(len(row) for row in data) if data else 0
+                        headers = [f"Column_{i}" for i in range(max_cols)]
+                    
+                    # DataFrame 생성
+                    df = pd.DataFrame(data, columns=headers)
+                    sheets_data[sheet_name] = df
+                    logger.info(f"Synap 현재 시트 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+            
+            if sheets_data:
+                logger.info(f"Synap 내부 데이터 접근으로 {len(sheets_data)}개 시트 추출 성공")
+                return sheets_data
+    except Exception as synap_err:
+        logger.warning(f"Synap 내부 데이터 접근 실패: {str(synap_err)}")
+    
+    # 6. 창 크기 조정 (더 많은 내용이 보이도록)
+    try:
+        original_size = driver.get_window_size()
+        logger.info(f"원래 창 크기: {original_size}")
+        
+        # 더 큰 창 크기로 조정
+        driver.set_window_size(1920, 1080)
+        time.sleep(1)  # 창 크기 조정 적용 대기
+        
+        # 전체 스크린샷 캡처
+        full_page_path = f"full_page_{int(time.time())}.png"
+        driver.save_screenshot(full_page_path)
+        logger.info(f"확대된 창에서 전체 페이지 스크린샷 캡처: {full_page_path}")
+        
+        # 원래 HTML 컨텐츠를 다시 추출 시도
+        try:
+            entire_html = driver.execute_script("return document.documentElement.innerHTML;")
+            js_extracted_data = extract_data_from_html(entire_html)
+            if js_extracted_data and any(not df.empty for df in js_extracted_data.values()):
+                logger.info(f"확대된 창에서 HTML 추출 성공: {len(js_extracted_data)}개 시트")
+                return js_extracted_data
+        except:
+            pass
+        
+        # JavaScript 추출 다시 시도
+        try:
+            js_data = extract_with_javascript(driver)
+            if js_data and any(not df.empty for df in js_data.values()):
+                logger.info(f"확대된 창에서 JavaScript 추출 성공: {len(js_data)}개 시트")
+                return js_data
+        except:
+            pass
+        
+    except Exception as window_err:
+        logger.warning(f"창 크기 조정 중 오류: {str(window_err)}")
     
     # OCR 기능이 비활성화된 경우 건너뛰기
     if not CONFIG['ocr_enabled']:
@@ -1764,7 +1970,7 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             logger.error(f"Fallback 생성 중 오류: {str(fallback_err)}")
         
         return None
-        
+    
     # OCR 관련 라이브러리 임포트 확인
     try:
         from PIL import Image, ImageEnhance, ImageFilter
@@ -1787,48 +1993,132 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             
         save_html_for_debugging(driver, prefix)
         
-        # 확장된 스크린샷 캡처 전략
-        all_sheets = {}
+        # 창 크기 최대화 (이미 설정했을 수 있지만 확실히 하기 위해)
+        driver.maximize_window()
+        time.sleep(1)
         
-        # 1. 전체 페이지 스크린샷
+        # 전체 페이지 스크린샷 (기본)
         full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
         driver.save_screenshot(full_page_screenshot)
         logger.info(f"전체 페이지 스크린샷 캡처: {full_page_screenshot}")
         
-        # 2. 여러 스크롤 위치에서 스크린샷 캡처
-        scroll_heights = []
+        # 7. 고급 OCR 전략: 문서를 분할하여 스크린샷 캡처
+        # 전체 페이지 높이 구하기
         try:
-            # 총 높이 측정
-            total_height = driver.execute_script("return document.body.scrollHeight")
-            view_height = driver.execute_script("return window.innerHeight")
+            page_height = int(driver.execute_script("return document.documentElement.scrollHeight"))
+            page_width = int(driver.execute_script("return document.documentElement.scrollWidth"))
+            view_height = int(driver.execute_script("return window.innerHeight"))
+            view_width = int(driver.execute_script("return window.innerWidth"))
             
-            if total_height > view_height * 1.5:  # 충분히 긴 페이지인 경우만
-                # 여러 스크롤 위치 계산
-                scroll_points = min(4, max(2, int(total_height / view_height)))
-                for i in range(scroll_points):
-                    scroll_pos = int((total_height / scroll_points) * i)
-                    scroll_heights.append(scroll_pos)
+            logger.info(f"페이지 크기: {page_width}x{page_height}, 뷰포트 크기: {view_width}x{view_height}")
+            
+            # 매우 큰 테이블인 경우 문서 스케일 축소
+            if page_height > 3 * view_height or page_width > 1.5 * view_width:
+                logger.info("큰 문서 감지됨, 스케일 추가 축소")
+                driver.execute_script("""
+                    document.body.style.transform = 'scale(0.4)';
+                    document.body.style.transformOrigin = 'top left';
+                """)
+                time.sleep(1)
                 
-                logger.info(f"{scroll_points}개 스크롤 위치에서 스크린샷 캡처 예정")
-        except Exception as scroll_err:
-            logger.warning(f"스크롤 높이 계산 오류: {str(scroll_err)}")
-        
-        # 각 스크롤 위치에서 스크린샷 캡처
-        scroll_screenshots = []
-        for height in scroll_heights:
+                # 축소된 상태로 다시 스크린샷
+                driver.save_screenshot(f"ocr_scaled_down_{int(time.time())}.png")
+            
+            # 각 시트 탭 클릭하여 모든 시트 캡처
             try:
-                # 스크롤 이동
-                driver.execute_script(f"window.scrollTo(0, {height});")
-                time.sleep(1)  # 스크롤 안정화 대기
+                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                if sheet_tabs:
+                    logger.info(f"{len(sheet_tabs)}개 시트 탭 발견, 각 시트 캡처 시도")
+                    all_sheets_data = {}
+                    
+                    # 각 시트에 대해 처리
+                    for i, tab in enumerate(sheet_tabs):
+                        try:
+                            # 시트 이름 추출
+                            sheet_name = tab.text.strip()
+                            if not sheet_name:
+                                sheet_name = f"Sheet_{i+1}"
+                                
+                            logger.info(f"시트 탭 클릭: {sheet_name}")
+                            
+                            # 시트 탭 클릭
+                            driver.execute_script("arguments[0].click();", tab)
+                            time.sleep(2)  # 콘텐츠 로딩 대기
+                            
+                            # 스크린샷 캡처
+                            sheet_screenshot = f"ocr_sheet_{sheet_name}_{int(time.time())}.png"
+                            driver.save_screenshot(sheet_screenshot)
+                            logger.info(f"시트 '{sheet_name}' 스크린샷 캡처: {sheet_screenshot}")
+                            
+                            # OCR 처리
+                            sheet_data = extract_data_from_screenshot(sheet_screenshot)
+                            if sheet_data and len(sheet_data) > 0:
+                                for j, df in enumerate(sheet_data):
+                                    if df is not None and not df.empty:
+                                        all_sheets_data[f"{sheet_name}_Table{j+1}"] = df
+                        except Exception as tab_err:
+                            logger.warning(f"시트 탭 '{sheet_name}' 처리 중 오류: {str(tab_err)}")
+                    
+                    if all_sheets_data:
+                        logger.info(f"모든 시트 탭에서 {len(all_sheets_data)}개 테이블 추출 성공")
+                        return all_sheets_data
+            except Exception as tabs_err:
+                logger.warning(f"시트 탭 처리 중 오류: {str(tabs_err)}")
+            
+            # 한 번에 전체 표가 안 보이는 경우를 위한 분할 스크린샷
+            if page_height > view_height:
+                logger.info("페이지가 뷰포트보다 큼, 분할 스크린샷 시도")
                 
-                scroll_ss = f"ocr_scroll_{height}_{int(time.time())}.png"
-                driver.save_screenshot(scroll_ss)
-                scroll_screenshots.append(scroll_ss)
-                logger.info(f"스크롤 위치 {height}에서 스크린샷 캡처: {scroll_ss}")
-            except Exception as ss_err:
-                logger.warning(f"스크롤 스크린샷 캡처 오류: {str(ss_err)}")
+                # 스크롤 포지션 계산 (50% 오버랩으로 분할)
+                scroll_positions = []
+                current_pos = 0
+                while current_pos < page_height:
+                    scroll_positions.append(current_pos)
+                    current_pos += int(view_height * 0.5)  # 50% 오버랩
+                
+                # 마지막 위치 추가 (페이지 끝)
+                if page_height - current_pos > 100:  # 의미 있는 콘텐츠가 있을 경우만
+                    scroll_positions.append(page_height - view_height)
+                
+                logger.info(f"{len(scroll_positions)}개 스크롤 위치에서 분할 스크린샷 캡처 예정")
+                
+                # 각 위치에서 스크린샷 캡처
+                split_screenshots = []
+                for i, pos in enumerate(scroll_positions):
+                    try:
+                        # 스크롤 이동
+                        driver.execute_script(f"window.scrollTo(0, {pos});")
+                        time.sleep(0.5)  # 스크롤 후 잠시 대기
+                        
+                        # 스크린샷 캡처
+                        split_path = f"ocr_split_{i+1}_{int(time.time())}.png"
+                        driver.save_screenshot(split_path)
+                        split_screenshots.append(split_path)
+                        logger.info(f"분할 스크린샷 {i+1}/{len(scroll_positions)} 캡처: {split_path}")
+                    except Exception as e:
+                        logger.warning(f"분할 스크린샷 {i+1} 캡처 중 오류: {str(e)}")
+                
+                # 모든 분할 스크린샷에서 OCR 데이터 추출
+                split_data = {}
+                for i, ss_path in enumerate(split_screenshots):
+                    try:
+                        ocr_results = extract_data_from_screenshot(ss_path)
+                        if ocr_results:
+                            for j, df in enumerate(ocr_results):
+                                if df is not None and not df.empty:
+                                    split_data[f"Split_{i+1}_Table_{j+1}"] = df
+                                    logger.info(f"분할 {i+1}, 테이블 {j+1} 추출: {df.shape[0]}행 {df.shape[1]}열")
+                    except Exception as ocr_err:
+                        logger.warning(f"분할 {i+1} OCR 처리 중 오류: {str(ocr_err)}")
+                
+                if split_data:
+                    logger.info(f"분할 스크린샷에서 {len(split_data)}개 테이블 추출 성공")
+                    return split_data
+        except Exception as scroll_err:
+            logger.warning(f"분할 스크린샷 처리 중 오류: {str(scroll_err)}")
         
-        # 3. 타겟 OCR을 위한 주요 콘텐츠 영역 식별 시도
+        # 8. 콘텐츠 영역 기반 OCR
+        all_sheets = {}
         content_areas = find_content_areas(driver)
         
         if content_areas:
@@ -1853,25 +2143,16 @@ def access_iframe_with_ocr_fallback(driver, file_params):
                 except Exception as area_err:
                     logger.error(f"콘텐츠 영역 {i+1} 처리 중 오류: {str(area_err)}")
         
-        # 4. 스크롤된 스크린샷에서 추출 시도
-        for i, ss_path in enumerate(scroll_screenshots):
-            try:
-                ocr_data_list = extract_data_from_screenshot(ss_path)
-                if ocr_data_list and any(not df.empty for df in ocr_data_list):
-                    logger.info(f"스크롤 스크린샷 {i+1}에서 성공적으로 데이터 추출")
-                    for j, df in enumerate(ocr_data_list):
-                        if df is not None and not df.empty:
-                            sheet_name = f"OCR_스크롤{i+1}_테이블{j+1}"
-                            all_sheets[sheet_name] = df
-                            logger.info(f"{sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
-            except Exception as scroll_ocr_err:
-                logger.warning(f"스크롤 스크린샷 {i+1} OCR 처리 오류: {str(scroll_ocr_err)}")
-        
-        # 5. 여전히 데이터가 없으면 전체 페이지 OCR 시도
+        # 9. 전체 페이지 OCR - 마지막 선택지
         if not all_sheets:
-            logger.info("타겟 영역에서 데이터를 찾지 못함, 전체 페이지 OCR 시도")
+            logger.info("다른 방법으로 데이터를 찾지 못함, 전체 페이지 OCR 시도")
             
-            ocr_data_list = extract_data_from_screenshot(full_page_screenshot)
+            # 추가 스크린샷
+            enhanced_screenshot = f"ocr_enhanced_{int(time.time())}.png"
+            driver.save_screenshot(enhanced_screenshot)
+            
+            # 전체 페이지에서 OCR 추출
+            ocr_data_list = extract_data_from_screenshot(enhanced_screenshot)
             
             if ocr_data_list:
                 for i, df in enumerate(ocr_data_list):
@@ -1890,10 +2171,13 @@ def access_iframe_with_ocr_fallback(driver, file_params):
                     # 숫자 데이터 확인 (쉼표가 포함된 숫자 문자열 포함)
                     has_numeric = False
                     for col in df.columns:
-                        numeric_ratio = df[col].astype(str).str.replace(',', '').str.replace('.', '').str.isnumeric().mean()
-                        if numeric_ratio > 0.3:  # 30% 이상이 숫자면 유효한 열로 간주
-                            has_numeric = True
-                            break
+                        try:
+                            numeric_ratio = df[col].astype(str).str.replace(',', '').str.replace('.', '').str.isnumeric().mean()
+                            if numeric_ratio > 0.3:  # 30% 이상이 숫자면 유효한 열로 간주
+                                has_numeric = True
+                                break
+                        except:
+                            continue
                     
                     if has_numeric:
                         valid_sheets[name] = df
@@ -1910,7 +2194,7 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             logger.warning("유효성 검증에 실패했지만 모든 OCR 데이터 반환")
             return all_sheets
         
-        # 최종 시도 - 텍스트 전용 OCR
+        # 10. 텍스트 전용 OCR 추출 - 최후의 시도
         logger.info("표 구조 감지 실패, 텍스트 전용 OCR 시도")
         df = extract_text_without_table_structure(full_page_screenshot)
         
@@ -2216,6 +2500,7 @@ def access_iframe_direct(driver, file_params):
 def find_content_areas(driver):
     """
     페이지에서 타겟 OCR을 위한 잠재적 콘텐츠 영역 찾기.
+    개선된 기능으로 테이블 영역을 더 효과적으로 찾아냅니다.
     
     Args:
         driver: Selenium WebDriver 인스턴스
@@ -2226,13 +2511,83 @@ def find_content_areas(driver):
     try:
         content_areas = []
         
-        # 먼저 주요 콘텐츠 영역 찾기
+        # 1. SynapDocViewServer 특화 영역 찾기
+        synap_specific_selectors = [
+            "#mainTable",  # 메인 테이블
+            ".sheet-content",  # 시트 콘텐츠
+            "#doc-content",  # 문서 콘텐츠
+            ".content-wrapper"  # 콘텐츠 래퍼
+        ]
+        
+        for selector in synap_specific_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    for elem in elements:
+                        # 요소가 표시되는지 확인
+                        if elem.is_displayed() and elem.size['width'] > 50 and elem.size['height'] > 50:
+                            content_areas.append(elem)
+                            logger.info(f"Synap 특화 선택자 '{selector}'로 콘텐츠 영역 발견: 크기 {elem.size}")
+            except Exception as synap_err:
+                logger.debug(f"Synap 선택자 '{selector}' 검색 오류: {str(synap_err)}")
+        
+        # 2. iframe 내의 콘텐츠 찾기
+        try:
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            if iframes:
+                for iframe_index, iframe in enumerate(iframes):
+                    try:
+                        if iframe.is_displayed() and iframe.size['width'] > 100 and iframe.size['height'] > 100:
+                            try:
+                                # iframe으로 전환
+                                driver.switch_to.frame(iframe)
+                                
+                                # iframe 내부에서 콘텐츠 찾기
+                                tables = driver.find_elements(By.TAG_NAME, "table")
+                                if tables:
+                                    for table in tables:
+                                        if table.is_displayed() and table.size['width'] > 50 and table.size['height'] > 50:
+                                            # iframe의 body 추가
+                                            iframe_body = driver.find_element(By.TAG_NAME, "body")
+                                            if iframe_body not in content_areas:
+                                                content_areas.append(iframe_body)
+                                                logger.info(f"iframe {iframe_index+1}에서 테이블 콘텐츠 발견")
+                                            break
+                                else:
+                                    # 테이블이 없으면 div 구조 확인
+                                    main_divs = driver.find_elements(By.CSS_SELECTOR, "div[id*='table'], div[class*='table'], div[class*='grid']")
+                                    if main_divs:
+                                        for div in main_divs:
+                                            if div.is_displayed() and div.size['width'] > 50 and div.size['height'] > 50:
+                                                iframe_body = driver.find_element(By.TAG_NAME, "body")
+                                                if iframe_body not in content_areas:
+                                                    content_areas.append(iframe_body)
+                                                    logger.info(f"iframe {iframe_index+1}에서 콘텐츠 발견")
+                                                break
+                                
+                                # 메인 콘텐츠로 돌아가기
+                                driver.switch_to.default_content()
+                            except Exception as frame_err:
+                                logger.debug(f"iframe {iframe_index+1} 콘텐츠 접근 오류: {str(frame_err)}")
+                                try:
+                                    driver.switch_to.default_content()
+                                except:
+                                    pass
+                    except Exception as iframe_err:
+                        logger.debug(f"iframe {iframe_index+1} 접근 오류: {str(iframe_err)}")
+        except Exception as iframes_err:
+            logger.debug(f"iframe 찾기 오류: {str(iframes_err)}")
+            # 메인 콘텐츠로 돌아가기
+            try:
+                driver.switch_to.default_content()
+            except:
+                pass
+        
+        # 3. 일반적인 콘텐츠 영역 찾기
         content_selectors = [
-            "div.view_cont",
             "div.content",
             "div.main-content",
             "div#content",
-            "div.table-container",
             "div[class*='content']",
             "div[class*='view']",
             "div[id*='content']",
@@ -2243,71 +2598,200 @@ def find_content_areas(driver):
             try:
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements:
-                    content_areas.extend(elements)
-                    logger.info(f"선택자: {selector}로 {len(elements)}개 콘텐츠 영역 발견")
-            except:
-                continue
+                    for elem in elements:
+                        if elem.is_displayed() and elem.size['width'] > 100 and elem.size['height'] > 100:
+                            # 중복 확인
+                            if not any(are_same_element(elem, existing) for existing in content_areas):
+                                content_areas.append(elem)
+                                logger.info(f"선택자: {selector}로 콘텐츠 영역 발견")
+            except Exception as selector_err:
+                logger.debug(f"선택자 '{selector}' 검색 오류: {str(selector_err)}")
         
-        # 테이블 직접 찾기
+        # 4. 테이블 직접 찾기
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
             if tables:
-                content_areas.extend(tables)
-                logger.info(f"{len(tables)}개 테이블 발견")
-        except:
-            pass
+                for table in tables:
+                    if table.is_displayed() and table.size['width'] > 100 and table.size['height'] > 50:
+                        # 중복 확인
+                        if not any(are_same_element(table, existing) for existing in content_areas):
+                            content_areas.append(table)
+                            logger.info(f"테이블 요소 발견: 크기 {table.size}")
+        except Exception as table_err:
+            logger.debug(f"테이블 찾기 오류: {str(table_err)}")
         
-        # 콘텐츠가 포함될 수 있는 iframe 찾기
-        try:
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if iframes:
-                for iframe in iframes:
-                    try:
-                        # iframe으로 전환
-                        driver.switch_to.frame(iframe)
-                        
-                        # iframe 내부에서 콘텐츠 찾기
-                        inner_tables = driver.find_elements(By.TAG_NAME, "table")
-                        if inner_tables:
-                            # iframe body의 스크린샷 캡처
-                            content_areas.append(driver.find_element(By.TAG_NAME, "body"))
-                            logger.info(f"iframe에서 콘텐츠 발견")
-                            
-                        # 메인 콘텐츠로 돌아가기
-                        driver.switch_to.default_content()
-                    except:
-                        # 오류 발생 시 전환
-                        try:
-                            driver.switch_to.default_content()
-                        except:
-                            pass
-        except:
-            # 메인 콘텐츠로 돌아가기
+        # 5. 특별한 DIV 기반 테이블 찾기
+        table_div_selectors = [
+            "div.table",
+            "div[class*='table']",
+            "div.grid",
+            "div[class*='grid']",
+            ".tb",  # Synap 특수 클래스
+            "div[style*='table']"
+        ]
+        
+        for selector in table_div_selectors:
             try:
-                driver.switch_to.default_content()
-            except:
-                pass
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    for elem in elements:
+                        if elem.is_displayed() and elem.size['width'] > 100 and elem.size['height'] > 50:
+                            # 중복 확인
+                            if not any(are_same_element(elem, existing) for existing in content_areas):
+                                content_areas.append(elem)
+                                logger.info(f"DIV 테이블 선택자 '{selector}'로 콘텐츠 영역 발견: 크기 {elem.size}")
+            except Exception as div_err:
+                logger.debug(f"DIV 테이블 선택자 '{selector}' 검색 오류: {str(div_err)}")
         
-        # 특정 콘텐츠 영역을 찾지 못한 경우 body 사용
+        # 6. JavaScript로 테이블 구조 가진 요소 탐지
+        try:
+            js_tables = driver.execute_script("""
+                function findTableLikeElements() {
+                    const results = [];
+                    
+                    // 테이블처럼 보이는 요소 찾기 (그리드 레이아웃)
+                    function hasTableStructure(element) {
+                        // 최소 2개 이상의 자식 요소 필요
+                        if (!element || element.children.length < 2) {
+                            return false;
+                        }
+                        
+                        // 첫 번째 행의 셀 개수
+                        const firstRowCells = element.children[0].children ? 
+                            element.children[0].children.length : 0;
+                        
+                        // 최소 2개 이상의 셀 필요
+                        if (firstRowCells < 2) {
+                            return false;
+                        }
+                        
+                        // 일정한 구조의 중첩 요소인지 확인
+                        let consistentStructure = true;
+                        for (let i = 1; i < Math.min(element.children.length, 5); i++) {
+                            if (!element.children[i].children || 
+                                Math.abs(element.children[i].children.length - firstRowCells) > 1) {
+                                consistentStructure = false;
+                                break;
+                            }
+                        }
+                        
+                        return consistentStructure;
+                    }
+                    
+                    // 문서 내 모든 요소 확인
+                    function scanElements(root) {
+                        if (!root || !root.querySelectorAll) {
+                            return;
+                        }
+                        
+                        // 특정 크기 이상의 div 요소 확인
+                        const divs = root.querySelectorAll('div');
+                        for (let i = 0; i < divs.length; i++) {
+                            const div = divs[i];
+                            
+                            // 최소 크기 확인
+                            const rect = div.getBoundingClientRect();
+                            if (rect.width < 200 || rect.height < 100) {
+                                continue;
+                            }
+                            
+                            // 테이블 구조인지 확인
+                            if (hasTableStructure(div)) {
+                                results.push(div);
+                            }
+                        }
+                    }
+                    
+                    // 메인 문서 스캔
+                    scanElements(document);
+                    
+                    // iframe 내부 스캔
+                    const iframes = document.querySelectorAll('iframe');
+                    for (let i = 0; i < iframes.length; i++) {
+                        try {
+                            const frameDoc = iframes[i].contentDocument || 
+                                            iframes[i].contentWindow.document;
+                            scanElements(frameDoc);
+                        } catch (e) {
+                            // 접근 권한 없음 - 무시
+                        }
+                    }
+                    
+                    return results;
+                }
+                
+                return findTableLikeElements();
+            """)
+            
+            if js_tables:
+                for i, js_elem in enumerate(js_tables):
+                    try:
+                        # 중복 확인
+                        if js_elem and js_elem.is_displayed() and not any(are_same_element(js_elem, existing) for existing in content_areas):
+                            content_areas.append(js_elem)
+                            logger.info(f"JavaScript로 테이블 구조 요소 {i+1} 발견")
+                    except:
+                        pass
+        except Exception as js_err:
+            logger.debug(f"JavaScript 테이블 구조 탐지 오류: {str(js_err)}")
+        
+        # 콘텐츠 영역이 없으면 본문 전체 반환
         if not content_areas:
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
                 content_areas.append(body)
-                logger.info("특정 콘텐츠 영역을 찾지 못함, 전체 페이지 body 사용")
-            except:
-                pass
+                logger.info("콘텐츠 영역을 찾지 못함, 전체 페이지 body 사용")
+            except Exception as body_err:
+                logger.warning(f"body 요소를 찾을 수 없음: {str(body_err)}")
         
-        return content_areas
+        # 요소를 크기별로 정렬 (큰 것부터)
+        content_areas.sort(key=lambda elem: 
+            (elem.size['width'] * elem.size['height']) if elem.size['width'] > 0 and elem.size['height'] > 0 else 0, 
+            reverse=True)
+        
+        # 중복 요소 제거 및 최종 목록 생성
+        unique_areas = []
+        for area in content_areas:
+            if not any(are_same_element(area, existing) for existing in unique_areas):
+                unique_areas.append(area)
+        
+        logger.info(f"총 {len(unique_areas)}개의 고유한 콘텐츠 영역 발견")
+        return unique_areas
         
     except Exception as e:
         logger.error(f"콘텐츠 영역 찾기 오류: {str(e)}")
         return []
 
+def are_same_element(elem1, elem2):
+    """두 요소가 동일한지 확인"""
+    try:
+        # ID로 비교
+        if elem1.id and elem1.id == elem2.id:
+            return True
+        
+        # 크기와 위치로 비교
+        try:
+            loc1 = elem1.location
+            loc2 = elem2.location
+            size1 = elem1.size
+            size2 = elem2.size
+            
+            # 위치와 크기가 유사하면 같은 요소로 간주
+            return (abs(loc1['x'] - loc2['x']) < 10 and 
+                    abs(loc1['y'] - loc2['y']) < 10 and 
+                    abs(size1['width'] - size2['width']) < 20 and 
+                    abs(size1['height'] - size2['height']) < 20)
+        except:
+            # 위치나 크기를 가져올 수 없으면 다른 요소로 간주
+            return False
+    except:
+        return False
+
 
 
 def capture_element_screenshot(driver, element, name_prefix):
     """
-    특정 요소의 스크린샷 캡처.
+    특정 요소의 스크린샷을 개선된 방식으로 캡처합니다.
     
     Args:
         driver: Selenium WebDriver 인스턴스
@@ -2322,34 +2806,111 @@ def capture_element_screenshot(driver, element, name_prefix):
         location = element.location
         size = element.size
         
+        # 0인 속성 체크 및 수정
+        if size['width'] <= 0 or size['height'] <= 0:
+            logger.warning(f"요소 크기가 유효하지 않음: 너비={size['width']}, 높이={size['height']}")
+            
+            # JavaScript로 실제 요소 크기 확인 시도
+            try:
+                js_rect = driver.execute_script("""
+                    var rect = arguments[0].getBoundingClientRect();
+                    return {
+                        top: rect.top,
+                        left: rect.left,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                """, element)
+                
+                if js_rect['width'] > 0 and js_rect['height'] > 0:
+                    logger.info(f"JavaScript에서 요소 크기 복구: {js_rect}")
+                    location = {'x': js_rect['left'], 'y': js_rect['top']}
+                    size = {'width': js_rect['width'], 'height': js_rect['height']}
+                else:
+                    # 여전히 유효하지 않으면 기본값 사용
+                    logger.warning("JavaScript에서도 유효한 요소 크기를 얻지 못함, 전체 페이지 스크린샷 사용")
+                    temp_screenshot = f"temp_{name_prefix}_{int(time.time())}.png"
+                    driver.save_screenshot(temp_screenshot)
+                    return temp_screenshot
+            except Exception as js_err:
+                logger.warning(f"JavaScript 요소 크기 확인 중 오류: {str(js_err)}")
+                temp_screenshot = f"temp_{name_prefix}_{int(time.time())}.png"
+                driver.save_screenshot(temp_screenshot)
+                return temp_screenshot
+        
+        # 요소가 화면 밖에 있는지 확인
+        viewport_height = driver.execute_script("return window.innerHeight")
+        viewport_width = driver.execute_script("return window.innerWidth")
+        
+        # 요소가 뷰포트 밖에 있으면 스크롤하여 보이게 함
+        if (location['y'] < 0 or 
+            location['y'] + size['height'] > viewport_height or 
+            location['x'] < 0 or 
+            location['x'] + size['width'] > viewport_width):
+            
+            logger.info(f"요소가 뷰포트 밖에 있어 스크롤로 조정: 위치={location}, 크기={size}, 뷰포트={viewport_width}x{viewport_height}")
+            
+            # 요소가 보이도록 스크롤
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", element)
+            time.sleep(0.5)  # 스크롤 후 잠시 대기
+            
+            # 스크롤 후 위치와 크기 업데이트
+            try:
+                location = element.location
+                size = element.size
+            except:
+                # 위치를 얻지 못하면 JavaScript로 시도
+                js_rect = driver.execute_script("""
+                    var rect = arguments[0].getBoundingClientRect();
+                    return {
+                        top: rect.top,
+                        left: rect.left,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                """, element)
+                
+                location = {'x': js_rect['left'], 'y': js_rect['top']}
+                size = {'width': js_rect['width'], 'height': js_rect['height']}
+        
         # 전체 페이지 스크린샷
         temp_screenshot = f"temp_{name_prefix}_{int(time.time())}.png"
         driver.save_screenshot(temp_screenshot)
         
-        # 요소 크롭
-        from PIL import Image
+        # 페이지 스크롤 위치 고려
+        scroll_x = driver.execute_script("return window.pageXOffset")
+        scroll_y = driver.execute_script("return window.pageYOffset")
         
-        # 스크린샷 열기
-        img = Image.open(temp_screenshot)
-        
-        # 요소 경계 계산
-        left = location['x']
-        top = location['y']
-        right = location['x'] + size['width']
-        bottom = location['y'] + size['height']
-        
-        # 이미지 경계 내에 좌표가 있는지 확인
-        img_width, img_height = img.size
-        left = max(0, left)
-        top = max(0, top)
-        right = min(img_width, right)
-        bottom = min(img_height, bottom)
-        
-        # 이미지 크롭
-        if left < right and top < bottom:
+        # 요소 크기 확인 후 조정
+        try:
+            from PIL import Image
+            
+            # 스크린샷 열기
+            img = Image.open(temp_screenshot)
+            
+            # 이미지 크기 얻기
+            img_width, img_height = img.size
+            
+            # 요소 경계 계산 (스크롤 위치 고려)
+            left = max(0, location['x'])
+            top = max(0, location['y'])
+            right = min(img_width, left + size['width'])
+            bottom = min(img_height, top + size['height'])
+            
+            # 크기가 유효한지 확인 (최소 크기 요구)
+            if right - left < 10 or bottom - top < 10:
+                logger.warning(f"크기가 너무 작음 ({right-left}x{bottom-top}), 전체 이미지 사용")
+                return temp_screenshot
+            
+            # 이미지 크롭
             cropped_img = img.crop((left, top, right, bottom))
             
-            # 크롭된 이미지 저장
+            # 크롭된 이미지가 너무 작으면 원본 반환
+            if cropped_img.width < 10 or cropped_img.height < 10:
+                logger.warning(f"크롭된 이미지가 너무 작음 ({cropped_img.width}x{cropped_img.height}), 전체 이미지 사용")
+                return temp_screenshot
+            
+            # 최종 이미지 저장
             element_screenshot = f"{name_prefix}_{int(time.time())}.png"
             cropped_img.save(element_screenshot)
             
@@ -2359,15 +2920,22 @@ def capture_element_screenshot(driver, element, name_prefix):
             except:
                 pass
                 
-            logger.info(f"요소 스크린샷 캡처: {element_screenshot}")
+            logger.info(f"요소 스크린샷 캡처: {element_screenshot} (크기: {cropped_img.width}x{cropped_img.height})")
             return element_screenshot
-        else:
-            logger.warning(f"유효하지 않은 크롭 치수: ({left}, {top}, {right}, {bottom})")
+        except Exception as img_err:
+            logger.warning(f"이미지 처리 중 오류: {str(img_err)}")
             return temp_screenshot
             
     except Exception as e:
         logger.error(f"요소 스크린샷 캡처 오류: {str(e)}")
-        return None
+        
+        # 오류 발생 시 전체 페이지 스크린샷
+        try:
+            temp_screenshot = f"temp_{name_prefix}_{int(time.time())}.png"
+            driver.save_screenshot(temp_screenshot)
+            return temp_screenshot
+        except:
+            return None
 
 def extract_from_document_viewer(driver):
     """
@@ -4742,6 +5310,7 @@ def execute_batched_updates(worksheet, updates, batch_size):
 def extract_data_from_html(html_content):
     """
     HTML 콘텐츠에서 표 데이터를 추출하는 개선된 함수
+    SynapDocViewServer의 특수한 표 형식에 특화됨
     
     Args:
         html_content (str): HTML 문자열
@@ -4753,185 +5322,318 @@ def extract_data_from_html(html_content):
         soup = BeautifulSoup(html_content, 'html.parser')
         all_sheets = {}
         
-        # 1. 다양한 표 구조 처리
-        # 1.1 일반 테이블 (<table> 태그)
+        # Synap 문서 뷰어 확인
+        synap_viewer = False
+        if 'SynapDocViewServer' in html_content or 'Synap Document Viewer' in html_content:
+            synap_viewer = True
+            logger.info("Synap 문서 뷰어 감지됨, 특수 처리 적용")
+        
+        # 1. mainTable 찾기 (Synap 문서 뷰어에서 주로 사용)
+        main_table = soup.find('div', id='mainTable')
+        if main_table:
+            logger.info("mainTable 요소 찾음")
+            
+            # 시트 제목 추출 시도 (페이지 제목이나 시트 탭에서)
+            sheet_name = "기본 시트"
+            sheet_tabs = soup.find_all('div', class_='sheet-list__sheet-tab')
+            if sheet_tabs:
+                active_tab = next((tab for tab in sheet_tabs if 'active' in tab.get('class', [])), None)
+                if active_tab:
+                    sheet_name = active_tab.text.strip()
+                    logger.info(f"활성 시트 탭 발견: {sheet_name}")
+            
+            # tr 클래스를 가진 div 찾기 (행 요소)
+            rows = main_table.find_all('div', class_=lambda c: c and ('tr' in c.lower()))
+            
+            if not rows:
+                # 다른 방법으로 행 요소 찾기 (Synap 뷰어는 특수한 구조를 사용)
+                rows = main_table.find_all('div', recursive=False)
+                logger.info(f"대체 방법으로 {len(rows)}개 행 찾음")
+            
+            if rows:
+                logger.info(f"mainTable에서 {len(rows)}개 행 찾음")
+                table_data = []
+                
+                # 첫 번째 행이 비어있는지 확인
+                first_row_empty = True
+                if rows and rows[0]:
+                    cells = rows[0].find_all('div', class_=lambda c: c and ('td' in c.lower()))
+                    if not cells:
+                        cells = rows[0].find_all('div', recursive=False)
+                    
+                    if cells:
+                        for cell in cells:
+                            if cell.text.strip():
+                                first_row_empty = False
+                                break
+                
+                # 첫 번째 행이 헤더인지 확인
+                header_row = 0 if not first_row_empty else 1
+                
+                # 헤더 추출
+                headers = []
+                if rows and len(rows) > header_row:
+                    header_cells = rows[header_row].find_all('div', class_=lambda c: c and ('td' in c.lower()))
+                    if not header_cells:
+                        header_cells = rows[header_row].find_all('div', recursive=False)
+                    
+                    for cell in header_cells:
+                        text = cell.text.strip()
+                        if not text:
+                            text = f"Column_{len(headers)}"
+                        headers.append(text)
+                
+                if not headers:
+                    # 헤더가 없으면 첫 번째 행이 헤더가 아닐 수 있음
+                    header_row = -1
+                    
+                    # 임시 헤더 생성
+                    if rows and rows[0]:
+                        cells = rows[0].find_all('div', class_=lambda c: c and ('td' in c.lower()))
+                        if not cells:
+                            cells = rows[0].find_all('div', recursive=False)
+                        
+                        headers = [f"Column_{i}" for i in range(len(cells))]
+                
+                # 데이터 행 추출
+                for i, row in enumerate(rows):
+                    if i == header_row:
+                        continue  # 헤더 행 건너뛰기
+                        
+                    cells = row.find_all('div', class_=lambda c: c and ('td' in c.lower()))
+                    if not cells:
+                        cells = row.find_all('div', recursive=False)
+                    
+                    row_data = []
+                    for cell in cells:
+                        text = cell.text.strip()
+                        row_data.append(text)
+                    
+                    if row_data:  # 빈 행 제외
+                        # 헤더와 데이터 길이 일치시키기
+                        if headers and len(row_data) < len(headers):
+                            row_data.extend([''] * (len(headers) - len(row_data)))
+                        elif headers and len(row_data) > len(headers):
+                            row_data = row_data[:len(headers)]
+                            
+                        table_data.append(row_data)
+                
+                # DataFrame 생성
+                if table_data:
+                    if not headers and table_data:
+                        # 헤더가 없으면 열 수 기반으로 자동 생성
+                        max_cols = max(len(row) for row in table_data)
+                        headers = [f"Column_{i}" for i in range(max_cols)]
+                    
+                    df = pd.DataFrame(table_data, columns=headers)
+                    all_sheets[sheet_name] = df
+                    logger.info(f"mainTable에서 DataFrame 생성: {df.shape[0]}행 {df.shape[1]}열")
+        
+        # 2. 일반 HTML 테이블 추출
         tables = soup.find_all('table')
         if tables:
             logger.info(f"HTML에서 {len(tables)}개의 <table> 태그를 찾았습니다")
             
-            # 각 테이블 처리
             for table_idx, table in enumerate(tables):
                 sheet_name = f"Table_{table_idx+1}"
-                # 헤더와 데이터 추출
-                headers = []
-                rows = table.find_all('tr')
                 
-                if rows:
-                    # 첫 번째 행을 헤더로 처리
-                    header_cells = rows[0].find_all(['th', 'td'])
+                # 헤더 추출
+                headers = []
+                header_rows = table.find_all('tr', limit=1)
+                if header_rows:
+                    header_cells = header_rows[0].find_all(['th', 'td'])
                     for cell in header_cells:
                         # colspan 처리
                         colspan = int(cell.get('colspan', 1))
-                        cell_text = cell.get_text(strip=True)
-                        # 빈 헤더 처리
-                        if not cell_text:
-                            cell_text = f"Col_{len(headers)}"
-                        headers.append(cell_text)
-                        # colspan > 1인 경우 추가 헤더 생성
+                        text = cell.text.strip()
+                        if not text:
+                            text = f"Column_{len(headers)}"
+                        
+                        headers.append(text)
+                        # 추가 열 생성 (colspan > 1인 경우)
                         for i in range(1, colspan):
-                            headers.append(f"{cell_text}_{i}")
+                            headers.append(f"{text}_{i}")
+                
+                # 데이터 행 추출
+                rows = table.find_all('tr')
+                table_data = []
+                
+                for row_idx, row in enumerate(rows):
+                    if row_idx == 0 and headers:
+                        continue  # 헤더 행 건너뛰기
                     
-                    # 데이터 행 처리
-                    data_rows = []
-                    for row in rows[1:]:  # 첫 번째 행은 헤더로 사용했으므로 건너뜀
-                        row_data = []
-                        cells = row.find_all(['td', 'th'])
+                    cells = row.find_all(['td', 'th'])
+                    row_data = []
+                    
+                    for cell in cells:
+                        # colspan 처리
+                        colspan = int(cell.get('colspan', 1))
+                        text = cell.text.strip()
                         
-                        col_idx = 0
-                        for cell in cells:
-                            # colspan과 rowspan 처리
-                            colspan = int(cell.get('colspan', 1))
-                            rowspan = int(cell.get('rowspan', 1))
-                            
-                            cell_text = cell.get_text(strip=True)
-                            # 셀 값 추가
-                            row_data.append(cell_text)
-                            
-                            # colspan > 1인 경우 추가 셀 생성
-                            for i in range(1, colspan):
-                                row_data.append(cell_text)
-                            
-                            col_idx += colspan
-                        
-                        # 헤더 수와 데이터 수 맞추기
+                        row_data.append(text)
+                        # 추가 셀 생성 (colspan > 1인 경우)
+                        for i in range(1, colspan):
+                            row_data.append(text)
+                    
+                    if row_data:  # 빈 행 제외
+                        # 헤더와 데이터 길이 일치시키기
                         if headers and len(row_data) < len(headers):
                             row_data.extend([''] * (len(headers) - len(row_data)))
                         elif headers and len(row_data) > len(headers):
                             row_data = row_data[:len(headers)]
                             
-                        if row_data:
-                            data_rows.append(row_data)
+                        table_data.append(row_data)
+                
+                # DataFrame 생성
+                if table_data:
+                    if not headers and table_data:
+                        # 헤더가 없으면 열 수 기반으로 자동 생성
+                        max_cols = max(len(row) for row in table_data)
+                        headers = [f"Column_{i}" for i in range(max_cols)]
                     
-                    # DataFrame 생성
-                    if data_rows:
-                        if not headers:
-                            # 헤더가 없으면 자동 생성
-                            headers = [f"Col_{i}" for i in range(len(data_rows[0]))]
-                        
-                        df = pd.DataFrame(data_rows, columns=headers)
-                        all_sheets[sheet_name] = df
-                        logger.info(f"테이블 {sheet_name} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+                    df = pd.DataFrame(table_data, columns=headers)
+                    all_sheets[sheet_name] = df
+                    logger.info(f"테이블 {sheet_name} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
         
-        # 1.2 SynapDocViewServer 스타일 테이블 (div 기반 그리드)
-        # 주요 컨테이너 찾기
-        main_containers = soup.find_all('div', id=['mainTable', 'viewerFrame', 'innerWrap'])
-        if not main_containers:
-            main_containers = soup.select('div.mainTable, div.viewerContainer, div.docContent')
+        # 3. DIV 기반 그리드 구조 찾기 (다양한 선택자 시도)
+        container_selectors = [
+            'div[id="container"]',
+            'div.container',
+            'div.content',
+            'div.grid',
+            'div[class*="table"]'
+        ]
         
-        for container_idx, container in enumerate(main_containers):
-            # div 기반 테이블 구조 찾기
-            rows = container.find_all('div', class_=lambda c: c and ('tr' in c.lower() or 'row' in c.lower()))
+        for selector in container_selectors:
+            containers = soup.select(selector)
             
-            if not rows:
-                # 클래스 없는 div 찾기 (행으로 추정)
-                rows = container.find_all('div', recursive=False)
-            
-            if rows:
-                logger.info(f"컨테이너 {container_idx+1}에서 {len(rows)}개 행을 찾았습니다")
+            if containers:
+                logger.info(f"컨테이너 선택자 '{selector}'로 {len(containers)}개 컨테이너 찾음")
                 
-                # 섹션 구분을 위한 변수
-                current_section = f"Section_{container_idx+1}"
-                headers = []
-                all_data = []
-                
-                # 첫 번째 행을 헤더로 처리
-                first_row = rows[0]
-                header_cells = first_row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
-                
-                if not header_cells:
-                    # 클래스 없는 div 찾기 (셀로 추정)
-                    header_cells = first_row.find_all('div', recursive=False)
-                
-                for cell in header_cells:
-                    cell_text = cell.get_text(strip=True)
-                    if not cell_text:
-                        cell_text = f"Col_{len(headers)}"
-                    headers.append(cell_text)
-                
-                # 데이터 행 처리
-                for row_idx, row in enumerate(rows[1:], 1):  # 첫 번째 행은 건너뜀
-                    # 섹션 헤더인지 확인
-                    is_section_header = False
-                    special_text = row.get_text(strip=True)
+                for container_idx, container in enumerate(containers):
+                    # 행 요소 찾기
+                    row_selectors = [
+                        'div[class*="tr"]', 
+                        'div[class*="row"]',
+                        'div:not([class])'  # 클래스 없는 div도 시도
+                    ]
                     
-                    if row.get('class') and any('style' in c.lower() for c in row.get('class')):
-                        # 새 섹션 시작
-                        if all_data and headers:
-                            # 이전 섹션 데이터 저장
-                            df = pd.DataFrame(all_data, columns=headers)
-                            all_sheets[current_section] = df
-                            logger.info(f"섹션 {current_section} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
-                            all_data = []
-                        
-                        current_section = special_text if special_text else f"Section_{container_idx+1}_{row_idx}"
-                        headers = []  # 새 섹션은 새 헤더가 필요
-                        is_section_header = True
-                        continue
+                    rows = []
+                    for row_selector in row_selectors:
+                        temp_rows = container.select(row_selector)
+                        if temp_rows:
+                            rows = temp_rows
+                            logger.info(f"행 선택자 '{row_selector}'로 {len(rows)}개 행 찾음")
+                            break
                     
-                    # 헤더가 아직 설정되지 않은 경우
-                    if not headers and not is_section_header:
-                        cells = row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
-                        if not cells:
-                            cells = row.find_all('div', recursive=False)
+                    if rows:
+                        logger.info(f"컨테이너 {container_idx+1}에서 {len(rows)}개 행을 찾았습니다")
                         
-                        for cell in cells:
-                            cell_text = cell.get_text(strip=True)
-                            if not cell_text:
-                                cell_text = f"Col_{len(headers)}"
-                            headers.append(cell_text)
-                        continue
-                    
-                    # 일반 데이터 행 처리
-                    if headers:
-                        cells = row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
-                        if not cells:
-                            cells = row.find_all('div', recursive=False)
+                        # 데이터 처리를 위한 변수
+                        section_name = f"Section_{container_idx+1}"
+                        headers = []
+                        table_data = []
                         
-                        row_data = []
-                        for cell in cells:
-                            cell_text = cell.get_text(strip=True)
-                            row_data.append(cell_text)
+                        # 첫 번째 행이 헤더인지 확인
+                        first_row = rows[0]
                         
-                        # 헤더 수와 데이터 수 맞추기
-                        if headers and len(row_data) < len(headers):
-                            row_data.extend([''] * (len(headers) - len(row_data)))
-                        elif headers and len(row_data) > len(headers):
-                            row_data = row_data[:len(headers)]
+                        # 셀 찾기
+                        cell_selectors = [
+                            'div[class*="td"]', 
+                            'div[class*="cell"]',
+                            'div'  # 모든 div
+                        ]
+                        
+                        header_cells = []
+                        for cell_selector in cell_selectors:
+                            temp_cells = first_row.select(cell_selector)
+                            if temp_cells:
+                                header_cells = temp_cells
+                                logger.info(f"헤더 셀 선택자 '{cell_selector}'로 {len(header_cells)}개 셀 찾음")
+                                break
+                        
+                        # 헤더 추출
+                        for cell in header_cells:
+                            text = cell.text.strip()
+                            if not text:
+                                text = f"Column_{len(headers)}"
+                            headers.append(text)
+                        
+                        # 데이터 행 추출
+                        for i, row in enumerate(rows[1:], 1):  # 첫 번째 행 제외
+                            cells = []
+                            for cell_selector in cell_selectors:
+                                temp_cells = row.select(cell_selector)
+                                if temp_cells:
+                                    cells = temp_cells
+                                    break
                             
-                        if row_data:
-                            all_data.append(row_data)
-                
-                # 마지막 섹션 데이터 저장
-                if all_data and headers:
-                    df = pd.DataFrame(all_data, columns=headers)
-                    all_sheets[current_section] = df
-                    logger.info(f"섹션 {current_section} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+                            row_data = [cell.text.strip() for cell in cells]
+                            
+                            if row_data:  # 빈 행 제외
+                                # 헤더와 데이터 길이 일치시키기
+                                if headers and len(row_data) < len(headers):
+                                    row_data.extend([''] * (len(headers) - len(row_data)))
+                                elif headers and len(row_data) > len(headers):
+                                    row_data = row_data[:len(headers)]
+                                    
+                                table_data.append(row_data)
+                        
+                        # DataFrame 생성
+                        if table_data:
+                            if not headers and table_data:
+                                # 헤더가 없으면 열 수 기반으로 자동 생성
+                                max_cols = max(len(row) for row in table_data)
+                                headers = [f"Column_{i}" for i in range(max_cols)]
+                            
+                            df = pd.DataFrame(table_data, columns=headers)
+                            all_sheets[section_name] = df
+                            logger.info(f"섹션 {section_name} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
         
-        # 2. 아무 것도 찾지 못한 경우 pandas.read_html() 사용
-        if not all_sheets:
-            logger.info("구조화된 테이블을 찾지 못했습니다. pandas.read_html() 시도...")
-            try:
-                dfs = pd.read_html(html_content)
-                if dfs:
-                    for i, df in enumerate(dfs):
-                        if not df.empty:
-                            all_sheets[f"Table_{i+1}"] = df
-                            logger.info(f"pandas.read_html()로 테이블 {i+1} 추출: {df.shape[0]}행 {df.shape[1]}열")
-            except Exception as read_html_err:
-                logger.warning(f"pandas.read_html() 실패: {str(read_html_err)}")
+        # 4. 만약 아무 것도 찾지 못한 경우, Synap 문서 뷰어에서 스크립트 태그에서 데이터 추출 시도
+        if not all_sheets and synap_viewer:
+            logger.info("일반적인 방법으로 데이터를 찾지 못함, 스크립트 태그에서 데이터 추출 시도")
+            
+            # 스크립트 태그에서 데이터 추출 시도
+            script_tags = soup.find_all('script')
+            
+            for script in script_tags:
+                script_content = script.string
+                if script_content:
+                    # 데이터가 포함된 스크립트 태그 찾기
+                    data_patterns = [
+                        r'var\s+jsonData\s*=\s*(\{.*?\});',
+                        r'var\s+data\s*=\s*(\{.*?\});',
+                        r'var\s+cellData\s*=\s*(\{.*?\});',
+                        r'var\s+sheetData\s*=\s*(\{.*?\});'
+                    ]
+                    
+                    for pattern in data_patterns:
+                        match = re.search(pattern, script_content, re.DOTALL)
+                        if match:
+                            logger.info(f"스크립트 태그에서 데이터 패턴 '{pattern}' 발견")
+                            try:
+                                # JSON으로 변환 시도
+                                data_str = match.group(1)
+                                # 자바스크립트 JSON을 파이썬 JSON으로 변환
+                                data_str = data_str.replace("'", '"')
+                                data = json.loads(data_str)
+                                
+                                # 데이터에서 테이블 구조 재구성
+                                if isinstance(data, dict) and 'rows' in data:
+                                    rows_data = data['rows']
+                                    columns = data.get('columns', [{'name': f"Column_{i}"} for i in range(len(rows_data[0]) if rows_data else 0)])
+                                    
+                                    headers = [col.get('name', f"Column_{i}") for i, col in enumerate(columns)]
+                                    
+                                    df = pd.DataFrame(rows_data, columns=headers)
+                                    all_sheets['Script_Data'] = df
+                                    logger.info(f"스크립트 데이터에서 DataFrame 생성: {df.shape[0]}행 {df.shape[1]}열")
+                                    break
+                            except Exception as json_err:
+                                logger.warning(f"JSON 데이터 파싱 중 오류: {str(json_err)}")
         
-        # 3. 결과 정제
-        # 빈 시트 제거 및 데이터 타입 정리
+        # 5. 데이터 정제
         refined_sheets = {}
         for name, df in all_sheets.items():
             if df.empty:
@@ -4942,13 +5644,14 @@ def extract_data_from_html(html_content):
                 # 숫자 변환 시도
                 try:
                     # 쉼표 제거 후 숫자 변환 시도
-                    is_numeric = df[col].astype(str).str.replace(',', '').str.replace(' ', '').str.replace('%', '')
-                    is_numeric = pd.to_numeric(is_numeric, errors='coerce')
+                    df[col] = df[col].astype(str)
+                    numeric_values = df[col].str.replace(',', '').str.replace(' ', '').str.replace('%', '')
+                    is_numeric = pd.to_numeric(numeric_values, errors='coerce')
                     
                     # 50% 이상이 숫자면 변환
                     if is_numeric.notna().mean() > 0.5:
                         df[col] = is_numeric
-                except:
+                except Exception as type_err:
                     pass
             
             # NaN 값을 빈 문자열로 변환
