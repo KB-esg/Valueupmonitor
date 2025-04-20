@@ -1704,9 +1704,65 @@ def access_iframe_with_ocr_fallback(driver, file_params):
     else:
         logger.warning("iframe 직접 접근 실패 또는 빈 데이터 반환")
     
+    # 세 번째 시도: document.documentElement.innerHTML를 통한 추출
+    try:
+        logger.info("전체 HTML 내용을 JavaScript로 추출 시도")
+        entire_html = driver.execute_script("return document.documentElement.innerHTML;")
+        if entire_html:
+            # 디버깅용 HTML 저장
+            with open(f"entire_html_{int(time.time())}.html", 'w', encoding='utf-8') as f:
+                f.write(entire_html)
+            
+            # HTML에서 데이터 추출
+            js_extracted_data = extract_data_from_html(entire_html)
+            if js_extracted_data and any(not df.empty for df in js_extracted_data.values()):
+                logger.info(f"전체 HTML에서 {len(js_extracted_data)}개 시트 추출 성공")
+                return js_extracted_data
+    except Exception as js_err:
+        logger.warning(f"JavaScript HTML 추출 시도 실패: {str(js_err)}")
+    
+    # 네 번째 시도: JavaScript로 직접 표 데이터 추출
+    try:
+        logger.info("JavaScript로 표 데이터 직접 추출 시도")
+        js_data = extract_with_javascript(driver)
+        if js_data and any(not df.empty for df in js_data.values()):
+            logger.info(f"JavaScript로 {len(js_data)}개 시트 추출 성공")
+            return js_data
+    except Exception as js_err:
+        logger.warning(f"JavaScript 표 데이터 추출 시도 실패: {str(js_err)}")
+    
     # OCR 기능이 비활성화된 경우 건너뛰기
     if not CONFIG['ocr_enabled']:
         logger.info("OCR 기능이 비활성화되어 건너뜀")
+        
+        # 다른 모든 방법 실패 시, 특별한 fallback: 스크린샷을 저장하고 추후 분석을 위한 메타데이터 저장
+        try:
+            timestamp = int(time.time())
+            fallback_path = f"document_fallback_{timestamp}.png"
+            driver.save_screenshot(fallback_path)
+            logger.info(f"모든 추출 방법 실패, 문서 스크린샷 저장: {fallback_path}")
+            
+            # 메타데이터 저장
+            meta = {
+                'timestamp': timestamp,
+                'url': driver.current_url,
+                'title': driver.title,
+                'params': {k: v for k, v in file_params.items() if k != 'post_info'}
+            }
+            with open(f"document_fallback_{timestamp}_meta.json", 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            
+            # 최소한의 데이터를 담은 DataFrame 생성
+            df = pd.DataFrame({
+                '추출실패': ['데이터 추출 실패'],
+                '파일정보': [str(file_params.get('atch_file_no', '')) + '_' + str(file_params.get('file_ord', ''))],
+                'URL': [driver.current_url],
+                '저장된스크린샷': [fallback_path]
+            })
+            return {"추출실패": df}
+        except Exception as fallback_err:
+            logger.error(f"Fallback 생성 중 오류: {str(fallback_err)}")
+        
         return None
         
     # OCR 관련 라이브러리 임포트 확인
@@ -1731,15 +1787,48 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             
         save_html_for_debugging(driver, prefix)
         
-        # 다양한 부분에 대한 여러 스크린샷 촬영
+        # 확장된 스크린샷 캡처 전략
         all_sheets = {}
         
-        # 전체 페이지 스크린샷
+        # 1. 전체 페이지 스크린샷
         full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
         driver.save_screenshot(full_page_screenshot)
         logger.info(f"전체 페이지 스크린샷 캡처: {full_page_screenshot}")
         
-        # 타겟 OCR을 위한 주요 콘텐츠 영역 식별 시도
+        # 2. 여러 스크롤 위치에서 스크린샷 캡처
+        scroll_heights = []
+        try:
+            # 총 높이 측정
+            total_height = driver.execute_script("return document.body.scrollHeight")
+            view_height = driver.execute_script("return window.innerHeight")
+            
+            if total_height > view_height * 1.5:  # 충분히 긴 페이지인 경우만
+                # 여러 스크롤 위치 계산
+                scroll_points = min(4, max(2, int(total_height / view_height)))
+                for i in range(scroll_points):
+                    scroll_pos = int((total_height / scroll_points) * i)
+                    scroll_heights.append(scroll_pos)
+                
+                logger.info(f"{scroll_points}개 스크롤 위치에서 스크린샷 캡처 예정")
+        except Exception as scroll_err:
+            logger.warning(f"스크롤 높이 계산 오류: {str(scroll_err)}")
+        
+        # 각 스크롤 위치에서 스크린샷 캡처
+        scroll_screenshots = []
+        for height in scroll_heights:
+            try:
+                # 스크롤 이동
+                driver.execute_script(f"window.scrollTo(0, {height});")
+                time.sleep(1)  # 스크롤 안정화 대기
+                
+                scroll_ss = f"ocr_scroll_{height}_{int(time.time())}.png"
+                driver.save_screenshot(scroll_ss)
+                scroll_screenshots.append(scroll_ss)
+                logger.info(f"스크롤 위치 {height}에서 스크린샷 캡처: {scroll_ss}")
+            except Exception as ss_err:
+                logger.warning(f"스크롤 스크린샷 캡처 오류: {str(ss_err)}")
+        
+        # 3. 타겟 OCR을 위한 주요 콘텐츠 영역 식별 시도
         content_areas = find_content_areas(driver)
         
         if content_areas:
@@ -1764,7 +1853,21 @@ def access_iframe_with_ocr_fallback(driver, file_params):
                 except Exception as area_err:
                     logger.error(f"콘텐츠 영역 {i+1} 처리 중 오류: {str(area_err)}")
         
-        # 여전히 데이터가 없으면 전체 페이지 OCR 시도
+        # 4. 스크롤된 스크린샷에서 추출 시도
+        for i, ss_path in enumerate(scroll_screenshots):
+            try:
+                ocr_data_list = extract_data_from_screenshot(ss_path)
+                if ocr_data_list and any(not df.empty for df in ocr_data_list):
+                    logger.info(f"스크롤 스크린샷 {i+1}에서 성공적으로 데이터 추출")
+                    for j, df in enumerate(ocr_data_list):
+                        if df is not None and not df.empty:
+                            sheet_name = f"OCR_스크롤{i+1}_테이블{j+1}"
+                            all_sheets[sheet_name] = df
+                            logger.info(f"{sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
+            except Exception as scroll_ocr_err:
+                logger.warning(f"스크롤 스크린샷 {i+1} OCR 처리 오류: {str(scroll_ocr_err)}")
+        
+        # 5. 여전히 데이터가 없으면 전체 페이지 OCR 시도
         if not all_sheets:
             logger.info("타겟 영역에서 데이터를 찾지 못함, 전체 페이지 OCR 시도")
             
@@ -1779,6 +1882,32 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         
         # 시트가 있으면 반환
         if all_sheets:
+            # 유효한 데이터로 보이는 시트만 필터링
+            valid_sheets = {}
+            for name, df in all_sheets.items():
+                # 시트 품질 검사: 최소 행/열 수, 숫자 데이터 포함 여부
+                if df.shape[0] >= 2 and df.shape[1] >= 2:
+                    # 숫자 데이터 확인 (쉼표가 포함된 숫자 문자열 포함)
+                    has_numeric = False
+                    for col in df.columns:
+                        numeric_ratio = df[col].astype(str).str.replace(',', '').str.replace('.', '').str.isnumeric().mean()
+                        if numeric_ratio > 0.3:  # 30% 이상이 숫자면 유효한 열로 간주
+                            has_numeric = True
+                            break
+                    
+                    if has_numeric:
+                        valid_sheets[name] = df
+                    else:
+                        logger.warning(f"시트 {name}에 숫자 데이터가 부족하여 제외합니다")
+                else:
+                    logger.warning(f"시트 {name}의 크기가 너무 작아 제외합니다: {df.shape}")
+            
+            if valid_sheets:
+                logger.info(f"OCR 데이터 검증 완료: {len(valid_sheets)}/{len(all_sheets)} 시트 유효")
+                return valid_sheets
+            
+            # 검증에 실패해도 모든 시트 반환 (최소한의 데이터라도 제공)
+            logger.warning("유효성 검증에 실패했지만 모든 OCR 데이터 반환")
             return all_sheets
         
         # 최종 시도 - 텍스트 전용 OCR
@@ -1789,26 +1918,6 @@ def access_iframe_with_ocr_fallback(driver, file_params):
             all_sheets["OCR_텍스트전용"] = df
             logger.info(f"텍스트 전용 OCR 데이터 추가: {df.shape[0]}행 {df.shape[1]}열")
             return all_sheets
-        
-        # 기존 OCR 시도 (원래 코드와의 호환성)
-        logger.info("향상된 OCR 실패, 기존 OCR 접근 방식 시도")
-        try:
-            original_ocr_data_list = extract_data_from_screenshot(full_page_screenshot)
-            
-            if original_ocr_data_list:
-                # 결과 모으기
-                result = {}
-                for i, df in enumerate(original_ocr_data_list):
-                    if not df.empty:
-                        sheet_name = f"OCR_테이블_{i+1}"
-                        result[sheet_name] = df
-                        logger.info(f"OCR 테이블 {i+1}: {df.shape[0]}행 {df.shape[1]}열")
-                
-                if result:
-                    logger.info(f"OCR 전체 {len(result)}개 테이블 추출 성공")
-                    return result
-        except Exception as original_ocr_err:
-            logger.warning(f"기존 OCR 접근 방식도 실패: {str(original_ocr_err)}")
         
         logger.warning("모든 OCR 시도 실패")
         return None
@@ -2412,149 +2521,320 @@ def extract_from_document_viewer(driver):
 
 def extract_with_javascript(driver):
     """
-    Use JavaScript to extract table data from the page.
-    This can sometimes access data that's not easily accessible through the DOM.
+    JavaScript를 사용하여 페이지의 테이블 데이터를 직접 추출합니다.
+    DOM 구조에 관계없이 표 형식 데이터를 찾아내는 데 유용합니다.
     
     Args:
-        driver: Selenium WebDriver instance
+        driver: Selenium WebDriver 인스턴스
         
     Returns:
-        dict: Dictionary of sheet names to pandas DataFrames, or None if extraction fails
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
     """
     try:
-        logger.info("Attempting data extraction using JavaScript")
+        logger.info("JavaScript를 사용하여 테이블 데이터 추출 시도")
         
-        # Script to extract tables from the page
-        js_script = """
+        # 다양한 테이블 구조를 추출하는 JavaScript 코드
+        js_code = """
         function extractTables() {
-            // Extract data from standard tables
-            const tables = document.querySelectorAll('table');
-            const tableData = [];
+            const results = [];
             
+            // 1. 일반 HTML 테이블 추출
+            const tables = document.querySelectorAll('table');
             for (let i = 0; i < tables.length; i++) {
                 const table = tables[i];
-                const rows = table.querySelectorAll('tr');
-                const tableRows = [];
+                const tableData = {
+                    id: 'HTML_Table_' + (i + 1),
+                    headers: [],
+                    rows: []
+                };
                 
-                for (let j = 0; j < rows.length; j++) {
-                    const row = rows[j];
-                    const cells = row.querySelectorAll('th, td');
+                // 헤더 추출
+                const headerRows = table.querySelectorAll('thead tr, tr:first-child');
+                if (headerRows.length > 0) {
+                    const headerCells = headerRows[0].querySelectorAll('th, td');
+                    for (let j = 0; j < headerCells.length; j++) {
+                        const cell = headerCells[j];
+                        // colspan 처리
+                        const colspan = parseInt(cell.getAttribute('colspan')) || 1;
+                        const headerText = cell.textContent.trim() || 'Column_' + j;
+                        
+                        tableData.headers.push(headerText);
+                        // 추가 colspan 컬럼 생성
+                        for (let c = 1; c < colspan; c++) {
+                            tableData.headers.push(headerText + '_' + c);
+                        }
+                    }
+                }
+                
+                // 데이터 행 추출
+                const dataRows = table.querySelectorAll('tbody tr, tr:not(:first-child)');
+                for (let j = 0; j < dataRows.length; j++) {
+                    const row = dataRows[j];
                     const rowData = [];
+                    const cells = row.querySelectorAll('td, th');
                     
                     for (let k = 0; k < cells.length; k++) {
                         const cell = cells[k];
-                        // Handle colspan and rowspan
                         const colspan = parseInt(cell.getAttribute('colspan')) || 1;
+                        const cellText = cell.textContent.trim();
                         
-                        // Add the cell content (repeat for colspan)
-                        const cellContent = cell.textContent.trim();
-                        for (let c = 0; c < colspan; c++) {
-                            rowData.push(cellContent);
+                        rowData.push(cellText);
+                        // 추가 colspan 컬럼 생성
+                        for (let c = 1; c < colspan; c++) {
+                            rowData.push(cellText);
                         }
                     }
                     
                     if (rowData.length > 0) {
-                        tableRows.push(rowData);
+                        tableData.rows.push(rowData);
                     }
                 }
                 
-                if (tableRows.length > 0) {
-                    tableData.push({
-                        id: 'table_' + i,
-                        data: tableRows
-                    });
+                // 최소한의 데이터가 있는 경우만 추가
+                if (tableData.rows.length > 0) {
+                    results.push(tableData);
                 }
             }
             
-            // Also try to find div-based tables with grid styling
-            const gridContainers = document.querySelectorAll('.grid, [class*="grid"], [role="grid"]');
-            for (let i = 0; i < gridContainers.length; i++) {
-                const grid = gridContainers[i];
-                const gridRows = grid.querySelectorAll('.row, [class*="row"], [role="row"]');
-                const gridTableRows = [];
+            // 2. 특수한 문서 뷰어에서 테이블 구조 추출 (SynapDocViewServer 등)
+            // 주요 컨테이너 찾기
+            const containers = [
+                document.getElementById('mainTable'),
+                document.getElementById('viewerFrame'),
+                document.getElementById('innerWrap'),
+                ...document.querySelectorAll('.mainTable, .viewerContainer, .docContent')
+            ].filter(el => el !== null);
+            
+            for (let i = 0; i < containers.length; i++) {
+                const container = containers[i];
+                const tableData = {
+                    id: 'Container_' + (i + 1),
+                    headers: [],
+                    rows: []
+                };
                 
-                for (let j = 0; j < gridRows.length; j++) {
-                    const row = gridRows[j];
-                    const cells = row.querySelectorAll('.cell, [class*="cell"], [role="cell"]');
-                    const rowData = [];
+                // DIV 기반 행 찾기
+                let rows = container.querySelectorAll('div[class*="tr"], div[class*="row"]');
+                if (rows.length === 0) {
+                    // 클래스 없는 div도 시도
+                    rows = Array.from(container.children).filter(el => el.tagName === 'DIV');
+                }
+                
+                if (rows.length > 0) {
+                    // 첫 번째 행을 헤더로 처리
+                    const headerRow = rows[0];
+                    const headerCells = headerRow.querySelectorAll('div[class*="td"], div[class*="cell"]');
                     
+                    if (headerCells.length > 0) {
+                        for (let j = 0; j < headerCells.length; j++) {
+                            const headerText = headerCells[j].textContent.trim() || 'Column_' + j;
+                            tableData.headers.push(headerText);
+                        }
+                        
+                        // 데이터 행 추출 (첫번째 행 제외)
+                        for (let j = 1; j < rows.length; j++) {
+                            const dataRow = rows[j];
+                            const dataCells = dataRow.querySelectorAll('div[class*="td"], div[class*="cell"]');
+                            
+                            if (dataCells.length > 0) {
+                                const rowData = [];
+                                for (let k = 0; k < dataCells.length; k++) {
+                                    rowData.push(dataCells[k].textContent.trim());
+                                }
+                                tableData.rows.push(rowData);
+                            }
+                        }
+                        
+                        // 최소한의 데이터가 있는 경우만 추가
+                        if (tableData.rows.length > 0) {
+                            results.push(tableData);
+                        }
+                    }
+                }
+            }
+            
+            // 3. 그리드 형태의 컴포넌트 추출
+            const grids = document.querySelectorAll('.grid, [role="grid"], [class*="grid"]');
+            for (let i = 0; i < grids.length; i++) {
+                const grid = grids[i];
+                const tableData = {
+                    id: 'Grid_' + (i + 1),
+                    headers: [],
+                    rows: []
+                };
+                
+                // 헤더 행 찾기
+                const headerRows = grid.querySelectorAll('.header, [role="rowheader"], [class*="header"]');
+                if (headerRows.length > 0) {
+                    const headerCells = headerRows[0].querySelectorAll('div, span');
+                    for (let j = 0; j < headerCells.length; j++) {
+                        const headerText = headerCells[j].textContent.trim() || 'Column_' + j;
+                        tableData.headers.push(headerText);
+                    }
+                }
+                
+                // 데이터 행 찾기
+                const dataRows = grid.querySelectorAll('.row, [role="row"], [class*="row"]');
+                for (let j = 0; j < dataRows.length; j++) {
+                    const row = dataRows[j];
+                    if (row.closest('.header, [role="rowheader"], [class*="header"]')) {
+                        continue; // 헤더 행 건너뛰기
+                    }
+                    
+                    const rowData = [];
+                    const cells = row.querySelectorAll('.cell, [role="cell"], [class*="cell"]');
                     for (let k = 0; k < cells.length; k++) {
                         rowData.push(cells[k].textContent.trim());
                     }
                     
                     if (rowData.length > 0) {
-                        gridTableRows.push(rowData);
+                        tableData.rows.push(rowData);
                     }
                 }
                 
-                if (gridTableRows.length > 0) {
-                    tableData.push({
-                        id: 'grid_' + i,
-                        data: gridTableRows
-                    });
+                // 최소한의 데이터가 있는 경우만 추가
+                if (tableData.headers.length > 0 && tableData.rows.length > 0) {
+                    results.push(tableData);
                 }
             }
             
-            return tableData;
+            // 4. Synap Viewer 특수 처리
+            try {
+                // 시트 탭 확인
+                const sheetTabs = document.querySelectorAll('.sheet-list__sheet-tab');
+                if (sheetTabs.length > 0) {
+                    // 현재 선택된 시트에서 데이터 추출
+                    // 표시된 셀 추출
+                    const cells = document.querySelectorAll('.cell-wrapper');
+                    
+                    // 셀 위치와 내용으로 그리드 구조 재구성
+                    if (cells.length > 0) {
+                        const cellMap = new Map();
+                        let maxRow = 0;
+                        let maxCol = 0;
+                        
+                        cells.forEach(cell => {
+                            // 위치 가져오기 (스타일 또는 데이터 속성에서)
+                            let row = parseInt(cell.getAttribute('data-row') || '0');
+                            let col = parseInt(cell.getAttribute('data-col') || '0');
+                            
+                            // 스타일에서 위치 추출 시도
+                            if (!row || !col) {
+                                const style = cell.getAttribute('style') || '';
+                                const rowMatch = style.match(/top:\\s*(\\d+)/);
+                                const colMatch = style.match(/left:\\s*(\\d+)/);
+                                
+                                if (rowMatch) row = Math.floor(parseInt(rowMatch[1]) / 20);
+                                if (colMatch) col = Math.floor(parseInt(colMatch[1]) / 100);
+                            }
+                            
+                            maxRow = Math.max(maxRow, row);
+                            maxCol = Math.max(maxCol, col);
+                            
+                            // 맵에 셀 추가
+                            cellMap.set(`${row},${col}`, cell.textContent.trim());
+                        });
+                        
+                        // 그리드 데이터로 테이블 생성
+                        const tableData = {
+                            id: 'SynapSheet',
+                            headers: [],
+                            rows: []
+                        };
+                        
+                        // 첫 번째 행을 헤더로 가정
+                        for (let c = 0; c <= maxCol; c++) {
+                            const headerText = cellMap.get(`0,${c}`) || `Column_${c}`;
+                            tableData.headers.push(headerText);
+                        }
+                        
+                        // 나머지 행을 데이터로 처리
+                        for (let r = 1; r <= maxRow; r++) {
+                            const rowData = [];
+                            for (let c = 0; c <= maxCol; c++) {
+                                rowData.push(cellMap.get(`${r},${c}`) || '');
+                            }
+                            tableData.rows.push(rowData);
+                        }
+                        
+                        if (tableData.rows.length > 0) {
+                            results.push(tableData);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Synap 뷰어 처리 중 오류:", e);
+            }
+            
+            return results;
         }
+        
         return extractTables();
         """
         
-        # Execute the script and get results
-        result = driver.execute_script(js_script)
+        # JavaScript 실행하여 데이터 추출
+        table_data_list = driver.execute_script(js_code)
         
-        if not result or len(result) == 0:
-            logger.warning("No tables found using JavaScript extraction")
+        if not table_data_list or len(table_data_list) == 0:
+            logger.warning("JavaScript로 테이블 데이터를 추출하지 못했습니다")
             return None
-            
-        logger.info(f"JavaScript extraction found {len(result)} tables/grids")
         
-        # Convert the JavaScript results to DataFrames
-        all_sheets = {}
+        logger.info(f"JavaScript로 {len(table_data_list)}개 테이블 추출")
         
-        for table_obj in result:
-            table_id = table_obj.get('id', f"Table_{len(all_sheets)}")
-            table_data = table_obj.get('data', [])
+        # 추출된 데이터를 DataFrame으로 변환
+        sheets_data = {}
+        
+        for table_data in table_data_list:
+            table_id = table_data.get('id', f"Table_{len(sheets_data) + 1}")
+            headers = table_data.get('headers', [])
+            rows = table_data.get('rows', [])
             
-            if not table_data or len(table_data) < 2:  # Need at least header + one data row
-                logger.warning(f"Table {table_id} has insufficient data, skipping")
+            if not rows:
+                logger.warning(f"테이블 {table_id}에 행 데이터가 없습니다")
                 continue
-                
-            # First row is header
-            header = table_data[0]
-            data_rows = table_data[1:]
             
-            # Clean and normalize headers
-            clean_headers = []
-            header_counts = {}
+            # 헤더가 없으면 자동 생성
+            if not headers or len(headers) == 0:
+                max_cols = max(len(row) for row in rows)
+                headers = [f"Column_{i+1}" for i in range(max_cols)]
             
-            for h in header:
-                h_str = str(h).strip()
-                if not h_str:  # Replace empty headers
-                    h_str = f"Column_{len(clean_headers)}"
-                    
-                if h_str in header_counts:
-                    header_counts[h_str] += 1
-                    clean_headers.append(f"{h_str}_{header_counts[h_str]}")
+            # 헤더 길이에 맞게 행 데이터 조정
+            processed_rows = []
+            for row in rows:
+                if len(row) < len(headers):
+                    # 부족한 열 채우기
+                    processed_row = row + [''] * (len(headers) - len(row))
+                elif len(row) > len(headers):
+                    # 초과 열 자르기
+                    processed_row = row[:len(headers)]
                 else:
-                    header_counts[h_str] = 0
-                    clean_headers.append(h_str)
-            
-            # Create DataFrame
-            try:
-                df = pd.DataFrame(data_rows, columns=clean_headers)
-                df = clean_dataframe(df)  # Apply additional cleaning
+                    processed_row = row
                 
-                if not df.empty:
-                    all_sheets[table_id] = df
-                    logger.info(f"Created DataFrame for {table_id}: {df.shape[0]} rows, {df.shape[1]} columns")
+                processed_rows.append(processed_row)
+            
+            # DataFrame 생성
+            try:
+                df = pd.DataFrame(processed_rows, columns=headers)
+                
+                # 데이터 정제
+                df = clean_dataframe(df)
+                
+                if not df.empty and df.shape[0] >= 1 and df.shape[1] >= 1:
+                    sheets_data[table_id] = df
+                    logger.info(f"테이블 {table_id} 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                else:
+                    logger.warning(f"테이블 {table_id}의 정제된 DataFrame이 비어 있습니다")
             except Exception as df_err:
-                logger.warning(f"Error creating DataFrame for {table_id}: {str(df_err)}")
+                logger.error(f"테이블 {table_id}의 DataFrame 생성 중 오류: {str(df_err)}")
         
-        return all_sheets if all_sheets else None
+        if not sheets_data:
+            logger.warning("JavaScript로 추출된 유효한 테이블이 없습니다")
+            return None
+        
+        return sheets_data
         
     except Exception as e:
-        logger.error(f"JavaScript extraction error: {str(e)}")
+        logger.error(f"JavaScript 데이터 추출 중 오류: {str(e)}")
         return None
 
 
@@ -3505,10 +3785,10 @@ def update_google_sheets(client, data):
         # Process the data
         if 'sheets' in data:
             # Multiple sheets
-            return update_multiple_sheets(spreadsheet, data['sheets'], date_str, report_type)
+            return update_multiple_sheets(spreadsheet, data['sheets'], date_str, report_type, post_info)
         elif 'dataframe' in data:
             # Single dataframe
-            return update_single_sheet(spreadsheet, report_type, data['dataframe'], date_str)
+            return update_single_sheet(spreadsheet, report_type, data['dataframe'], date_str, post_info)
         else:
             logger.error("No data to update: neither 'sheets' nor 'dataframe' found in data")
             return False
@@ -3517,9 +3797,25 @@ def update_google_sheets(client, data):
         logger.error(f"Error updating Google Sheets: {str(e)}")
         return False
 
-def update_single_sheet(spreadsheet, sheet_name, df, date_str):
-    """단일 시트 업데이트"""
+def update_single_sheet(spreadsheet, sheet_name, df, date_str, post_info=None):
+    """
+    단일 시트 업데이트 개선 함수
+    
+    Args:
+        spreadsheet: gspread Spreadsheet 객체
+        sheet_name: 업데이트할 시트 이름
+        df: pandas DataFrame - 업데이트할 데이터
+        date_str: 날짜 문자열 (열 헤더로 사용)
+        post_info: 게시물 정보 (선택 사항)
+        
+    Returns:
+        bool: 업데이트 성공 여부
+    """
     try:
+        # 시트 이름 정리 (특수문자 제거 등)
+        sheet_name = clean_sheet_name_for_gsheets(sheet_name)
+        logger.info(f"시트 업데이트 시작: '{sheet_name}', 날짜: {date_str}")
+        
         # API 속도 제한 방지를 위한 지연 시간
         time.sleep(1)
         
@@ -3536,8 +3832,33 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
             worksheet.update_cell(1, 1, "항목")
             time.sleep(1)  # API 속도 제한 방지
         
-        # 날짜 열 확인
-        headers = worksheet.row_values(1)
+        # 데이터 검증 및 전처리
+        if df is None or df.empty:
+            logger.warning(f"빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
+            return False
+        
+        # 데이터프레임 준비
+        df = validate_and_clean_dataframe(df)
+        if df.empty:
+            logger.warning(f"데이터 정제 후 빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
+            return False
+        
+        # 첫 열을 항목으로 사용
+        key_col = df.columns[0]
+        items = df[key_col].astype(str).tolist()
+        
+        # 두 번째 열을 값으로 사용 (없으면 첫 번째 열과 동일)
+        value_col = df.columns[1] if df.shape[1] >= 2 else key_col
+        values = df[value_col].astype(str).tolist()
+        
+        # 현재 워크시트 열 헤더 및 항목 가져오기
+        try:
+            headers = worksheet.row_values(1)
+            existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
+        except Exception as e:
+            logger.warning(f"워크시트 데이터 읽기 실패: {str(e)}")
+            headers = []
+            existing_items = []
         
         # 빈 헤더 채우기
         if not headers or len(headers) == 0:
@@ -3545,6 +3866,7 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
             headers = ["항목"]
             time.sleep(1)  # API 속도 제한 방지
         
+        # 날짜 열 확인 (이미 존재하는지)
         if date_str in headers:
             col_idx = headers.index(date_str) + 1
             logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
@@ -3555,31 +3877,131 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
             logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
             time.sleep(1)  # API 속도 제한 방지
         
-        # 데이터프레임 형식 검증 및 정리
-        if df.shape[1] < 2:
-            logger.warning(f"데이터프레임 열이 부족합니다: {df.shape[1]} 열. 최소 2열 필요")
-            
-            # 최소 열 추가
-            if df.shape[1] == 1:
-                col_name = df.columns[0]
-                df['값'] = df[col_name]
+        # 배치 업데이트 준비
+        cell_updates = []
+        new_rows = []
+        
+        # 각 항목에 대해 업데이트 준비
+        for i, (item, value) in enumerate(zip(items, values)):
+            if not item or not item.strip():
+                continue  # 빈 항목 건너뛰기
+                
+            # 항목이 이미 존재하는지 확인
+            if item in existing_items:
+                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
             else:
-                # 데이터프레임이 비어있는 경우
-                df = pd.DataFrame({
-                    '항목': ['데이터 없음'],
-                    '값': ['업데이트 실패']
+                # 새 항목은 끝에 추가
+                row_idx = len(existing_items) + 2
+                new_rows.append(item)  # 새 행 추적
+                
+                # 항목 업데이트
+                cell_updates.append({
+                    'range': f'A{row_idx}',
+                    'values': [[item]]
                 })
+                existing_items.append(item)
+            
+            # 값 업데이트
+            value_str = value if pd.notna(value) else ""
+            cell_updates.append({
+                'range': f'{chr(64 + col_idx)}{row_idx}',
+                'values': [[value_str]]
+            })
         
-        # 데이터프레임으로 시트 업데이트 (배치 처리)
-        update_sheet_from_dataframe(worksheet, df, col_idx)
+        # 모든 열 데이터 추가 (2열 이상인 경우)
+        if df.shape[1] > 2:
+            logger.info(f"데이터프레임에 추가 열이 있습니다 ({df.shape[1]}개). 모든 열을 새 시트에 복사합니다.")
+            
+            # 추가 시트에 전체 데이터 저장
+            full_sheet_name = f"{sheet_name}_전체데이터_{date_str}"
+            try:
+                # 기존 워크시트가 있으면 삭제
+                try:
+                    spreadsheet.del_worksheet(spreadsheet.worksheet(full_sheet_name))
+                    logger.info(f"기존 전체 데이터 시트 삭제: {full_sheet_name}")
+                except gspread.exceptions.WorksheetNotFound:
+                    pass
+                
+                # 새 워크시트 생성
+                full_worksheet = spreadsheet.add_worksheet(title=full_sheet_name, rows=df.shape[0]+5, cols=df.shape[1]+2)
+                logger.info(f"전체 데이터용 새 워크시트 생성: {full_sheet_name}")
+                
+                # 전체 데이터 업로드
+                # 헤더 추가
+                cells = []
+                for i, col in enumerate(df.columns):
+                    cells.append(gspread.Cell(1, i+1, str(col)))
+                
+                # 데이터 추가
+                for i, row in enumerate(df.values, start=2):
+                    for j, value in enumerate(row, start=1):
+                        cells.append(gspread.Cell(i, j, str(value) if pd.notna(value) else ""))
+                
+                # 링크 정보 추가 (있는 경우)
+                url = post_info.get('url', '') if post_info else ''
+                if url:
+                    cells.append(gspread.Cell(1, df.shape[1]+1, "원본 링크"))
+                    cells.append(gspread.Cell(2, df.shape[1]+1, url))
+                
+                # 배치 업데이트
+                if cells:
+                    # 한 번에 너무 많은 셀 업데이트는 제한이 있으므로 분할
+                    batch_size = 500
+                    for i in range(0, len(cells), batch_size):
+                        batch = cells[i:i+batch_size]
+                        try:
+                            full_worksheet.update_cells(batch, value_input_option='RAW')
+                            logger.info(f"전체 데이터 {i+1}~{min(i+batch_size, len(cells))} 업데이트 완료")
+                            time.sleep(1)  # API 제한 방지
+                        except Exception as batch_err:
+                            logger.warning(f"전체 데이터 배치 업데이트 실패: {str(batch_err)}")
+                
+                logger.info(f"전체 데이터가 별도 시트에 저장됨: {full_sheet_name}")
+            except Exception as full_sheet_err:
+                logger.warning(f"전체 데이터 시트 생성 실패: {str(full_sheet_err)}")
         
-        logger.info(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 완료")
-        return True
+        # 기본 시트 업데이트 실행
+        if cell_updates:
+            logger.info(f"총 {len(cell_updates)}개 셀 업데이트 준비 완료 (새 항목: {len(new_rows)}개)")
+            # 배치 크기 조정
+            batch_size = min(10, len(cell_updates))  # 최대 10개씩 처리
+            
+            for i in range(0, len(cell_updates), batch_size):
+                batch = cell_updates[i:i+batch_size]
+                try:
+                    worksheet.batch_update(batch)
+                    logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
+                    time.sleep(1)  # API 속도 제한 방지
+                except gspread.exceptions.APIError as api_err:
+                    # API 오류 처리
+                    if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                        logger.warning(f"API 속도 제한 발생: {str(api_err)}")
+                        time.sleep(5)  # 더 긴 대기
+                        
+                        # 더 작은 배치로 재시도
+                        for update in batch:
+                            try:
+                                worksheet.batch_update([update])
+                                time.sleep(2)  # 각 업데이트 사이 더 긴 대기
+                            except Exception as single_err:
+                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
+                    else:
+                        logger.error(f"일괄 업데이트 실패: {str(api_err)}")
+                        return False
+                except Exception as batch_err:
+                    logger.error(f"일괄 업데이트 중 오류: {str(batch_err)}")
+                    return False
+            
+            logger.info(f"워크시트 '{sheet_name}' 업데이트 완료")
+            return True
+        else:
+            logger.warning(f"워크시트 '{sheet_name}'에 업데이트할 셀이 없습니다")
+            return True  # 업데이트할 게 없어도 성공으로 처리
         
     except gspread.exceptions.APIError as api_err:
         if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
             logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
-            logger.info("대기 후 재시도 중...")
+            logger.info("대기 후 최소 데이터 업데이트 시도...")
             time.sleep(5)  # 더 긴 대기 시간
             
             # 간소화된 방식으로 재시도
@@ -3602,14 +4024,18 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
                 # 최소한의 데이터만 업데이트
                 if df.shape[0] > 0:
                     first_col_name = df.columns[0]
-                    items = df[first_col_name].astype(str).tolist()[:10]  # 처음 10개 항목
+                    items = df[first_col_name].astype(str).tolist()[:5]  # 처음 5개 항목
                     values = ["업데이트 성공"] * len(items)
                     
                     for i, (item, value) in enumerate(zip(items, values)):
                         row_idx = i + 2  # 헤더 행 이후
-                        worksheet.update_cell(row_idx, 1, item)
-                        worksheet.update_cell(row_idx, col_idx, value)
-                        time.sleep(1)  # 더 긴 지연 시간
+                        try:
+                            worksheet.update_cell(row_idx, 1, item)
+                            time.sleep(1)
+                            worksheet.update_cell(row_idx, col_idx, value)
+                            time.sleep(1)
+                        except Exception as cell_err:
+                            logger.warning(f"최소 데이터 셀 업데이트 실패: {str(cell_err)}")
                 
                 logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
                 return True
@@ -3626,7 +4052,7 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
         return False
 
 
-def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type):
+def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post_info=None):
     """
     Update multiple sheets in the spreadsheet.
     
@@ -3635,6 +4061,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type):
         sheets_data: Dictionary mapping sheet names to DataFrames
         date_str: Date string for the column header
         report_type: Type of report
+        post_info: Optional post information dictionary
         
     Returns:
         bool: True if update was successful, False otherwise
@@ -3646,49 +4073,135 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type):
     success_count = 0
     total_sheets = len(sheets_data)
     
-    # Update sheet metadata
+    # Create a summary sheet first
     try:
-        # Add metadata in a special sheet
-        metadata_sheet = ensure_metadata_sheet(spreadsheet)
-        if metadata_sheet:
-            update_metadata_sheet(metadata_sheet, {
-                'last_update': datetime.now().isoformat(),
-                'report_type': report_type,
-                'date': date_str,
-                'sheets': list(sheets_data.keys())
-            })
-    except Exception as meta_err:
-        logger.warning(f"Failed to update metadata: {str(meta_err)}")
+        summary_sheet_name = f"요약_{report_type}"
+        summary_sheet_name = clean_sheet_name_for_gsheets(summary_sheet_name)
+        
+        # Extract info to create summary sheet
+        summary_data = {
+            '데이터시트': [],
+            '행 수': [],
+            '열 수': [],
+            '날짜': []
+        }
+        
+        for sheet_name, df in sheets_data.items():
+            if df is None or df.empty:
+                continue
+                
+            summary_data['데이터시트'].append(sheet_name)
+            summary_data['행 수'].append(df.shape[0])
+            summary_data['열 수'].append(df.shape[1])
+            summary_data['날짜'].append(date_str)
+        
+        # If we have summary data, create a summary DataFrame
+        if summary_data['데이터시트']:
+            summary_df = pd.DataFrame(summary_data)
+            
+            # Add post information
+            if post_info:
+                summary_df['게시물 제목'] = post_info.get('title', '')
+                summary_df['게시물 URL'] = post_info.get('url', '')
+                summary_df['게시물 날짜'] = post_info.get('date', '')
+            
+            # Update summary sheet
+            success = update_single_sheet(spreadsheet, summary_sheet_name, summary_df, date_str, post_info)
+            if success:
+                logger.info(f"성공적으로 요약 시트 업데이트: {summary_sheet_name}")
+                
+    except Exception as summary_err:
+        logger.warning(f"요약 시트 생성 중 오류: {str(summary_err)}")
+    
+    # Update each individual sheet
+    # First, get a list of existing worksheets to avoid too many API calls
+    existing_worksheets = []
+    try:
+        existing_worksheets = [ws.title for ws in spreadsheet.worksheets()]
+        logger.info(f"현재 스프레드시트에 {len(existing_worksheets)}개 워크시트가 있습니다.")
+    except Exception as ws_err:
+        logger.warning(f"기존 워크시트 목록을 가져오는 데 실패했습니다: {str(ws_err)}")
+    
+    # Sort sheets by size (Process smallest sheets first to avoid API rate limits)
+    sorted_sheets = sorted(sheets_data.items(), key=lambda x: 0 if x[1] is None else x[1].size)
+    
+    # Add a combined sheet with all data if there are multiple sheets
+    if len(sheets_data) > 1:
+        try:
+            # Create a combined dataframe
+            all_data = []
+            for sheet_name, df in sheets_data.items():
+                if df is None or df.empty:
+                    continue
+                
+                # Add sheet name as a column
+                df_copy = df.copy()
+                df_copy['데이터출처'] = sheet_name
+                
+                all_data.append(df_copy)
+            
+            if all_data:
+                # Combine all dataframes
+                combined_df = pd.concat(all_data, ignore_index=True)
+                
+                # Organize columns: move '데이터출처' to the front
+                cols = combined_df.columns.tolist()
+                if '데이터출처' in cols:
+                    cols.remove('데이터출처')
+                    cols = ['데이터출처'] + cols
+                    combined_df = combined_df[cols]
+                
+                # Update as a single sheet
+                combined_sheet_name = f"전체데이터_{clean_sheet_name_for_gsheets(report_type)}"
+                success = update_single_sheet(spreadsheet, combined_sheet_name, combined_df, date_str, post_info)
+                if success:
+                    logger.info(f"전체 데이터 통합 시트 생성 성공: {combined_sheet_name}")
+        except Exception as combined_err:
+            logger.warning(f"통합 데이터 시트 생성 중 오류: {str(combined_err)}")
     
     # Process each sheet
-    for sheet_name, df in sheets_data.items():
+    for i, (sheet_name, df) in enumerate(sorted_sheets):
         try:
             # Skip empty dataframes
             if df is None or df.empty:
-                logger.warning(f"Skipping empty dataframe for sheet: {sheet_name}")
+                logger.warning(f"빈 데이터프레임 건너뜀: {sheet_name}")
                 continue
                 
             # Clean sheet name to be valid
             clean_sheet_name = clean_sheet_name_for_gsheets(sheet_name)
             
+            # Check if this sheet already exists (to avoid unnecessary API calls)
+            sheet_exists = clean_sheet_name in existing_worksheets
+            
             # Check data quality
             df = validate_and_clean_dataframe(df)
             if df.empty:
-                logger.warning(f"Dataframe for sheet {clean_sheet_name} is empty after cleaning")
+                logger.warning(f"데이터프레임 {clean_sheet_name}이 정제 후 비어 있습니다")
                 continue
                 
+            # Log progress
+            logger.info(f"시트 업데이트 중 ({i+1}/{total_sheets}): {clean_sheet_name}")
+            
             # Update the sheet
-            success = update_single_sheet_with_retry(spreadsheet, clean_sheet_name, df, date_str)
-            if success:
-                success_count += 1
-                logger.info(f"Successfully updated sheet: {clean_sheet_name}")
-            else:
-                logger.warning(f"Failed to update sheet: {clean_sheet_name}")
+            try:
+                success = update_single_sheet(spreadsheet, clean_sheet_name, df, date_str, post_info)
+                if success:
+                    success_count += 1
+                    logger.info(f"시트 업데이트 성공: {clean_sheet_name}")
+                else:
+                    logger.warning(f"시트 업데이트 실패: {clean_sheet_name}")
+                
+                # Add delay between sheet updates to avoid rate limiting
+                if i < total_sheets - 1:  # Skip delay after last sheet
+                    delay = 2 + (i % 3)  # Vary delay slightly to avoid patterns
+                    time.sleep(delay)
+            except Exception as update_err:
+                logger.error(f"시트 {clean_sheet_name} 업데이트 중 오류: {str(update_err)}")
         
         except Exception as sheet_err:
-            logger.error(f"Error updating sheet {sheet_name}: {str(sheet_err)}")
+            logger.error(f"시트 {sheet_name} 처리 중 오류: {str(sheet_err)}")
     
-    logger.info(f"Updated {success_count}/{total_sheets} sheets")
+    logger.info(f"{success_count}/{total_sheets} 시트 업데이트 완료")
     return success_count > 0
 
 def update_metadata_sheet(metadata_sheet, metadata):
@@ -4228,7 +4741,7 @@ def execute_batched_updates(worksheet, updates, batch_size):
 
 def extract_data_from_html(html_content):
     """
-    HTML 콘텐츠에서 직접 표 데이터를 추출
+    HTML 콘텐츠에서 표 데이터를 추출하는 개선된 함수
     
     Args:
         html_content (str): HTML 문자열
@@ -4240,101 +4753,223 @@ def extract_data_from_html(html_content):
         soup = BeautifulSoup(html_content, 'html.parser')
         all_sheets = {}
         
-        # 테이블 영역 찾기
-        main_table = soup.find('div', id='mainTable')
-        if not main_table:
-            logger.warning("mainTable을 찾을 수 없습니다")
-            return None
+        # 1. 다양한 표 구조 처리
+        # 1.1 일반 테이블 (<table> 태그)
+        tables = soup.find_all('table')
+        if tables:
+            logger.info(f"HTML에서 {len(tables)}개의 <table> 태그를 찾았습니다")
             
-        # 모든 행 찾기
-        rows = main_table.find_all('div', class_='tr')
-        if not rows:
-            logger.warning("테이블 행을 찾을 수 없습니다")
-            return None
-        
-        logger.info(f"HTML에서 {len(rows)}개의 행을 찾았습니다")
-        
-        # 섹션 구분을 위한 변수들
-        current_section = "기본_테이블"
-        current_headers = []
-        table_data = []
-        in_header_row = False
-        
-        for row_idx, row in enumerate(rows):
-            # 제목 행인지 확인 (새로운 섹션 시작)
-            section_title_div = row.find('div', class_=lambda c: c and (c.startswith('style0') or 'of' in c))
-            
-            if section_title_div and section_title_div.get_text(strip=True):
-                # 이전 섹션의 데이터가 있으면 저장
-                if table_data and current_headers:
-                    # DataFrame 생성 및 저장
-                    df = pd.DataFrame(table_data, columns=current_headers)
-                    if not df.empty:
-                        all_sheets[current_section] = df
-                        logger.info(f"섹션 '{current_section}' 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
-                    table_data = []
-                    current_headers = []
+            # 각 테이블 처리
+            for table_idx, table in enumerate(tables):
+                sheet_name = f"Table_{table_idx+1}"
+                # 헤더와 데이터 추출
+                headers = []
+                rows = table.find_all('tr')
                 
-                # 새 섹션 제목 추출
-                section_text = section_title_div.get_text(strip=True)
-                current_section = section_text if section_text else f"섹션_{len(all_sheets)+1}"
-                in_header_row = True  # 섹션 다음 행은 헤더로 간주
-                continue
-            
-            # 헤더 행 처리
-            if in_header_row:
-                header_cells = row.find_all('div', class_=lambda c: c and c.startswith('td style'))
-                if header_cells:
-                    current_headers = []
+                if rows:
+                    # 첫 번째 행을 헤더로 처리
+                    header_cells = rows[0].find_all(['th', 'td'])
                     for cell in header_cells:
+                        # colspan 처리
+                        colspan = int(cell.get('colspan', 1))
                         cell_text = cell.get_text(strip=True)
-                        if not cell_text:  # 빈 헤더는 자동 생성
-                            cell_text = f"Col_{len(current_headers)}"
-                        current_headers.append(cell_text)
-                    in_header_row = False
+                        # 빈 헤더 처리
+                        if not cell_text:
+                            cell_text = f"Col_{len(headers)}"
+                        headers.append(cell_text)
+                        # colspan > 1인 경우 추가 헤더 생성
+                        for i in range(1, colspan):
+                            headers.append(f"{cell_text}_{i}")
+                    
+                    # 데이터 행 처리
+                    data_rows = []
+                    for row in rows[1:]:  # 첫 번째 행은 헤더로 사용했으므로 건너뜀
+                        row_data = []
+                        cells = row.find_all(['td', 'th'])
+                        
+                        col_idx = 0
+                        for cell in cells:
+                            # colspan과 rowspan 처리
+                            colspan = int(cell.get('colspan', 1))
+                            rowspan = int(cell.get('rowspan', 1))
+                            
+                            cell_text = cell.get_text(strip=True)
+                            # 셀 값 추가
+                            row_data.append(cell_text)
+                            
+                            # colspan > 1인 경우 추가 셀 생성
+                            for i in range(1, colspan):
+                                row_data.append(cell_text)
+                            
+                            col_idx += colspan
+                        
+                        # 헤더 수와 데이터 수 맞추기
+                        if headers and len(row_data) < len(headers):
+                            row_data.extend([''] * (len(headers) - len(row_data)))
+                        elif headers and len(row_data) > len(headers):
+                            row_data = row_data[:len(headers)]
+                            
+                        if row_data:
+                            data_rows.append(row_data)
+                    
+                    # DataFrame 생성
+                    if data_rows:
+                        if not headers:
+                            # 헤더가 없으면 자동 생성
+                            headers = [f"Col_{i}" for i in range(len(data_rows[0]))]
+                        
+                        df = pd.DataFrame(data_rows, columns=headers)
+                        all_sheets[sheet_name] = df
+                        logger.info(f"테이블 {sheet_name} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+        
+        # 1.2 SynapDocViewServer 스타일 테이블 (div 기반 그리드)
+        # 주요 컨테이너 찾기
+        main_containers = soup.find_all('div', id=['mainTable', 'viewerFrame', 'innerWrap'])
+        if not main_containers:
+            main_containers = soup.select('div.mainTable, div.viewerContainer, div.docContent')
+        
+        for container_idx, container in enumerate(main_containers):
+            # div 기반 테이블 구조 찾기
+            rows = container.find_all('div', class_=lambda c: c and ('tr' in c.lower() or 'row' in c.lower()))
+            
+            if not rows:
+                # 클래스 없는 div 찾기 (행으로 추정)
+                rows = container.find_all('div', recursive=False)
+            
+            if rows:
+                logger.info(f"컨테이너 {container_idx+1}에서 {len(rows)}개 행을 찾았습니다")
+                
+                # 섹션 구분을 위한 변수
+                current_section = f"Section_{container_idx+1}"
+                headers = []
+                all_data = []
+                
+                # 첫 번째 행을 헤더로 처리
+                first_row = rows[0]
+                header_cells = first_row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
+                
+                if not header_cells:
+                    # 클래스 없는 div 찾기 (셀로 추정)
+                    header_cells = first_row.find_all('div', recursive=False)
+                
+                for cell in header_cells:
+                    cell_text = cell.get_text(strip=True)
+                    if not cell_text:
+                        cell_text = f"Col_{len(headers)}"
+                    headers.append(cell_text)
+                
+                # 데이터 행 처리
+                for row_idx, row in enumerate(rows[1:], 1):  # 첫 번째 행은 건너뜀
+                    # 섹션 헤더인지 확인
+                    is_section_header = False
+                    special_text = row.get_text(strip=True)
+                    
+                    if row.get('class') and any('style' in c.lower() for c in row.get('class')):
+                        # 새 섹션 시작
+                        if all_data and headers:
+                            # 이전 섹션 데이터 저장
+                            df = pd.DataFrame(all_data, columns=headers)
+                            all_sheets[current_section] = df
+                            logger.info(f"섹션 {current_section} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+                            all_data = []
+                        
+                        current_section = special_text if special_text else f"Section_{container_idx+1}_{row_idx}"
+                        headers = []  # 새 섹션은 새 헤더가 필요
+                        is_section_header = True
+                        continue
+                    
+                    # 헤더가 아직 설정되지 않은 경우
+                    if not headers and not is_section_header:
+                        cells = row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
+                        if not cells:
+                            cells = row.find_all('div', recursive=False)
+                        
+                        for cell in cells:
+                            cell_text = cell.get_text(strip=True)
+                            if not cell_text:
+                                cell_text = f"Col_{len(headers)}"
+                            headers.append(cell_text)
+                        continue
+                    
+                    # 일반 데이터 행 처리
+                    if headers:
+                        cells = row.find_all('div', class_=lambda c: c and ('td' in c.lower() or 'cell' in c.lower()))
+                        if not cells:
+                            cells = row.find_all('div', recursive=False)
+                        
+                        row_data = []
+                        for cell in cells:
+                            cell_text = cell.get_text(strip=True)
+                            row_data.append(cell_text)
+                        
+                        # 헤더 수와 데이터 수 맞추기
+                        if headers and len(row_data) < len(headers):
+                            row_data.extend([''] * (len(headers) - len(row_data)))
+                        elif headers and len(row_data) > len(headers):
+                            row_data = row_data[:len(headers)]
+                            
+                        if row_data:
+                            all_data.append(row_data)
+                
+                # 마지막 섹션 데이터 저장
+                if all_data and headers:
+                    df = pd.DataFrame(all_data, columns=headers)
+                    all_sheets[current_section] = df
+                    logger.info(f"섹션 {current_section} 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+        
+        # 2. 아무 것도 찾지 못한 경우 pandas.read_html() 사용
+        if not all_sheets:
+            logger.info("구조화된 테이블을 찾지 못했습니다. pandas.read_html() 시도...")
+            try:
+                dfs = pd.read_html(html_content)
+                if dfs:
+                    for i, df in enumerate(dfs):
+                        if not df.empty:
+                            all_sheets[f"Table_{i+1}"] = df
+                            logger.info(f"pandas.read_html()로 테이블 {i+1} 추출: {df.shape[0]}행 {df.shape[1]}열")
+            except Exception as read_html_err:
+                logger.warning(f"pandas.read_html() 실패: {str(read_html_err)}")
+        
+        # 3. 결과 정제
+        # 빈 시트 제거 및 데이터 타입 정리
+        refined_sheets = {}
+        for name, df in all_sheets.items():
+            if df.empty:
                 continue
             
-            # 일반 데이터 행 처리
-            if current_headers:  # 헤더가 있을 때만 데이터 행 처리
-                cells = row.find_all('div', class_=lambda c: c and c.startswith('td style'))
-                if not cells:
-                    continue
+            # 데이터 타입 변환 시도 (숫자 및 날짜)
+            for col in df.columns:
+                # 숫자 변환 시도
+                try:
+                    # 쉼표 제거 후 숫자 변환 시도
+                    is_numeric = df[col].astype(str).str.replace(',', '').str.replace(' ', '').str.replace('%', '')
+                    is_numeric = pd.to_numeric(is_numeric, errors='coerce')
                     
-                row_data = []
-                for cell_idx, cell in enumerate(cells):
-                    # 셀 텍스트 추출
-                    cell_text = cell.get_text(strip=True)
-                    # 숫자에서 쉼표 제거
-                    if cell_text and ',' in cell_text and all(c.isdigit() or c in ',-. ' for c in cell_text.replace(',', '')):
-                        cell_text = cell_text.replace(',', '')
-                    row_data.append(cell_text)
-                
-                # 헤더 수와 데이터 수 맞추기
-                if len(row_data) < len(current_headers):
-                    row_data.extend([''] * (len(current_headers) - len(row_data)))
-                elif len(row_data) > len(current_headers):
-                    row_data = row_data[:len(current_headers)]
-                
-                if row_data:
-                    table_data.append(row_data)
+                    # 50% 이상이 숫자면 변환
+                    if is_numeric.notna().mean() > 0.5:
+                        df[col] = is_numeric
+                except:
+                    pass
+            
+            # NaN 값을 빈 문자열로 변환
+            df = df.fillna('')
+            
+            # 중복 행 제거
+            df = df.drop_duplicates().reset_index(drop=True)
+            
+            refined_sheets[name] = df
         
-        # 마지막 섹션 처리
-        if table_data and current_headers:
-            df = pd.DataFrame(table_data, columns=current_headers)
-            if not df.empty:
-                all_sheets[current_section] = df
-                logger.info(f"마지막 섹션 '{current_section}' 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
-        
-        # 결과 확인
-        if not all_sheets:
-            logger.warning("HTML에서 추출된 유효한 데이터 테이블이 없습니다")
+        if not refined_sheets:
+            logger.warning("추출된 유효한 데이터가 없습니다.")
             return None
         
-        logger.info(f"HTML에서 총 {len(all_sheets)}개 테이블 추출 성공")
-        return all_sheets
+        logger.info(f"총 {len(refined_sheets)}개 시트 추출 완료")
+        return refined_sheets
         
     except Exception as e:
         logger.error(f"HTML에서 데이터 추출 중 오류: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
