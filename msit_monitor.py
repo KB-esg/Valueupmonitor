@@ -467,15 +467,8 @@ def take_screenshot(driver, name, crop_area=None):
         logger.error(f"스크린샷 저장 중 오류: {str(e)}")
         return None
 
-def extract_data_from_screenshot(screenshot_path):
-    """스크린샷에서 표 형태의 데이터를 추출하는 함수
-    
-    Args:
-        screenshot_path (str): 스크린샷 파일 경로
-        
-    Returns:
-        list: 추출된 데이터프레임 목록
-    """
+def extract_data_from_screenshot_improved(screenshot_path):
+    """스크린샷에서 표 형태의 데이터를 추출하는 개선된 함수"""
     import os
     import numpy as np
     import pandas as pd
@@ -495,53 +488,80 @@ def extract_data_from_screenshot(screenshot_path):
             logger.error(f"이미지를 로드할 수 없습니다: {screenshot_path}")
             return []
         
+        # 이미지 저장 (원본)
+        cv2.imwrite(f"{screenshot_path}_original.png", image)
+        
+        # 이미지 크기 확인 및 조정
+        height, width, _ = image.shape
+        logger.info(f"원본 이미지 크기: {width}x{height}")
+        
+        # 이미지가 너무 크면 크기 조정 (OCR 성능 향상을 위해)
+        if width > 3000 or height > 3000:
+            scale_factor = min(3000 / width, 3000 / height)
+            new_width = int(width * scale_factor)
+            new_height = int(height * scale_factor)
+            image = cv2.resize(image, (new_width, new_height))
+            logger.info(f"이미지 크기 조정: {new_width}x{new_height}")
+        
         # 그레이스케일 변환
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # 이미지 향상 (대비 증가)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+        # 노이즈 제거 및 선명도 향상
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        sharpen = cv2.filter2D(blur, -1, sharpen_kernel)
         
-        # 노이즈 제거
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        # 적응형 이진화 적용 (로컬 영역별 임계값 사용)
+        thresh = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                      cv2.THRESH_BINARY, 11, 2)
+        
+        # 반전 (검은 배경에 흰색 텍스트)
+        thresh = cv2.bitwise_not(thresh)
+        
+        # 모폴로지 연산으로 노이즈 제거 및 텍스트 강화
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
         
-        # 테이블 경계 감지를 위한 전처리
-        dilated = cv2.dilate(opening, kernel, iterations=3)
+        # 전처리된 이미지 저장 (디버깅용)
+        cv2.imwrite(f"{screenshot_path}_preprocessed.png", opening)
         
-        # 표를 구성하는 선 감지
+        # 테이블 구조 감지를 위한 전처리
+        dilated = cv2.dilate(opening, kernel, iterations=2)
+        
+        # 표의 선 감지
         # 수직선 감지
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, np.array(gray).shape[0] // 50))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, np.array(gray).shape[0] // 40))
         vertical_lines = cv2.erode(dilated, vertical_kernel, iterations=3)
         vertical_lines = cv2.dilate(vertical_lines, vertical_kernel, iterations=5)
         
         # 수평선 감지
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (np.array(gray).shape[1] // 50, 1))
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (np.array(gray).shape[1] // 40, 1))
         horizontal_lines = cv2.erode(dilated, horizontal_kernel, iterations=3)
         horizontal_lines = cv2.dilate(horizontal_lines, horizontal_kernel, iterations=5)
         
         # 수직선과 수평선 병합
         table_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
         
-        # 셀 경계 찾기
-        contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
         # 처리된 이미지 저장 (디버깅용)
-        cv2.imwrite(f"{screenshot_path}_processed.png", table_mask)
+        cv2.imwrite(f"{screenshot_path}_table_mask.png", table_mask)
         
-        # 테이블 구조가 없는 경우 일반 OCR 시도
+        # 셀 경계 찾기
+        contours, hierarchy = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 테이블 구조가 명확하지 않은 경우 다른 방식 시도
         if len(contours) < 10:  # 충분한 셀이 없는 경우
-            logger.info("표 구조를 감지하지 못했습니다. 일반 OCR 진행...")
-            return extract_text_without_table_structure(screenshot_path)
+            logger.info("표 구조가 명확하지 않습니다. 다른 방식으로 시도...")
+            return extract_text_without_table_structure_improved(screenshot_path)
         
         # 감지된 셀을 정렬하여 테이블 구조 복원
         # 먼저 충분히 큰 셀만 필터링
-        min_cell_area = (image.shape[0] * image.shape[1]) / 1000  # 이미지 크기에 비례한 최소 셀 크기
+        min_cell_area = (image.shape[0] * image.shape[1]) / 2000  # 이미지 크기에 비례한 최소 셀 크기
         cell_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_cell_area]
         
         # 셀이 충분하지 않으면 일반 OCR 시도
         if len(cell_contours) < 5:
             logger.info(f"감지된 셀이 너무 적습니다 ({len(cell_contours)}). 일반 OCR 진행...")
-            return extract_text_without_table_structure(screenshot_path)
+            return extract_text_without_table_structure_improved(screenshot_path)
         
         # 셀의 바운딩 박스 추출 및 정렬
         bounding_boxes = []
@@ -551,7 +571,7 @@ def extract_data_from_screenshot(screenshot_path):
         
         # 셀 위치에 따라 행과 열로 그룹화
         # 첫 번째 단계: y 좌표로 행 그룹화
-        y_tolerance = image.shape[0] // 40  # 높이의 2.5% 이내면 같은 행으로 간주
+        y_tolerance = image.shape[0] // 30  # 높이의 3.3% 이내면 같은 행으로 간주
         rows = []
         bounding_boxes.sort(key=lambda b: b[1])  # y 좌표로 정렬
         
@@ -576,7 +596,7 @@ def extract_data_from_screenshot(screenshot_path):
         # 행과 열 수 결정
         if not rows:
             logger.warning("행 그룹화 실패")
-            return extract_text_without_table_structure(screenshot_path)
+            return extract_text_without_table_structure_improved(screenshot_path)
         
         num_rows = len(rows)
         num_cols = max(len(row) for row in rows)
@@ -593,33 +613,71 @@ def extract_data_from_screenshot(screenshot_path):
                     continue
                     
                 # 이미지에서 셀 영역 추출
-                cell_image = gray[y:y+h, x:x+w]
+                cell_image = gray[max(0, y-2):min(gray.shape[0], y+h+2), 
+                                  max(0, x-2):min(gray.shape[1], x+w+2)]
                 
                 # 셀 이미지가 너무 작으면 건너뛰기
-                if cell_image.size == 0 or w < 10 or h < 10:
+                if cell_image.size == 0 or w < 5 or h < 5:
                     continue
                 
-                # 셀 이미지 강화 
+                # 셀 이미지 크기 확인 및 증가 (OCR 정확도 향상)
+                if w < 50 or h < 20:
+                    scale = max(2, min(100/w, 40/h))
+                    cell_image = cv2.resize(cell_image, (0, 0), fx=scale, fy=scale, 
+                                           interpolation=cv2.INTER_CUBIC)
+                
+                # 셀 이미지 향상
+                # 밝기 및 대비 조정
+                cell_pil = Image.fromarray(cell_image)
+                enhancer = ImageEnhance.Contrast(cell_pil)
+                cell_pil = enhancer.enhance(2.0)  # 대비 증가
+                
+                enhancer = ImageEnhance.Brightness(cell_pil)
+                cell_pil = enhancer.enhance(1.1)  # 밝기 약간 증가
+                
+                # 이진화
+                cell_image = np.array(cell_pil)
                 _, cell_thresh = cv2.threshold(cell_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 
-                # Tesseract OCR 구성 (숫자 및 텍스트를 모두 포함하는 페이지 분할 모드)
-                custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 6'
+                # 셀 이미지 저장 (디버깅용 - 처음 10개 셀만)
+                if i < 3 and j < 3:
+                    cv2.imwrite(f"{screenshot_path}_cell_{i}_{j}.png", cell_thresh)
                 
-                # 셀 내용이 주로 숫자인 경우 특수 구성
+                # 숫자 셀인지 확인 (숫자와 .,- 문자만 포함)
+                is_numeric_cell = False
                 if j > 0:  # 첫 번째 열이 아닌 경우 (보통 헤더는 텍스트, 값은 숫자)
-                    custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 6 -c tessedit_char_whitelist="0123456789,.-% "' 
+                    is_numeric_cell = True
+                
+                # Tesseract OCR 구성
+                if is_numeric_cell:
+                    # 숫자 인식에 최적화된 설정
+                    custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 7 -c tessedit_char_whitelist="0123456789,.-%() "'
+                else:
+                    # 텍스트 인식 설정 (페이지 분할 모드 조정)
+                    custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 6'
                 
                 # OCR 실행
-                text = pytesseract.image_to_string(cell_thresh, lang='kor+eng', config=custom_config).strip()
-                
-                # 공백 및 개행 정리
-                text = ' '.join(text.split())
-                
-                # 추출된 텍스트가 있으면 저장
-                if text:
-                    row_data[j] = text
+                try:
+                    # 한국어+영어 언어 팩 사용
+                    text = pytesseract.image_to_string(cell_thresh, lang='kor+eng', config=custom_config).strip()
+                    
+                    # 공백 및 개행 정리
+                    text = ' '.join(text.split())
+                    
+                    # 추출된 텍스트가 있으면 저장
+                    if text:
+                        row_data[j] = text
+                except Exception as ocr_err:
+                    logger.warning(f"셀 OCR 오류 (행:{i} 열:{j}): {str(ocr_err)}")
             
-            table_data.append(row_data)
+            # 비어있지 않은 행만 추가
+            if any(cell.strip() for cell in row_data):
+                table_data.append(row_data)
+        
+        # 비어 있는 경우 일반 OCR 시도
+        if not table_data:
+            logger.warning("셀 데이터 추출 실패, 일반 OCR 시도")
+            return extract_text_without_table_structure_improved(screenshot_path)
         
         # Pandas DataFrame 생성
         df = pd.DataFrame(table_data)
@@ -631,7 +689,8 @@ def extract_data_from_screenshot(screenshot_path):
             
             # 첫 행이 헤더인지 확인 (모든 값이 있고 숫자가 아닌 경우)
             first_row = df.iloc[0].fillna('')
-            if all(first_row) and not any(cell.replace(',', '').replace('.', '').isdigit() for cell in first_row if cell):
+            if all(first_row) and not any(cell.replace(',', '').replace('.', '').replace('-', '').isdigit() 
+                                         for cell in first_row if cell):
                 # 첫 행을 헤더로 설정
                 headers = first_row.tolist()
                 df = df.iloc[1:].reset_index(drop=True)
@@ -639,6 +698,19 @@ def extract_data_from_screenshot(screenshot_path):
         
         # 빈 열 제거
         df = df.loc[:, df.notna().any()]
+        df = df.loc[:, ~(df == '').all()]
+        
+        # 데이터프레임 클리닝
+        for col in df.columns:
+            # 숫자 열 타입 변환 시도
+            try:
+                # 숫자로만 구성된 열인지 확인 (쉼표 및 소수점 제외)
+                if df[col].dtype == 'object':
+                    # 쉼표 제거 후 숫자 변환 시도
+                    df[col] = df[col].str.replace(',', '').str.replace('−', '-')
+                    df[col] = pd.to_numeric(df[col], errors='ignore')
+            except:
+                pass
         
         # 결과 저장
         logger.info(f"표 데이터 추출 완료: {df.shape[0]}행 {df.shape[1]}열")
@@ -647,107 +719,229 @@ def extract_data_from_screenshot(screenshot_path):
     except Exception as e:
         logger.error(f"표 데이터 추출 중 오류: {str(e)}")
         # 오류 발생 시 일반 OCR 시도
-        return extract_text_without_table_structure(screenshot_path)
+        return extract_text_without_table_structure_improved(screenshot_path)
 
 
-def extract_text_without_table_structure(screenshot_path):
-    """표 구조 없이 일반 OCR을 사용하여 텍스트 추출 및 표 형태로 변환
-    
-    Args:
-        screenshot_path (str): 스크린샷 파일 경로
-        
-    Returns:
-        list: 하나의 데이터프레임을 포함하는 목록
-    """
+
+def extract_text_without_table_structure_improved(screenshot_path):
+    """표 구조 없이 일반 OCR을 사용하여 텍스트 추출 및 표 형태로 변환 (개선된 버전)"""
     import pandas as pd
+    import cv2
     import pytesseract
-    from PIL import Image, ImageEnhance
+    from PIL import Image, ImageEnhance, ImageFilter
+    import numpy as np
     import logging
     import re
     
     logger = logging.getLogger('msit_monitor')
     
     try:
-        logger.info(f"일반 OCR로 텍스트 추출 시작: {screenshot_path}")
+        logger.info(f"개선된 일반 OCR로 텍스트 추출 시작: {screenshot_path}")
         
-        # 이미지 로드 및 전처리
-        image = Image.open(screenshot_path)
-        
-        # 이미지 향상
-        enhancer = ImageEnhance.Contrast(image)
-        enhanced_image = enhancer.enhance(1.5)  # 대비 증가
-        
-        # OCR 설정 (한국어 및 영어)
-        custom_config = r'-l kor+eng --oem 1 --psm 6'
-        
-        # OCR 실행
-        text = pytesseract.image_to_string(enhanced_image, config=custom_config)
-        logger.info(f"추출된 텍스트 (처음 200자): {text[:200]}")
-        
-        # 줄 단위로 분리
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        
-        # 표 형태 데이터 추출 시도
-        table_data = []
-        
-        # 표 구조 감지 (여러 구분자 시도)
-        for line in lines:
-            # 일반적인 공백 패턴으로 분리
-            parts = re.split(r'\s{2,}', line)
-            if len(parts) >= 2:
-                table_data.append(parts)
-                continue
-            
-            # 탭 문자로 분리
-            parts = line.split('\t')
-            if len(parts) >= 2:
-                table_data.append(parts)
-                continue
-            
-            # 기타 구분자 시도
-            for separator in ['|', ';', ',']:
-                if separator in line:
-                    parts = [p.strip() for p in line.split(separator)]
-                    if len(parts) >= 2:
-                        table_data.append(parts)
-                        break
-            
-            # 구분자를 찾지 못한 경우 단일 열로 추가
-            if not table_data or table_data[-1] != parts:
-                table_data.append([line])
-        
-        # 데이터가 충분한지 확인
-        if not table_data:
-            logger.warning("추출된 표 데이터가 없습니다")
+        # 이미지 로드
+        image = cv2.imread(screenshot_path)
+        if image is None:
+            logger.error(f"이미지를 로드할 수 없습니다: {screenshot_path}")
             return []
         
-        # 열 수 표준화
-        max_cols = max(len(row) for row in table_data)
-        normalized_data = []
-        for row in table_data:
-            # 부족한 열은 빈 문자열로 채움
-            normalized_data.append(row + [''] * (max_cols - len(row)))
+        # 이미지 전처리 (더 강화된 버전)
+        # 그레이스케일 변환
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # DataFrame 생성
-        df = pd.DataFrame(normalized_data)
+        # 이미지 크기 확인
+        height, width = gray.shape
+        logger.info(f"이미지 크기: {width}x{height}")
         
-        # 첫 행이 헤더인지 확인
-        if len(normalized_data) > 1:
-            first_row = df.iloc[0]
-            if all(first_row.astype(str).str.strip() != ''):
-                headers = first_row.tolist()
-                df = df.iloc[1:].reset_index(drop=True)
-                df.columns = headers
+        # 이미지 크기가 너무 작으면 확대
+        if width < 1000 or height < 1000:
+            scale_factor = max(1000 / width, 1000 / height)
+            gray = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor, 
+                             interpolation=cv2.INTER_CUBIC)
+            logger.info(f"이미지 확대: {scale_factor}배")
         
-        # 빈 열 제거
-        df = df.loc[:, ~df.isna().all()]
-        df = df.loc[:, ~(df == '').all()]
+        # 노이즈 제거
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
         
-        logger.info(f"일반 OCR로 데이터 추출 완료: {df.shape[0]}행 {df.shape[1]}열")
-        return [df]
+        # 선명도 향상
+        sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        sharpen = cv2.filter2D(blur, -1, sharpen_kernel)
+        
+        # 이진화 (적응형 임계값)
+        binary = cv2.adaptiveThreshold(sharpen, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                      cv2.THRESH_BINARY, 15, 8)
+        
+        # 잡음 제거를 위한 모폴로지 연산
+        kernel = np.ones((2, 2), np.uint8)
+        opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        
+        # 전처리된 이미지 저장 (디버깅용)
+        cv2.imwrite(f"{screenshot_path}_ocr_preprocessed.png", opening)
+        
+        # 전처리된 이미지를 PIL 이미지로 변환
+        pil_img = Image.fromarray(opening)
+        
+        # 대비 향상
+        enhancer = ImageEnhance.Contrast(pil_img)
+        enhanced_img = enhancer.enhance(1.5)
+        
+        # 이미지 분할 및 테이블 탐지 시도
+        height, width = opening.shape
+        
+        # 이미지를 여러 부분으로 분할
+        num_vertical_splits = 2
+        num_horizontal_splits = 3
+        segments = []
+        
+        vertical_split_size = height // num_vertical_splits
+        horizontal_split_size = width // num_horizontal_splits
+        
+        for v in range(num_vertical_splits):
+            for h in range(num_horizontal_splits):
+                y_start = v * vertical_split_size
+                y_end = min((v + 1) * vertical_split_size, height)
+                x_start = h * horizontal_split_size
+                x_end = min((h + 1) * horizontal_split_size, width)
+                
+                segment = opening[y_start:y_end, x_start:x_end]
+                segments.append((segment, (y_start, x_start)))
+        
+        # 각 세그먼트에 대해 OCR 실행
+        all_tables = []
+        
+        for idx, (segment, origin) in enumerate(segments):
+            y_origin, x_origin = origin
+            
+            # 세그먼트 저장 (디버깅용)
+            cv2.imwrite(f"{screenshot_path}_segment_{idx}.png", segment)
+            
+            # 세그먼트에서 OCR 실행
+            try:
+                # 한국어+영어 언어 팩 사용, 페이지 레이아웃 모드
+                custom_config = r'--oem 1 --psm 6 -l kor+eng'
+                text = pytesseract.image_to_string(segment, config=custom_config)
+                
+                # 줄 단위로 분리
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                # 탭, 공백으로 분리된 항목을 기반으로 데이터 추출
+                rows = []
+                for line in lines:
+                    # 공백이 연속된 패턴을 기준으로 분리
+                    parts = re.split(r'\s{2,}', line)
+                    if len(parts) >= 2:
+                        rows.append(parts)
+                
+                # 세그먼트에서 표 데이터가 추출되었으면 추가
+                if rows:
+                    # 열 수 표준화
+                    max_cols = max(len(row) for row in rows)
+                    normalized_rows = []
+                    for row in rows:
+                        normalized_rows.append(row + [''] * (max_cols - len(row)))
+                    
+                    # 데이터프레임 생성
+                    df = pd.DataFrame(normalized_rows)
+                    
+                    # 첫 행을 헤더로 사용할지 확인
+                    if len(normalized_rows) > 1:
+                        first_row = df.iloc[0]
+                        if not first_row.astype(str).str.contains(r'^\d+$').any():
+                            headers = first_row.tolist()
+                            df = df.iloc[1:].reset_index(drop=True)
+                            df.columns = headers
+                    
+                    # 빈 열 제거
+                    df = df.loc[:, ~df.isna().all()]
+                    df = df.loc[:, ~(df == '').all()]
+                    
+                    if not df.empty and df.shape[1] >= 2:
+                        all_tables.append(df)
+                        logger.info(f"세그먼트 {idx}: {df.shape[0]}행 {df.shape[1]}열 표 추출")
+            except Exception as segment_err:
+                logger.warning(f"세그먼트 {idx} OCR 오류: {str(segment_err)}")
+        
+        # 전체 이미지에 대해 일반 OCR 추가 시도
+        try:
+            custom_config = r'--oem 1 --psm 6 -l kor+eng'
+            text = pytesseract.image_to_string(enhanced_img, config=custom_config)
+            
+            # 줄 단위로 분리하고, 일정한 구분자 패턴 탐지
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            
+            # 구분자 패턴 탐지
+            delimiter_candidates = [r'\s{2,}', '\t', '|', ';']
+            best_delimiter = None
+            max_columns = 0
+            
+            for delimiter in delimiter_candidates:
+                # 각 줄을 구분자로 분리하고 열 수 계산
+                column_counts = [len(re.split(delimiter, line)) for line in lines]
+                avg_columns = sum(column_counts) / len(column_counts) if column_counts else 0
+                
+                # 구분자가 일관되게 여러 열로 분리하면 선택
+                if avg_columns > max_columns:
+                    max_columns = avg_columns
+                    best_delimiter = delimiter
+            
+            if best_delimiter and max_columns >= 2:
+                # 선택된 구분자로 데이터 추출
+                rows = []
+                for line in lines:
+                    parts = re.split(best_delimiter, line)
+                    if len(parts) >= 2:
+                        rows.append(parts)
+                
+                if rows:
+                    # 열 수 표준화
+                    max_cols = max(len(row) for row in rows)
+                    normalized_rows = []
+                    for row in rows:
+                        normalized_rows.append(row + [''] * (max_cols - len(row)))
+                    
+                    # 데이터프레임 생성
+                    df = pd.DataFrame(normalized_rows)
+                    
+                    # 첫 행을 헤더로 사용할지 확인
+                    if len(normalized_rows) > 1:
+                        first_row = df.iloc[0]
+                        if not first_row.astype(str).str.contains(r'^\d+$').any():
+                            headers = first_row.tolist()
+                            df = df.iloc[1:].reset_index(drop=True)
+                            df.columns = headers
+                    
+                    # 빈 열 제거
+                    df = df.loc[:, ~df.isna().all()]
+                    df = df.loc[:, ~(df == '').all()]
+                    
+                    if not df.empty and df.shape[1] >= 2:
+                        all_tables.append(df)
+                        logger.info(f"전체 이미지: {df.shape[0]}행 {df.shape[1]}열 표 추출")
+        except Exception as full_ocr_err:
+            logger.warning(f"전체 이미지 OCR 오류: {str(full_ocr_err)}")
+        
+        # 추출된 테이블이 없으면 최소한의 구조화된 데이터 반환
+        if not all_tables:
+            logger.warning("추출된 표 데이터가 없습니다. 기본 형식 반환")
+            
+            # 추출된 텍스트에서 최소한의 표 구조 생성
+            try:
+                custom_config = r'--oem 1 --psm 6 -l kor+eng'
+                text = pytesseract.image_to_string(enhanced_img, config=custom_config)
+                
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                if lines:
+                    # 최소한의 데이터프레임 생성
+                    df = pd.DataFrame({'OCR 텍스트': lines})
+                    all_tables.append(df)
+                    logger.info(f"기본 형식으로 {len(lines)}행 1열 데이터 생성")
+            except Exception as fallback_err:
+                logger.error(f"기본 형식 생성 오류: {str(fallback_err)}")
+        
+        logger.info(f"개선된 일반 OCR로 {len(all_tables)}개 테이블 추출 완료")
+        return all_tables
         
     except Exception as e:
-        logger.error(f"일반 OCR 텍스트 추출 중 오류: {str(e)}")
+        logger.error(f"개선된 일반 OCR 텍스트 추출 중 오류: {str(e)}")
         # 최소한의 빈 데이터프레임 반환
         return [pd.DataFrame({'OCR 실패': ['데이터를 추출할 수 없습니다']})]
 
@@ -1549,7 +1743,7 @@ def try_ajax_access(driver, post):
         return None
         
 def create_placeholder_dataframe(post_info):
-    """데이터 추출 실패 시 기본 데이터프레임 생성"""
+    """데이터 추출 실패 시 기본 데이터프레임 생성 (개선됨)"""
     try:
         # 날짜 정보 추출
         date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
@@ -1562,28 +1756,27 @@ def create_placeholder_dataframe(post_info):
             
             # 기본 데이터프레임 생성
             df = pd.DataFrame({
-                '구분': [f'{year}년 {month}월 통계'],
-                '값': ['데이터를 추출할 수 없습니다'],
-                '비고': [f'{post_info["title"]} - 접근 오류'],
-                '링크': [post_info.get('url', '링크 없음')]
+                '구분': [f'{year}년 {month}월 통계', '데이터 날짜', '원본 파일'],
+                '값': ['데이터를 추출할 수 없습니다', f'{year}년 {month}월말 기준', report_type],
+                '비고': [f'{post_info["title"]} - 접근 오류', '직접 웹사이트 확인 필요', post_info.get('url', '링크 없음')]
             })
             
             logger.info(f"플레이스홀더 데이터프레임 생성: {year}년 {month}월 {report_type}")
             return df
             
         return pd.DataFrame({
-            '구분': ['알 수 없음'],
-            '값': ['데이터 추출 실패'],
-            '비고': [f'게시물: {post_info["title"]} - 날짜 정보 없음']
+            '구분': ['알 수 없음', '게시물 제목'],
+            '값': ['데이터 추출 실패', post_info.get('title', '제목 없음')],
+            '비고': [f'게시물: {post_info.get("title", "제목 없음")} - 날짜 정보 없음', post_info.get('url', '링크 없음')]
         })  # 날짜 정보가 없으면 최소 정보 포함
         
     except Exception as e:
         logger.error(f"플레이스홀더 데이터프레임 생성 중 오류: {str(e)}")
         # 오류 발생 시도 최소한의 정보 포함
         return pd.DataFrame({
-            '구분': ['오류 발생'],
-            '업데이트 상태': ['데이터프레임 생성 실패'],
-            '비고': [f'오류: {str(e)}']
+            '구분': ['오류 발생', '오류 타입'],
+            '업데이트 상태': ['데이터프레임 생성 실패', str(type(e).__name__)],
+            '비고': [f'오류: {str(e)}', f'게시물: {post_info.get("title", "제목 없음")}']
         })
 
 
@@ -1607,13 +1800,22 @@ def access_iframe_with_ocr_fallback(driver, file_params):
     logger.info("iframe 직접 접근 실패, OCR 접근법 시도")
     
     try:
+        # 현재 페이지 HTML 저장 (디버깅용)
+        html_save_path = f"html_content/document_view_{int(time.time())}.html"
+        try:
+            with open(html_save_path, 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            logger.info(f"현재 페이지 HTML 저장: {html_save_path}")
+        except Exception as html_err:
+            logger.warning(f"HTML 저장 중 오류: {str(html_err)}")
+        
         # 현재 페이지 스크린샷 캡처
-        screenshot_path = f"document_view_ocr_{int(time.time())}.png"
+        screenshot_path = f"screenshots/document_view_ocr_{int(time.time())}.png"
         driver.save_screenshot(screenshot_path)
         logger.info(f"OCR용 스크린샷 저장: {screenshot_path}")
         
-        # OCR을 통한 데이터 추출
-        ocr_data_list = extract_data_from_screenshot(screenshot_path)
+        # OCR을 통한 데이터 추출 (개선된 함수 사용)
+        ocr_data_list = extract_data_from_screenshot_improved(screenshot_path)
         
         if ocr_data_list:
             # 결과 모으기
@@ -1636,7 +1838,7 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         return None
 
 def access_iframe_direct(driver, file_params):
-    """iframe에 직접 접근하여 데이터 추출"""
+    """iframe에 직접 접근하여 데이터 추출 (개선된 버전)"""
     if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
         logger.error("파일 파라미터가 없습니다.")
         return None
@@ -1648,25 +1850,37 @@ def access_iframe_direct(driver, file_params):
     view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
     logger.info(f"바로보기 URL: {view_url}")
     
+    # 현재 URL 저장 (나중에 복귀용)
+    original_url = driver.current_url
+    
     # 여러 번 재시도
     max_retries = 3
     for attempt in range(max_retries):
         try:
             # 페이지 로드
             driver.get(view_url)
-            time.sleep(5)  # 초기 대기
+            
+            # 초기 대기 (더 긴 대기 시간)
+            time.sleep(5)
             
             # 현재 URL 확인
             current_url = driver.current_url
             logger.info(f"현재 URL: {current_url}")
-           
-            # 스크린샷 저장
-            take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
             
-            # 현재 페이지 스크린샷 저장 (디버깅용)
+            # HTML 파일 저장 (디버깅용)
+            html_path = f"html_content/document_view_{atch_file_no}_{file_ord}.html"
             try:
-                driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
-                logger.info(f"문서 뷰어 스크린샷 저장: document_view_{atch_file_no}_{file_ord}.png")
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(driver.page_source)
+                logger.info(f"HTML 저장: {html_path}")
+            except Exception as html_err:
+                logger.warning(f"HTML 저장 중 오류: {str(html_err)}")
+            
+            # 스크린샷 저장
+            screenshot_path = f"screenshots/iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}.png"
+            try:
+                driver.save_screenshot(screenshot_path)
+                logger.info(f"스크린샷 저장: {screenshot_path}")
             except Exception as ss_err:
                 logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
             
@@ -1694,41 +1908,136 @@ def access_iframe_direct(driver, file_params):
                     for handle in window_handles:
                         if handle != original_handle:
                             driver.switch_to.window(handle)
+                            logger.info(f"새 창으로 전환 성공: {driver.current_url}")
+                            
+                            # 추가 스크린샷 저장
+                            driver.save_screenshot(f"screenshots/new_window_{atch_file_no}_{file_ord}.png")
                             break
                 
-                # 시트 탭 찾기
-                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                # 페이지 완전 로드 대기 (JavaScript 완료)
+                logger.info("문서 뷰어 JavaScript 로드 완료 대기...")
+                try:
+                    # JavaScript 로드 완료 확인
+                    WebDriverWait(driver, 30).until(
+                        lambda d: d.execute_script('return document.readyState') == 'complete'
+                    )
+                    logger.info("문서 뷰어 페이지 로드 완료")
+                    
+                    # 추가 대기 (Synap 뷰어 초기화 대기)
+                    time.sleep(5)
+                except Exception as js_err:
+                    logger.warning(f"JavaScript 로드 대기 중 오류: {str(js_err)}")
+                
+                # 시트 탭 찾기 시도
+                try:
+                    sheet_tabs = WebDriverWait(driver, 15).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".sheet-list__sheet-tab"))
+                    )
+                    logger.info(f"시트 탭 {len(sheet_tabs)}개 감지됨")
+                except TimeoutException:
+                    sheet_tabs = []
+                    logger.info("시트 탭을 찾을 수 없습니다. 단일 시트로 처리합니다.")
+                
                 if sheet_tabs:
-                    logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
+                    # 멀티 시트 처리
                     all_sheets = {}
                     
                     for i, tab in enumerate(sheet_tabs):
                         sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
                         logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
                         
+                        # 스크린샷 캡처 (탭 클릭 전)
+                        try:
+                            driver.save_screenshot(f"screenshots/before_tab_{i+1}_{atch_file_no}_{file_ord}.png")
+                        except Exception as pre_ss_err:
+                            logger.warning(f"탭 클릭 전 스크린샷 저장 중 오류: {str(pre_ss_err)}")
+                        
                         # 첫 번째가 아닌 시트는 클릭하여 전환
                         if i > 0:
                             try:
-                                tab.click()
-                                time.sleep(3)  # 시트 전환 대기
+                                # JavaScript로 클릭 (더 안정적)
+                                driver.execute_script("arguments[0].click();", tab)
+                                logger.info(f"JavaScript로 시트 탭 '{sheet_name}' 클릭")
+                                
+                                # 시트 전환 대기 (더 긴 대기 시간)
+                                time.sleep(5)
                             except Exception as click_err:
                                 logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
                                 continue
                         
+                        # 스크린샷 캡처 (탭 클릭 후)
                         try:
-                            # iframe 찾기
-                            iframe = WebDriverWait(driver, 40).until(
-                                EC.presence_of_element_located((By.ID, "innerWrap"))
-                            )
+                            driver.save_screenshot(f"screenshots/after_tab_{i+1}_{atch_file_no}_{file_ord}.png")
+                        except Exception as post_ss_err:
+                            logger.warning(f"탭 클릭 후 스크린샷 저장 중 오류: {str(post_ss_err)}")
+                        
+                        # HTML 소스 저장 (각 시트별)
+                        try:
+                            sheet_html_path = f"html_content/sheet_{i+1}_{sheet_name}_{atch_file_no}_{file_ord}.html"
+                            with open(sheet_html_path, 'w', encoding='utf-8') as f:
+                                f.write(driver.page_source)
+                            logger.info(f"시트 '{sheet_name}' HTML 저장: {sheet_html_path}")
+                        except Exception as html_err:
+                            logger.warning(f"시트 HTML 저장 중 오류: {str(html_err)}")
+                        
+                        try:
+                            # iframe 찾기 (여러 선택자 시도)
+                            iframe = None
+                            iframe_selectors = ["#innerWrap", "iframe#innerWrap", "iframe[name='innerWrap']", 
+                                               "iframe", ".viewer-inner iframe"]
+                            
+                            for selector in iframe_selectors:
+                                try:
+                                    iframe_elements = WebDriverWait(driver, 10).until(
+                                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                                    )
+                                    if iframe_elements:
+                                        iframe = iframe_elements[0]
+                                        logger.info(f"iframe 요소 발견 (선택자: {selector})")
+                                        break
+                                except:
+                                    continue
+                            
+                            if not iframe:
+                                logger.warning(f"시트 '{sheet_name}'에서 iframe을 찾을 수 없습니다.")
+                                continue
                             
                             # iframe으로 전환
                             driver.switch_to.frame(iframe)
+                            logger.info(f"iframe으로 전환 성공")
+                            
+                            # iframe 내부 스크린샷
+                            try:
+                                driver.save_screenshot(f"screenshots/iframe_inside_{i+1}_{sheet_name}.png")
+                                logger.info(f"iframe 내부 스크린샷 저장 완료")
+                            except Exception as iframe_ss_err:
+                                logger.warning(f"iframe 내부 스크린샷 저장 중 오류: {str(iframe_ss_err)}")
+                            
+                            # iframe 내부 HTML 저장
+                            try:
+                                iframe_html_path = f"html_content/iframe_{i+1}_{sheet_name}.html"
+                                with open(iframe_html_path, 'w', encoding='utf-8') as f:
+                                    f.write(driver.page_source)
+                                logger.info(f"iframe 내부 HTML 저장: {iframe_html_path}")
+                            except Exception as iframe_html_err:
+                                logger.warning(f"iframe HTML 저장 중 오류: {str(iframe_html_err)}")
                             
                             # 페이지 소스 가져오기
                             iframe_html = driver.page_source
                             
-                            # 테이블 추출
-                            df = extract_table_from_html(iframe_html)
+                            # 표 추출 시도
+                            try:
+                                # 직접 DOM에서 표 추출 (더 정확한 방법)
+                                df = extract_table_from_dom(driver)
+                                
+                                if df is None or df.empty:
+                                    # DOM 추출 실패 시 HTML 파싱 방식 시도
+                                    logger.info("DOM 추출 실패, HTML 파싱 방식 시도")
+                                    df = extract_table_from_html(iframe_html)
+                            except Exception as extract_err:
+                                logger.warning(f"DOM 추출 중 오류: {str(extract_err)}")
+                                # 오류 발생 시 HTML 파싱 방식 시도
+                                df = extract_table_from_html(iframe_html)
                             
                             # 기본 프레임으로 복귀
                             driver.switch_to.default_content()
@@ -1739,19 +2048,14 @@ def access_iframe_direct(driver, file_params):
                             else:
                                 logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
                                 
-                                # 테이블 추출 실패 시 OCR 시도
+                                # 테이블 추출 실패 시 OCR 시도 준비
                                 if CONFIG['ocr_enabled']:
-                                    # 현재 화면 캡처
-                                    ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
-                                    driver.save_screenshot(ocr_screenshot)
-                                    
-                                    # OCR로 데이터 추출
-                                    ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                                    if ocr_data and len(ocr_data) > 0:
-                                        all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
-                                        logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
+                                    # 나중에 OCR 처리를 위해 빈 DataFrame 추가
+                                    all_sheets[f"{sheet_name}_추출실패"] = pd.DataFrame()
+                                    logger.info(f"시트 '{sheet_name}'는 OCR 처리 대상으로 표시됨")
+                                
                         except Exception as iframe_err:
-                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                            logger.error(f"시트 '{sheet_name}' iframe 처리 중 오류: {str(iframe_err)}")
                             try:
                                 # 오류 발생 시 기본 프레임으로 복귀
                                 driver.switch_to.default_content()
@@ -1767,16 +2071,92 @@ def access_iframe_direct(driver, file_params):
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
                         else:
+                            # 마지막 시도에서 실패했을 때, 원래 URL로 복귀
+                            driver.get(original_url)
                             return None
                 else:
+                    # 단일 iframe 처리
                     logger.info("시트 탭 없음, 단일 iframe 처리 시도")
                     try:
-                        iframe = WebDriverWait(driver, 40).until(
-                            EC.presence_of_element_located((By.ID, "innerWrap"))
-                        )
+                        # iframe 찾기 (여러 선택자 시도)
+                        iframe = None
+                        iframe_selectors = ["#innerWrap", "iframe#innerWrap", "iframe[name='innerWrap']", 
+                                           "iframe", ".viewer-inner iframe"]
+                        
+                        for selector in iframe_selectors:
+                            try:
+                                iframe_elements = WebDriverWait(driver, 20).until(
+                                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                                )
+                                if iframe_elements:
+                                    iframe = iframe_elements[0]
+                                    logger.info(f"iframe 요소 발견 (선택자: {selector})")
+                                    break
+                            except:
+                                continue
+                        
+                        if not iframe:
+                            logger.warning("iframe을 찾을 수 없습니다.")
+                            
+                            # iframe을 찾지 못하는 경우 전체 페이지 처리 시도
+                            try:
+                                # 페이지 내 표 탐색
+                                tables = driver.find_elements(By.TAG_NAME, "table")
+                                if tables:
+                                    logger.info(f"페이지에서 {len(tables)}개 테이블 감지")
+                                    
+                                    largest_table = max(tables, key=lambda t: len(t.find_elements(By.TAG_NAME, "tr")))
+                                    df = extract_table_from_element(largest_table)
+                                    
+                                    if df is not None and not df.empty:
+                                        logger.info(f"페이지에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                                        return {"기본 시트": df}
+                            except Exception as page_err:
+                                logger.warning(f"페이지 직접 처리 중 오류: {str(page_err)}")
+                            
+                            if attempt < max_retries - 1:
+                                continue
+                            else:
+                                # 마지막 시도에서 실패했을 때 스크린샷 캡처 후 OCR 대비
+                                driver.save_screenshot(f"screenshots/no_iframe_found_{atch_file_no}_{file_ord}.png")
+                                # 원래 URL로 복귀
+                                driver.get(original_url)
+                                return None
+                        
+                        # iframe 전환 전 스크린샷
+                        driver.save_screenshot(f"screenshots/before_iframe_{atch_file_no}_{file_ord}.png")
+                        
+                        # iframe으로 전환
                         driver.switch_to.frame(iframe)
+                        logger.info("iframe으로 전환 성공")
+                        
+                        # iframe 내부 스크린샷 
+                        driver.save_screenshot(f"screenshots/inside_iframe_{atch_file_no}_{file_ord}.png")
+                        
+                        # iframe 내부 HTML 저장
+                        iframe_html_path = f"html_content/iframe_content_{atch_file_no}_{file_ord}.html"
+                        with open(iframe_html_path, 'w', encoding='utf-8') as f:
+                            f.write(driver.page_source)
+                        logger.info(f"iframe 내부 HTML 저장: {iframe_html_path}")
+                        
+                        # HTML 내용 가져오기
                         html_content = driver.page_source
-                        df = extract_table_from_html(html_content)
+                        
+                        # 테이블 추출 시도
+                        try:
+                            # 직접 DOM에서 표 추출 (더 정확한 방법)
+                            df = extract_table_from_dom(driver)
+                            
+                            if df is None or df.empty:
+                                # DOM 추출 실패 시 HTML 파싱 방식 시도
+                                logger.info("DOM 추출 실패, HTML 파싱 방식 시도")
+                                df = extract_table_from_html(html_content)
+                        except Exception as extract_err:
+                            logger.warning(f"DOM 추출 중 오류: {str(extract_err)}")
+                            # 오류 발생 시 HTML 파싱 방식 시도
+                            df = extract_table_from_html(html_content)
+                        
+                        # 기본 프레임으로 복귀
                         driver.switch_to.default_content()
                         
                         if df is not None and not df.empty:
@@ -1787,20 +2167,17 @@ def access_iframe_direct(driver, file_params):
                             
                             # OCR 시도
                             if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
-                                # 현재 화면 캡처
-                                ocr_screenshot = f"single_iframe_{int(time.time())}.png"
-                                driver.save_screenshot(ocr_screenshot)
-                                
-                                # OCR로 데이터 추출
-                                ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                                if ocr_data and len(ocr_data) > 0:
-                                    logger.info(f"OCR로 데이터 추출 성공")
-                                    return {"OCR 추출": ocr_data[0]}
+                                logger.info("iframe 데이터 추출 실패, OCR 처리 준비")
+                                # 원래 URL로 복귀
+                                driver.get(original_url)
+                                return None
                             
                             if attempt < max_retries - 1:
                                 logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                                 continue
                             else:
+                                # 원래 URL로 복귀
+                                driver.get(original_url)
                                 return None
                     except Exception as iframe_err:
                         logger.error(f"단일 iframe 처리 중 오류: {str(iframe_err)}")
@@ -1813,9 +2190,12 @@ def access_iframe_direct(driver, file_params):
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
                         else:
+                            # 원래 URL로 복귀
+                            driver.get(original_url)
                             return None
             else:
-                logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                # 일반 HTML 페이지 처리
+                logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지로 처리")
                 try:
                     # 현재 창 핸들 저장 (팝업이 있을 수 있음)
                     original_handle = driver.current_window_handle
@@ -1827,34 +2207,80 @@ def access_iframe_direct(driver, file_params):
                         for handle in window_handles:
                             if handle != original_handle:
                                 driver.switch_to.window(handle)
+                                logger.info(f"새 창으로 전환 성공: {driver.current_url}")
+                                
+                                # 새 창 스크린샷
+                                driver.save_screenshot(f"screenshots/new_window_html_{atch_file_no}_{file_ord}.png")
                                 break
                     
-                    # pandas의 read_html 사용
-                    tables = pd.read_html(driver.page_source)
+                    # HTML 내용 저장
+                    html_path = f"html_content/html_page_{atch_file_no}_{file_ord}.html"
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(driver.page_source)
+                    logger.info(f"HTML 저장: {html_path}")
+                    
+                    # 테이블 추출 시도 (다양한 방법)
+                    tables = []
+                    
+                    # 1. DOM으로 직접 추출 (가장 정확)
+                    try:
+                        table_elements = driver.find_elements(By.TAG_NAME, "table")
+                        if table_elements:
+                            logger.info(f"{len(table_elements)}개 테이블 요소 발견")
+                            
+                            # 테이블이 여러 개인 경우 가장 큰 테이블 선택
+                            largest_table = max(table_elements, key=lambda t: len(t.find_elements(By.TAG_NAME, "tr")))
+                            df = extract_table_from_element(largest_table)
+                            
+                            if df is not None and not df.empty:
+                                tables.append(df)
+                                logger.info(f"DOM에서 테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                    except Exception as dom_err:
+                        logger.warning(f"DOM에서 테이블 추출 실패: {str(dom_err)}")
+                    
+                    # 2. pandas의 read_html 사용 (테이블이 없는 경우)
+                    if not tables:
+                        try:
+                            pandas_tables = pd.read_html(driver.page_source)
+                            if pandas_tables:
+                                logger.info(f"pandas.read_html로 {len(pandas_tables)}개 테이블 추출")
+                                
+                                # 가장 큰 테이블 선택
+                                largest_df = max(pandas_tables, key=lambda df: df.size)
+                                tables.append(largest_df)
+                                logger.info(f"pandas 테이블 추출 성공: {largest_df.shape[0]}행 {largest_df.shape[1]}열")
+                        except Exception as pandas_err:
+                            logger.warning(f"pandas.read_html 테이블 추출 실패: {str(pandas_err)}")
+                    
+                    # 3. BeautifulSoup으로 HTML 파싱 (다른 방법이 실패한 경우)
+                    if not tables:
+                        try:
+                            df = extract_table_from_html(driver.page_source)
+                            if df is not None and not df.empty:
+                                tables.append(df)
+                                logger.info(f"BeautifulSoup으로 테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                        except Exception as bs_err:
+                            logger.warning(f"BeautifulSoup 테이블 추출 실패: {str(bs_err)}")
                     
                     if tables:
-                        largest_table = max(tables, key=lambda t: t.size)
-                        logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
-                        return {"기본 테이블": largest_table}
+                        logger.info(f"총 {len(tables)}개 테이블 추출 완료")
+                        return {"기본 테이블": tables[0]}
                     else:
                         logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
                         
                         # OCR 시도
                         if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
-                            # 현재 화면 캡처
-                            ocr_screenshot = f"html_page_{int(time.time())}.png"
-                            driver.save_screenshot(ocr_screenshot)
-                            
-                            # OCR로 데이터 추출
-                            ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                            if ocr_data and len(ocr_data) > 0:
-                                logger.info(f"OCR로 HTML 페이지 데이터 추출 성공")
-                                return {"OCR 추출": ocr_data[0]}
+                            logger.info("HTML 페이지에서 테이블 추출 실패, OCR 처리 준비")
+                            # 원래 URL로 복귀
+                            driver.get(original_url)
+                            return None
                         
                         if attempt < max_retries - 1:
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
                         else:
+                            # 원래 URL로 복귀
+                            driver.get(original_url)
                             return None
                 except Exception as table_err:
                     logger.error(f"HTML 테이블 추출 중 오류: {str(table_err)}")
@@ -1862,6 +2288,8 @@ def access_iframe_direct(driver, file_params):
                         logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                         continue
                     else:
+                        # 원래 URL로 복귀
+                        driver.get(original_url)
                         return None
         
         except Exception as e:
@@ -1869,20 +2297,24 @@ def access_iframe_direct(driver, file_params):
             
             # 디버깅 정보 출력
             try:
-                # HTML 미리보기 출력
-                html_snippet = driver.page_source[:5000]
-                logger.error(f"오류 발생 시 페이지 HTML (first 5000 characters):\n{html_snippet}")
-                
-                # <script> 태그 내용도 별도 출력
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                script_tags = soup.find_all('script')
-                if script_tags:
-                    logger.error("오류 발생 시 <script> 태그 내용:")
-                    for script in script_tags:
-                        logger.error(script.prettify())
-                
+                # HTML 미리보기 출력 (일부만)
+                try:
+                    html_snippet = driver.page_source[:5000]
+                    logger.error(f"오류 발생 시 페이지 HTML (first 5000 characters):\n{html_snippet}")
+                except:
+                    pass
+                    
                 # 기본 프레임으로 복귀
-                driver.switch_to.default_content()
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                    
+                # 디버깅용 스크린샷
+                try:
+                    driver.save_screenshot(f"screenshots/error_{atch_file_no}_{file_ord}_{attempt}.png")
+                except:
+                    pass
             except:
                 pass
             
@@ -1891,11 +2323,135 @@ def access_iframe_direct(driver, file_params):
                 time.sleep(3)
                 continue
             else:
+                # 마지막 시도에서 실패했을 때, 원래 URL로 복귀
+                try:
+                    driver.get(original_url)
+                except:
+                    pass
                 return None
     
+    # 원래 URL로 복귀
+    try:
+        driver.get(original_url)
+    except:
+        pass
+        
     return None
 
+def extract_table_from_element(table_element):
+    """WebElement에서 테이블 데이터 추출"""
+    try:
+        # 모든 행 요소 가져오기
+        rows = table_element.find_elements(By.TAG_NAME, "tr")
+        
+        if not rows:
+            logger.warning("테이블에 행이 없음")
+            return None
+        
+        # 테이블 데이터 추출
+        table_data = []
+        max_cols = 0
+        
+        for row in rows:
+            # 셀 요소 가져오기 (th 또는 td)
+            cells = row.find_elements(By.TAG_NAME, "th") + row.find_elements(By.TAG_NAME, "td")
+            
+            if not cells:
+                continue
+                
+            row_data = []
+            col_idx = 0
+            
+            for cell in cells:
+                # 셀 내용 가져오기
+                cell_text = cell.text.strip()
+                
+                # colspan 처리
+                try:
+                    colspan = int(cell.get_attribute("colspan") or 1)
+                except:
+                    colspan = 1
+                
+                # rowspan은 복잡해서 생략 (기본 추출에 집중)
+                
+                # 열 데이터 추가 (colspan 고려)
+                for _ in range(colspan):
+                    row_data.append(cell_text)
+                    col_idx += 1
+            
+            # 최대 열 수 업데이트
+            max_cols = max(max_cols, len(row_data))
+            
+            # 행 데이터 추가
+            table_data.append(row_data)
+        
+        # 일관된 열 수를 가진 데이터프레임 생성
+        normalized_data = []
+        for row in table_data:
+            # 부족한 열 채우기
+            normalized_data.append(row + [''] * (max_cols - len(row)))
+        
+        # DataFrame 생성
+        df = pd.DataFrame(normalized_data)
+        
+        # 첫 번째 행이 헤더인지 확인 (일반적인 경우)
+        if len(normalized_data) > 1:
+            first_row = df.iloc[0]
+            # 첫 행의 모든 값이 비어있지 않은지 확인
+            if not first_row.isnull().any() and not (first_row == '').any():
+                # 헤더로 사용
+                headers = first_row.tolist()
+                df = df.iloc[1:].reset_index(drop=True)
+                df.columns = headers
+        
+        # 빈 열 제거
+        df = df.loc[:, ~df.isna().all()]
+        df = df.loc[:, ~(df == '').all()]
+        
+        # 데이터 정제
+        df = df.replace(r'^\s*$', np.nan, regex=True)  # 빈 문자열을 NaN으로
+        
+        # 숫자 데이터 타입 변환 시도
+        for col in df.columns:
+            try:
+                # 쉼표 및 기타 문자 제거 후 숫자 변환 시도
+                df[col] = df[col].str.replace(',', '').str.replace('−', '-')
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+            except:
+                pass
+        
+        if df.empty:
+            logger.warning("추출된 데이터프레임이 비어있음")
+            return None
+            
+        logger.info(f"WebElement에서 테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+        return df
+        
+    except Exception as e:
+        logger.error(f"WebElement에서 테이블 추출 중 오류: {str(e)}")
+        return None
 
+
+
+
+def extract_table_from_dom(driver):
+    """Selenium WebDriver를 사용하여 DOM에서 직접 테이블 추출"""
+    try:
+        # 테이블 요소 찾기
+        table_elements = driver.find_elements(By.TAG_NAME, "table")
+        
+        if not table_elements:
+            logger.warning("DOM에서 테이블 요소를 찾을 수 없음")
+            return None
+        
+        # 가장 큰 테이블 선택 (행 수 기준)
+        largest_table = max(table_elements, key=lambda t: len(t.find_elements(By.TAG_NAME, "tr")))
+        
+        return extract_table_from_element(largest_table)
+    
+    except Exception as e:
+        logger.error(f"DOM에서 테이블 추출 중 오류: {str(e)}")
+        return None
 
 
 
@@ -2001,31 +2557,36 @@ def extract_table_from_html(html_content):
         for table in tables:
             data = parse_table(table)
             if data and len(data) >= 2:  # 헤더와 최소 1개의 데이터 행 필요
-                parsed_tables.append((len(data), data))
+                parsed_tables.append((len(data), len(data[0]) if data[0] else 0, data))
         
         if not parsed_tables:
             logger.warning("전처리된 테이블 데이터가 충분하지 않음")
             return None
         
-        # 행 수가 가장 많은 테이블 선택
-        _, largest_table = max(parsed_tables, key=lambda x: x[0])
+        # 행과 열 수를 모두 고려하여 가장 큰 테이블 선택
+        parsed_tables.sort(key=lambda x: (x[0] * x[1]), reverse=True)  # 크기(행*열) 기준 정렬
+        rows, cols, largest_table = parsed_tables[0]
         
         if len(largest_table) < 2:
             logger.warning("테이블 데이터가 충분하지 않음")
             return None
+        
+        logger.info(f"가장 큰 테이블 선택: {rows}행 {cols}열")
         
         # 헤더 행과 데이터 행 준비
         header = largest_table[0]
         data_rows = []
         
         # 데이터 행 정규화 (열 개수 맞추기)
+        max_cols = max(len(row) for row in largest_table)
+        
         for row in largest_table[1:]:
             # 헤더보다 열이 적은 경우 빈 값 추가
-            if len(row) < len(header):
-                row.extend([""] * (len(header) - len(row)))
+            if len(row) < max_cols:
+                row.extend([""] * (max_cols - len(row)))
             # 헤더보다 열이 많은 경우 초과 열 제거
-            elif len(row) > len(header):
-                row = row[:len(header)]
+            elif len(row) > max_cols:
+                row = row[:max_cols]
             
             data_rows.append(row)
         
@@ -2033,6 +2594,11 @@ def extract_table_from_html(html_content):
         unique_headers = []
         header_count = {}
         
+        if len(header) < max_cols:
+            header.extend([""] * (max_cols - len(header)))
+        elif len(header) > max_cols:
+            header = header[:max_cols]
+            
         for h in header:
             if h in header_count:
                 header_count[h] += 1
@@ -2053,12 +2619,336 @@ def extract_table_from_html(html_content):
         # 중복 행 제거
         df = df.drop_duplicates().reset_index(drop=True)
         
-        logger.info(f"테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+        # 데이터 정제
+        df = df.replace(r'^\s*$', np.nan, regex=True)  # 빈 문자열을 NaN으로
+        
+        # 숫자 데이터 타입 변환 시도
+        for col in df.columns:
+            try:
+                # 쉼표 및 기타 문자 제거 후 숫자 변환 시도
+                df[col] = df[col].str.replace(',', '').str.replace('−', '-')
+                df[col] = pd.to_numeric(df[col], errors='ignore')
+            except:
+                pass
+        
+        logger.info(f"HTML에서 테이블 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
         return df
         
     except Exception as e:
         logger.error(f"HTML에서 테이블 추출 중 오류: {str(e)}")
         return None
+
+
+def direct_access_view_link_params(driver, post):
+    """직접 URL 접근을 통한 바로보기 링크 파라미터 추출"""
+    if not post.get('post_id'):
+        logger.error(f"게시물 ID가 없어 접근 불가: {post.get('title', '제목 없음')}")
+        return None
+    
+    post_id = post['post_id']
+    post_url = get_post_url(post_id)
+    
+    logger.info(f"직접 URL 접근: {post_url}")
+    
+    try:
+        # 현재 URL 저장
+        current_url = driver.current_url
+        
+        # 게시물 페이지로 이동
+        driver.get(post_url)
+        
+        # 페이지 로드 대기
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
+            )
+            logger.info("게시물 페이지 로드 완료")
+        except TimeoutException:
+            logger.warning("게시물 페이지 로드 시간 초과")
+        
+        # 스크린샷 저장
+        screenshot_path = f"screenshots/direct_access_{post_id}.png"
+        driver.save_screenshot(screenshot_path)
+        logger.info(f"게시물 페이지 스크린샷 저장: {screenshot_path}")
+        
+        # HTML 저장
+        html_path = f"html_content/direct_access_{post_id}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(driver.page_source)
+        logger.info(f"게시물 페이지 HTML 저장: {html_path}")
+        
+        # 바로보기 링크 찾기
+        view_links = []
+        
+        # 1. 일반적인 '바로보기' 링크
+        try:
+            view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
+            if view_links:
+                logger.info("'바로보기' 링크 발견")
+        except Exception as e1:
+            logger.warning(f"'바로보기' 링크 검색 중 오류: {str(e1)}")
+        
+        # 2. onclick 속성으로 찾기
+        if not view_links:
+            try:
+                all_links = driver.find_elements(By.TAG_NAME, "a")
+                view_links = [link for link in all_links if link.get_attribute('onclick') and 'getExtension_path' in link.get_attribute('onclick')]
+                if view_links:
+                    logger.info("onclick 속성에 'getExtension_path'가 포함된 링크 발견")
+            except Exception as e2:
+                logger.warning(f"onclick 속성 검색 중 오류: {str(e2)}")
+        
+        # 3. 텍스트로 찾기
+        if not view_links:
+            try:
+                all_links = driver.find_elements(By.TAG_NAME, "a")
+                view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+                if view_links:
+                    logger.info("텍스트에 '바로보기'가 포함된 링크 발견")
+            except Exception as e3:
+                logger.warning(f"텍스트 검색 중 오류: {str(e3)}")
+        
+        # 4. class 속성으로 찾기
+        if not view_links:
+            try:
+                view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
+                if view_links:
+                    logger.info("class 속성으로 링크 발견")
+            except Exception as e4:
+                logger.warning(f"class 속성 검색 중 오류: {str(e4)}")
+        
+        # 5. 제목에 포함된 키워드로 관련 링크 찾기
+        if not view_links and '통계' in post['title']:
+            try:
+                all_links = driver.find_elements(By.TAG_NAME, "a")
+                view_links = [link for link in all_links if link.get_attribute('href') and 
+                             any(ext in link.get_attribute('href') for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
+                if view_links:
+                    logger.info("파일 확장자 관련 링크 발견")
+            except Exception as e5:
+                logger.warning(f"파일 확장자 검색 중 오류: {str(e5)}")
+        
+        if view_links:
+            view_link = view_links[0]  # 첫 번째 링크 사용
+            
+            # 링크 정보 출력 (디버깅용)
+            try:
+                onclick_attr = view_link.get_attribute('onclick') or ''
+                href_attr = view_link.get_attribute('href') or ''
+                text_attr = view_link.text or ''
+                
+                logger.info(f"발견된 링크 정보: onclick='{onclick_attr}', href='{href_attr}', text='{text_attr}'")
+            except:
+                pass
+            
+            # onclick 속성에 getExtension_path가 있는 경우
+            onclick_attr = view_link.get_attribute('onclick') or ''
+            if 'getExtension_path' in onclick_attr:
+                match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                if match:
+                    atch_file_no = match.group(1)
+                    file_ord = match.group(2)
+                    
+                    # 날짜 정보 추출
+                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                    if date_match:
+                        year = int(date_match.group(1))
+                        month = int(date_match.group(2))
+                        
+                        logger.info(f"파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}, year={year}, month={month}")
+                        
+                        return {
+                            'atch_file_no': atch_file_no,
+                            'file_ord': file_ord,
+                            'date': {'year': year, 'month': month},
+                            'post_info': post
+                        }
+                    
+                    logger.info(f"파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}")
+                    return {
+                        'atch_file_no': atch_file_no,
+                        'file_ord': file_ord,
+                        'post_info': post
+                    }
+            
+            # 직접 다운로드 URL인 경우
+            href_attr = view_link.get_attribute('href') or ''
+            if href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
+                logger.info(f"직접 다운로드 링크 발견: {href_attr}")
+                
+                # 날짜 정보 추출
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'download_url': href_attr,
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+        
+        # 파일 목록에서 찾기
+        try:
+            file_list_selectors = [
+                ".file_list li",
+                ".filelist li",
+                "div[class*='file'] a",
+                ".download-list a"
+            ]
+            
+            for selector in file_list_selectors:
+                file_items = driver.find_elements(By.CSS_SELECTOR, selector)
+                if file_items:
+                    logger.info(f"파일 목록 발견 ({selector}): {len(file_items)}개 항목")
+                    
+                    for item in file_items:
+                        item_text = item.text.lower()
+                        # 엑셀, 한글, PDF 파일 등 관련 항목 찾기
+                        if any(keyword in item_text for keyword in ['xls', 'xlsx', 'hwp', 'pdf', '통계', '데이터']):
+                            onclick_attr = item.get_attribute('onclick') or ''
+                            if 'getExtension_path' in onclick_attr:
+                                match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                                if match:
+                                    atch_file_no = match.group(1)
+                                    file_ord = match.group(2)
+                                    
+                                    # 날짜 정보 추출
+                                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                                    if date_match:
+                                        year = int(date_match.group(1))
+                                        month = int(date_match.group(2))
+                                        
+                                        logger.info(f"파일 목록에서 파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}, year={year}, month={month}")
+                                        
+                                        return {
+                                            'atch_file_no': atch_file_no,
+                                            'file_ord': file_ord,
+                                            'date': {'year': year, 'month': month},
+                                            'post_info': post
+                                        }
+                                    
+                                    logger.info(f"파일 목록에서 파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}")
+                                    return {
+                                        'atch_file_no': atch_file_no,
+                                        'file_ord': file_ord,
+                                        'post_info': post
+                                    }
+        except Exception as file_list_err:
+            logger.warning(f"파일 목록 검색 중 오류: {str(file_list_err)}")
+        
+        # 직접 하드코딩된 정규식 파싱 시도
+        try:
+            page_source = driver.page_source
+            patterns = [
+                r'getExtension_path\s*\(\s*[\'"](\d+)[\'"],\s*[\'"](\d+)[\'"]',  # 일반적인 패턴
+                r'atchFileNo=(\d+)&fileOrdr=(\d+)',  # URL 파라미터 패턴
+                r'documentView\.do\?atchFileNo=(\d+)&fileOrdr=(\d+)'  # 문서 뷰어 URL 패턴
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, page_source)
+                if matches:
+                    atch_file_no, file_ord = matches[0]
+                    
+                    # 날짜 정보 추출
+                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                    if date_match:
+                        year = int(date_match.group(1))
+                        month = int(date_match.group(2))
+                        
+                        logger.info(f"정규식으로 파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}, year={year}, month={month}")
+                        
+                        return {
+                            'atch_file_no': atch_file_no,
+                            'file_ord': file_ord,
+                            'date': {'year': year, 'month': month},
+                            'post_info': post
+                        }
+                    
+                    logger.info(f"정규식으로 파라미터 추출 성공: atch_file_no={atch_file_no}, file_ord={file_ord}")
+                    return {
+                        'atch_file_no': atch_file_no,
+                        'file_ord': file_ord,
+                        'post_info': post
+                    }
+        except Exception as regex_err:
+            logger.warning(f"정규식 파싱 중 오류: {str(regex_err)}")
+        
+        # 게시물 내용 추출
+        try:
+            content_selectors = [
+                "div.view_cont", 
+                ".view_content", 
+                ".bbs_content",
+                ".bbs_detail_content",
+                "div[class*='view'] div[class*='cont']"
+            ]
+            
+            content = ""
+            for selector in content_selectors:
+                try:
+                    content_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    content = content_elem.text or ""
+                    if content.strip():
+                        logger.info(f"게시물 내용 추출 성공 (길이: {len(content)})")
+                        break
+                except:
+                    continue
+            
+            # 내용에서 AJAX 요청이나 바로보기 파라미터 추출 시도
+            if content:
+                # AJAX 방식 시도
+                ajax_result = try_ajax_access(driver, post)
+                if ajax_result:
+                    logger.info("AJAX 접근 성공")
+                    return ajax_result
+                
+                # 날짜 정보 추출
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'content': content,
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+                
+                return {
+                    'content': content,
+                    'post_info': post
+                }
+            
+        except Exception as content_err:
+            logger.warning(f"내용 추출 중 오류: {str(content_err)}")
+        
+        # 날짜 정보만 추출
+        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+        if date_match:
+            year = int(date_match.group(1))
+            month = int(date_match.group(2))
+            
+            logger.info(f"날짜 정보만 추출: year={year}, month={month}")
+            
+            return {
+                'content': "파라미터를 찾을 수 없음",
+                'date': {'year': year, 'month': month},
+                'post_info': post
+            }
+        
+        logger.warning(f"직접 URL 접근으로 파라미터 추출 실패: {post['title']}")
+        
+        # 원래 URL로 복귀
+        driver.get(current_url)
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"직접 URL 접근 중 오류: {str(e)}")
+        return None
+
 
 def create_placeholder_dataframe(post_info):
     """데이터 추출 실패 시 기본 데이터프레임 생성"""
@@ -2100,23 +2990,34 @@ def create_placeholder_dataframe(post_info):
 
 
 def determine_report_type(title):
-    """게시물 제목에서 보고서 유형 결정"""
+    """게시물 제목에서 보고서 유형 결정 (개선된 버전)"""
+    # 완전 일치 확인
     for report_type in CONFIG['report_types']:
         if report_type in title:
             return report_type
             
-    # 부분 매칭 시도
-    for report_type in CONFIG['report_types']:
-        # 주요 키워드 추출
-        keywords = report_type.split()
-        if any(keyword in title for keyword in keywords if len(keyword) > 1):
+    # 부분 매칭 시도 (키워드 기반)
+    keywords_map = {
+        "이동전화": "이동전화 및 트래픽 통계",
+        "트래픽": "무선데이터 트래픽 통계",
+        "번호이동": "이동전화 및 시내전화 번호이동 현황",
+        "유선통신": "유선통신서비스 가입 현황",
+        "무선통신": "무선통신서비스 가입 현황",
+        "특수부가통신": "특수부가통신사업자현황",
+        "무선데이터": "무선데이터 트래픽 통계",
+        "유무선": "유·무선통신서비스 가입 현황 및 무선데이터 트래픽 통계"
+    }
+    
+    for keyword, report_type in keywords_map.items():
+        if keyword in title:
             return report_type
             
-    return "기타 통신 통계"
+    # 가장 일반적인 보고서 유형 반환
+    return "통신 통계"
 
 
 def update_google_sheets(client, data):
-    """Google Sheets 업데이트"""
+    """Google Sheets 업데이트 (개선된 버전)"""
     if not client or not data:
         logger.error("Google Sheets 업데이트 불가: 클라이언트 또는 데이터 없음")
         return False
@@ -2175,8 +3076,8 @@ def update_google_sheets(client, data):
                 
                 if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
                     # 속도 제한 처리 (지수 백오프)
-                    wait_time = 2 ** retry_count
-                    logger.info(f"API 속도 제한 감지. {wait_time}초 대기 중...")
+                    wait_time = (2 ** retry_count) + random.uniform(0, 1)
+                    logger.info(f"API 속도 제한 감지. {wait_time:.2f}초 대기 중...")
                     time.sleep(wait_time)
                 elif retry_count >= max_retries:
                     logger.error(f"Google Sheets API 오류, 최대 재시도 횟수 초과: {str(api_err)}")
@@ -2213,10 +3114,14 @@ def update_google_sheets(client, data):
         logger.error(f"Google Sheets 업데이트 중 오류: {str(e)}")
         return False
 
-
 def update_single_sheet(spreadsheet, sheet_name, df, date_str):
-    """단일 시트 업데이트"""
+    """단일 시트 업데이트 (개선된 버전)"""
     try:
+        # 시트 이름 정제 (특수문자 제거 및 길이 제한)
+        sheet_name = re.sub(r'[^\w\s가-힣]', '', sheet_name)[:100]  # 100자 제한
+        if not sheet_name:
+            sheet_name = "데이터"  # 기본 시트 이름
+        
         # API 속도 제한 방지를 위한 지연 시간
         time.sleep(1)
         
@@ -2268,16 +3173,23 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
                 })
         
         # 데이터프레임으로 시트 업데이트 (배치 처리)
-        update_sheet_from_dataframe(worksheet, df, col_idx)
+        success = update_sheet_from_dataframe_improved(worksheet, df, col_idx)
         
-        logger.info(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 완료")
-        return True
+        if success:
+            logger.info(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 완료")
+        else:
+            logger.warning(f"워크시트 '{sheet_name}'에 '{date_str}' 데이터 업데이트 실패")
+            
+        return success
         
     except gspread.exceptions.APIError as api_err:
         if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
             logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
             logger.info("대기 후 재시도 중...")
-            time.sleep(5)  # 더 긴 대기 시간
+            
+            # 백오프 시간 (랜덤 요소 추가)
+            wait_time = 5 + random.uniform(0, 3)
+            time.sleep(wait_time)
             
             # 간소화된 방식으로 재시도
             try:
@@ -2299,14 +3211,14 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
                 # 최소한의 데이터만 업데이트
                 if df.shape[0] > 0:
                     first_col_name = df.columns[0]
-                    items = df[first_col_name].astype(str).tolist()[:10]  # 처음 10개 항목
+                    items = df[first_col_name].astype(str).tolist()[:5]  # 처음 5개 항목
                     values = ["업데이트 성공"] * len(items)
                     
                     for i, (item, value) in enumerate(zip(items, values)):
                         row_idx = i + 2  # 헤더 행 이후
                         worksheet.update_cell(row_idx, 1, item)
                         worksheet.update_cell(row_idx, col_idx, value)
-                        time.sleep(1)  # 더 긴 지연 시간
+                        time.sleep(1.5)  # 더 긴 지연 시간
                 
                 logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
                 return True
@@ -2322,8 +3234,10 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str):
         logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
         return False
 
-def update_sheet_from_dataframe(worksheet, df, col_idx):
-    """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
+
+
+def update_sheet_from_dataframe_improved(worksheet, df, col_idx):
+    """데이터프레임으로 워크시트 업데이트 (개선된 배치 처리)"""
     try:
         # 기존 항목 (첫 번째 열) 가져오기
         existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
@@ -2336,8 +3250,9 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
                 item_col = df.columns[0]
                 value_col = df.columns[1]
                 
-                new_items = df[item_col].astype(str).tolist()
-                values = df[value_col].astype(str).tolist()
+                # 항목 값 정제 (공백, 특수문자 등 처리)
+                new_items = df[item_col].astype(str).apply(lambda x: x.strip()).tolist()
+                values = df[value_col].astype(str).apply(lambda x: x.strip()).tolist()
                 
                 # 배치 업데이트 준비
                 cell_updates = []
@@ -2370,29 +3285,55 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
                 # 일괄 업데이트 실행 (API 호출 제한 방지를 위한 분할)
                 if cell_updates:
                     batch_size = 10  # 한 번에 처리할 업데이트 수
+                    
                     for i in range(0, len(cell_updates), batch_size):
                         batch = cell_updates[i:i+batch_size]
                         try:
                             worksheet.batch_update(batch)
                             logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
-                            time.sleep(2)  # API 속도 제한 방지
+                            # 배치 크기에 따라 다른 지연 시간 적용
+                            wait_time = 2 + (len(batch) * 0.1) + random.uniform(0, 1)
+                            time.sleep(wait_time)  # API 속도 제한 방지
                         except gspread.exceptions.APIError as api_err:
                             if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
                                 logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                                time.sleep(10)  # 더 긴 대기
+                                # 지수 백오프 적용
+                                wait_time = 10 + random.uniform(0, 5)
+                                logger.info(f"{wait_time:.2f}초 대기 후 더 작은 배치로 재시도...")
+                                time.sleep(wait_time)
+                                
                                 # 더 작은 배치로 재시도
-                                for update in batch:
+                                sub_batch_size = max(1, batch_size // 2)
+                                for j in range(0, len(batch), sub_batch_size):
+                                    sub_batch = batch[j:j+sub_batch_size]
                                     try:
-                                        worksheet.batch_update([update])
-                                        time.sleep(3)
-                                    except Exception as single_err:
-                                        logger.error(f"단일 업데이트 실패: {str(single_err)}")
+                                        worksheet.batch_update(sub_batch)
+                                        logger.info(f"작은 배치 업데이트 성공 ({len(sub_batch)}개 항목)")
+                                        time.sleep(3 + random.uniform(0, 2))  # 더 긴 대기
+                                    except Exception as sub_err:
+                                        logger.error(f"작은 배치 업데이트 실패: {str(sub_err)}")
+                                        # 단일 업데이트로 마지막 시도
+                                        for update in sub_batch:
+                                            try:
+                                                worksheet.batch_update([update])
+                                                time.sleep(3)
+                                            except Exception as single_err:
+                                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
                             else:
                                 logger.error(f"일괄 업데이트 실패: {str(api_err)}")
+                                return False
                     
                     logger.info(f"{len(cell_updates)}개 셀 업데이트 완료 (새 항목: {len(new_rows)}개)")
-                    
-        return True
+                    return True
+                else:
+                    logger.warning("업데이트할 셀이 없습니다.")
+                    return False
+            else:
+                logger.warning(f"데이터프레임 열이 부족합니다 ({df.shape[1]} 열)")
+                return False
+        else:
+            logger.warning("데이터프레임에 행이 없습니다.")
+            return False
         
     except Exception as e:
         logger.error(f"데이터프레임으로 워크시트 업데이트 중 오류: {str(e)}")
@@ -2400,7 +3341,7 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
 
 
 async def send_telegram_message(posts, data_updates=None):
-    """텔레그램으로 알림 메시지 전송"""
+    """텔레그램으로 알림 메시지 전송 (개선된 버전)"""
     if not posts and not data_updates:
         logger.info("알림을 보낼 내용이 없습니다")
         return
@@ -2433,8 +3374,8 @@ async def send_telegram_message(posts, data_updates=None):
         if data_updates:
             message += "📊 *Google Sheets 데이터 업데이트*\n\n"
             
-            # 최대 10개 업데이트만 표시
-            displayed_updates = data_updates[:10]
+            # 최대 5개 업데이트만 표시
+            displayed_updates = data_updates[:5]
             for update in displayed_updates:
                 post_info = update['post_info']
                 
@@ -2468,8 +3409,8 @@ async def send_telegram_message(posts, data_updates=None):
                 message += "✅ 업데이트 완료\n\n"
             
             # 추가 업데이트가 있는 경우 표시
-            if len(data_updates) > 10:
-                message += f"_...외 {len(data_updates) - 10}개 업데이트_\n\n"
+            if len(data_updates) > 5:
+                message += f"_...외 {len(data_updates) - 5}개 업데이트_\n\n"
         
         # 스프레드시트 정보 추가
         if data_updates and CONFIG['spreadsheet_id']:
@@ -2524,7 +3465,7 @@ async def send_telegram_message(posts, data_updates=None):
 
 
 async def run_monitor(days_range=4, check_sheets=True):
-    """모니터링 실행 (함수형 구현)"""
+    """모니터링 실행 (개선된 함수형 구현)"""
     driver = None
     gs_client = None
     
@@ -2536,6 +3477,10 @@ async def run_monitor(days_range=4, check_sheets=True):
         # 스크린샷 디렉토리 생성
         screenshots_dir = Path("./screenshots")
         screenshots_dir.mkdir(exist_ok=True)
+        
+        # HTML 콘텐츠 디렉토리 생성 (새로 추가)
+        html_content_dir = Path("./html_content")
+        html_content_dir.mkdir(exist_ok=True)
 
         # WebDriver 초기화
         driver = setup_driver()
@@ -2589,8 +3534,13 @@ async def run_monitor(days_range=4, check_sheets=True):
             time.sleep(random.uniform(2, 4))
             
             # 스크린샷 저장
-            driver.save_screenshot("landing_page.png")
+            driver.save_screenshot("screenshots/landing_page.png")
             logger.info("랜딩 페이지 스크린샷 저장 완료")
+            
+            # HTML 저장 (새로 추가)
+            with open("html_content/landing_page.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info("랜딩 페이지 HTML 저장 완료")
             
             # 스크롤 시뮬레이션
             execute_javascript(driver, """
@@ -2630,7 +3580,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                         logger.info(f"통계정보 링크 발견 (선택자: {selector}), 클릭 시도")
                         
                         # 스크린샷 (클릭 전)
-                        driver.save_screenshot("before_stats_click.png")
+                        driver.save_screenshot("screenshots/before_stats_click.png")
                         
                         # JavaScript로 클릭 (더 신뢰성 있음)
                         driver.execute_script("arguments[0].click();", stats_link)
@@ -2679,10 +3629,15 @@ async def run_monitor(days_range=4, check_sheets=True):
         
         # 스크린샷 저장 (디버깅용)
         try:
-            driver.save_screenshot("stats_page.png")
+            driver.save_screenshot("screenshots/stats_page.png")
             logger.info("통계정보 페이지 스크린샷 저장 완료")
+            
+            # HTML 저장 (새로 추가)
+            with open("html_content/stats_page.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info("통계정보 페이지 HTML 저장 완료")
         except Exception as ss_err:
-            logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
+            logger.warning(f"스크린샷/HTML 저장 중 오류: {str(ss_err)}")
         
         # 모든 게시물 및 통신 통계 게시물 추적
         all_posts = []
@@ -2743,8 +3698,8 @@ async def run_monitor(days_range=4, check_sheets=True):
                 try:
                     logger.info(f"게시물 {i+1}/{len(telecom_stats_posts)} 처리 중: {post['title']}")
                     
-                    # 바로보기 링크 파라미터 추출 (수정된 방식)
-                    file_params = find_view_link_params(driver, post)
+                    # 바로보기 링크 파라미터 추출 (직접 URL 접근 방식 사용 - 개선된 버전)
+                    file_params = direct_access_view_link_params(driver, post)
                     
                     if not file_params:
                         logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
@@ -2752,7 +3707,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                     
                     # 바로보기 링크가 있는 경우
                     if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                        # iframe 직접 접근하여 데이터 추출 (OCR 폴백 포함)
+                        # iframe 직접 접근하여 데이터 추출 (OCR 폴백 포함) - 개선된 함수 사용
                         sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
                         
                         if sheets_data:
@@ -2765,6 +3720,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                             if 'date' in file_params:
                                 update_data['date'] = file_params['date']
                             
+                            # 개선된 Google Sheets 업데이트 함수 사용
                             success = update_google_sheets(gs_client, update_data)
                             if success:
                                 logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
@@ -2774,7 +3730,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                         else:
                             logger.warning(f"iframe에서 데이터 추출 실패: {post['title']}")
                             
-                            # 대체 데이터 생성
+                            # 대체 데이터 생성 (개선된 함수 사용)
                             placeholder_df = create_placeholder_dataframe(post)
                             if not placeholder_df.empty:
                                 update_data = {
@@ -2794,7 +3750,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                     elif 'content' in file_params:
                         logger.info(f"게시물 내용으로 처리 중: {post['title']}")
                         
-                        # 대체 데이터 생성
+                        # 대체 데이터 생성 (개선된 함수 사용)
                         placeholder_df = create_placeholder_dataframe(post)
                         if not placeholder_df.empty:
                             update_data = {
@@ -2814,7 +3770,7 @@ async def run_monitor(days_range=4, check_sheets=True):
                     elif 'ajax_data' in file_params:
                         logger.info(f"AJAX 데이터로 처리 중: {post['title']}")
                         
-                        # 대체 데이터 생성
+                        # 대체 데이터 생성 (개선된 함수 사용)
                         placeholder_df = create_placeholder_dataframe(post)
                         placeholder_df['AJAX 데이터'] = ['있음']
                         
@@ -2857,7 +3813,7 @@ async def run_monitor(days_range=4, check_sheets=True):
         execution_time = end_time - start_time
         logger.info(f"실행 시간: {execution_time:.2f}초")
         
-        # 텔레그램 알림 전송
+        # 텔레그램 알림 전송 (개선된 함수 사용)
         if all_posts or data_updates:
             await send_telegram_message(all_posts, data_updates)
             logger.info(f"알림 전송 완료: {len(all_posts)}개 게시물, {len(data_updates)}개 업데이트")
@@ -2879,10 +3835,17 @@ async def run_monitor(days_range=4, check_sheets=True):
             # 오류 스크린샷 저장
             if driver:
                 try:
-                    driver.save_screenshot("error_screenshot.png")
-                    logger.info("오류 발생 시점 스크린샷 저장 완료")
+                    error_screenshot_path = "screenshots/error_screenshot.png"
+                    driver.save_screenshot(error_screenshot_path)
+                    logger.info(f"오류 발생 시점 스크린샷 저장 완료: {error_screenshot_path}")
+                    
+                    # HTML 저장 (새로 추가)
+                    error_html_path = "html_content/error_page.html"
+                    with open(error_html_path, "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logger.info(f"오류 발생 시점 HTML 저장 완료: {error_html_path}")
                 except Exception as ss_err:
-                    logger.error(f"오류 스크린샷 저장 실패: {str(ss_err)}")
+                    logger.error(f"오류 스크린샷/HTML 저장 실패: {str(ss_err)}")
             
             # 오류 알림 전송
             bot = telegram.Bot(token=CONFIG['telegram_token'])
@@ -2897,6 +3860,30 @@ async def run_monitor(days_range=4, check_sheets=True):
             logger.error(f"오류 알림 전송 중 추가 오류: {str(telegram_err)}")
     
     finally:
+        # 아티팩트 생성 디렉토리들 정리 (새로 추가)
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            artifacts_dir = Path(f"./artifacts_{timestamp}")
+            artifacts_dir.mkdir(exist_ok=True)
+            
+            # 스크린샷, HTML 등 중요 파일 복사
+            import shutil
+            for src_dir in ["./screenshots", "./html_content"]:
+                if Path(src_dir).exists():
+                    dest_dir = artifacts_dir / Path(src_dir).name
+                    dest_dir.mkdir(exist_ok=True)
+                    for file in Path(src_dir).glob("*"):
+                        if file.is_file():
+                            shutil.copy2(file, dest_dir)
+            
+            # 로그 파일 복사
+            for log_file in Path("./").glob("*.log"):
+                shutil.copy2(log_file, artifacts_dir)
+                
+            logger.info(f"아티팩트 디렉토리 생성 완료: {artifacts_dir}")
+        except Exception as artifact_err:
+            logger.error(f"아티팩트 디렉토리 생성 중 오류: {str(artifact_err)}")
+        
         # 리소스 정리
         if driver:
             driver.quit()
@@ -2906,7 +3893,7 @@ async def run_monitor(days_range=4, check_sheets=True):
 
 
 async def main():
-    """메인 함수: 환경 변수 처리 및 모니터링 실행"""
+    """메인 함수: 환경 변수 처리 및 모니터링 실행 (개선된 버전)"""
     # 환경 변수 가져오기 (향상된 버전)
     try:
         days_range = int(os.environ.get('DAYS_RANGE', '4'))
@@ -2951,6 +3938,11 @@ async def main():
             CONFIG['ocr_enabled'] = False
             logger.warning("OCR 기능 비활성화")
     
+    # 디렉토리 생성 (새로 추가)
+    for directory in ["./downloads", "./screenshots", "./html_content"]:
+        Path(directory).mkdir(exist_ok=True)
+        logger.info(f"디렉토리 생성 확인: {directory}")
+    
     # 모니터링 실행
     try:
         await run_monitor(days_range=days_range, check_sheets=check_sheets)
@@ -2967,7 +3959,3 @@ async def main():
             )
         except Exception as telegram_err:
             logger.error(f"텔레그램 메시지 전송 중 추가 오류: {str(telegram_err)}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
