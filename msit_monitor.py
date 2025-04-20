@@ -537,296 +537,872 @@ def take_screenshot(driver, name, crop_area=None):
         return None
 
 def extract_data_from_screenshot(screenshot_path):
-    """스크린샷에서 표 형태의 데이터를 추출하는 함수"""
+    """
+    스크린샷에서 표 데이터를 추출하는 개선된 함수.
+    이미지 전처리, 표 구조 감지, OCR 개선 등 포함.
     
-    # OCR 임포트가 사용 가능한지 확인
-    if not OCR_IMPORTS_AVAILABLE:
-        logger.error("OCR 라이브러리가 설치되지 않았습니다. OCR 추출을 사용할 수 없습니다.")
-        return []
-    
+    Args:
+        screenshot_path (str): 스크린샷 파일 경로
+        
+    Returns:
+        list: 추출된 DataFrame 리스트
+    """
     try:
+        import cv2
+        import numpy as np
+        import pandas as pd
+        import pytesseract
+        from PIL import Image, ImageEnhance
+        
         logger.info(f"이미지 파일에서 표 데이터 추출 시작: {screenshot_path}")
         
-        # 이미지 로드 및 전처리
+        # 이미지 로드
         image = cv2.imread(screenshot_path)
         if image is None:
             logger.error(f"이미지를 로드할 수 없습니다: {screenshot_path}")
             return []
         
+        # 원본 크기 저장
+        original_height, original_width = image.shape[:2]
+        logger.info(f"원본 이미지 크기: {original_width}x{original_height} 픽셀")
+        
+        # 이미지가 너무 크면 크기 조정
+        max_dimension = 3000
+        if max(original_height, original_width) > max_dimension:
+            scale = max_dimension / max(original_height, original_width)
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
+            image = cv2.resize(image, (new_width, new_height))
+            logger.info(f"이미지 크기 조정: {new_width}x{new_height} 픽셀")
+        
+        # 1. 이미지 전처리 - 여러 방법으로 시도
+        preprocessed_images = {}
+        
         # 그레이스케일 변환
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # 이미지 향상 (대비 증가)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+        preprocessed_images['gray'] = gray
         
         # 노이즈 제거
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+        denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+        preprocessed_images['denoised'] = denoised
         
-        # 테이블 경계 감지를 위한 전처리
-        dilated = cv2.dilate(opening, kernel, iterations=3)
+        # 이진화 - 여러 방법 적용
+        # Otsu 이진화
+        _, binary_otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        preprocessed_images['binary_otsu'] = binary_otsu
         
-        # 표를 구성하는 선 감지
-        # 수직선 감지
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, np.array(gray).shape[0] // 50))
-        vertical_lines = cv2.erode(dilated, vertical_kernel, iterations=3)
-        vertical_lines = cv2.dilate(vertical_lines, vertical_kernel, iterations=5)
+        # 적응형 이진화
+        binary_adaptive = cv2.adaptiveThreshold(
+            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        preprocessed_images['binary_adaptive'] = binary_adaptive
+        
+        # 2. 표 구조 감지
+        # 이진 이미지에서 선 감지
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
         
         # 수평선 감지
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (np.array(gray).shape[1] // 50, 1))
-        horizontal_lines = cv2.erode(dilated, horizontal_kernel, iterations=3)
-        horizontal_lines = cv2.dilate(horizontal_lines, horizontal_kernel, iterations=5)
+        horizontal_lines = cv2.morphologyEx(binary_adaptive, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        horizontal_lines = cv2.dilate(horizontal_lines, horizontal_kernel, iterations=2)
         
-        # 수직선과 수평선 병합
-        table_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
+        # 수직선 감지
+        vertical_lines = cv2.morphologyEx(binary_adaptive, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        vertical_lines = cv2.dilate(vertical_lines, vertical_kernel, iterations=2)
+        
+        # 모든 선 합치기
+        all_lines = cv2.add(horizontal_lines, vertical_lines)
+        preprocessed_images['lines'] = all_lines
+        
+        # 침식 및 팽창을 통한 선 강화
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        tables_structure = cv2.dilate(all_lines, kernel, iterations=2)
+        preprocessed_images['tables_structure'] = tables_structure
+        
+        # 표 경계 감지
+        contours, _ = cv2.findContours(tables_structure, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 텍스트 추출용 이미지 준비
+        ocr_image = cv2.bitwise_not(denoised)  # 검은 배경에 흰색 텍스트로 변환
+        
+        # 디버깅용 이미지 저장
+        cv2.imwrite(f"{screenshot_path}_debug_gray.png", gray)
+        cv2.imwrite(f"{screenshot_path}_debug_binary.png", binary_adaptive)
+        cv2.imwrite(f"{screenshot_path}_debug_lines.png", all_lines)
+        cv2.imwrite(f"{screenshot_path}_debug_tables.png", tables_structure)
+        
+        # 3. 감지된 테이블 처리
+        all_dataframes = []
+        
+        if contours:
+            logger.info(f"{len(contours)}개의 테이블 경계 후보 감지")
+            
+            # 이미지 면적의 1% 이상인 경계만 필터링
+            min_area = (original_width * original_height) * 0.01
+            table_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+            
+            if table_contours:
+                logger.info(f"크기 필터링 후 {len(table_contours)}개 테이블 경계 남음")
+                
+                # 각 테이블 영역 처리
+                for i, contour in enumerate(table_contours):
+                    # 경계 상자 얻기
+                    x, y, w, h = cv2.boundingRect(contour)
+                    
+                    # 테이블 영역 추출
+                    table_img = ocr_image[y:y+h, x:x+w]
+                    
+                    # 테이블 구조 이미지 저장
+                    table_img_path = f"{screenshot_path}_table_{i+1}.png"
+                    cv2.imwrite(table_img_path, table_img)
+                    
+                    # 테이블 이미지에서 텍스트 추출
+                    try:
+                        # PIL로 이미지 향상 처리
+                        pil_img = Image.open(table_img_path)
+                        enhancer = ImageEnhance.Contrast(pil_img)
+                        enhanced_img = enhancer.enhance(2.0)  # 대비 증가
+                        
+                        # 향상된 이미지 저장
+                        enhanced_path = f"{screenshot_path}_table_{i+1}_enhanced.png"
+                        enhanced_img.save(enhanced_path)
+                        
+                        # 표 구조 감지
+                        df = extract_table_structure(enhanced_path, i+1)
+                        if df is not None and not df.empty:
+                            logger.info(f"테이블 {i+1}: 표 구조 감지로 {df.shape[0]}행 {df.shape[1]}열 추출")
+                            all_dataframes.append(df)
+                        else:
+                            # 표 구조 감지에 실패하면 직접 OCR
+                            logger.info(f"테이블 {i+1}: 표 구조 감지 실패, 전체 OCR 시도")
+                            text = pytesseract.image_to_string(enhanced_img, lang='kor+eng', config='--psm 6')
+                            
+                            # OCR 텍스트에서 표 구조 추출
+                            table_data = parse_text_to_table(text)
+                            if table_data and len(table_data) > 1:  # 헤더 + 데이터 행
+                                headers = table_data[0]
+                                data = table_data[1:]
+                                df = pd.DataFrame(data, columns=headers)
+                                logger.info(f"테이블 {i+1}: OCR 텍스트 파싱으로 {df.shape[0]}행 {df.shape[1]}열 추출")
+                                all_dataframes.append(df)
+                    except Exception as table_err:
+                        logger.warning(f"테이블 {i+1} 처리 중 오류: {str(table_err)}")
+        
+        # 4. 표 구조 감지에 실패하면 전체 이미지에서 데이터 추출 시도
+        if not all_dataframes:
+            logger.info("테이블 구조 감지 실패, 전체 이미지 처리")
+            
+            # 전체 이미지 대비 향상
+            pil_img = Image.open(screenshot_path)
+            enhancer = ImageEnhance.Contrast(pil_img)
+            enhanced_img = enhancer.enhance(2.0)
+            enhanced_path = f"{screenshot_path}_full_enhanced.png"
+            enhanced_img.save(enhanced_path)
+            
+            # 1) 테서렉트 표 인식 시도
+            try:
+                # --psm 6: 균일한 텍스트 블록으로 처리
+                # -c tessedit_create_tsv=1: TSV 형식으로 출력
+                tsv_output = pytesseract.image_to_data(enhanced_img, lang='kor+eng', config='--psm 6 -c tessedit_create_tsv=1', output_type=pytesseract.Output.DATAFRAME)
+                
+                # 테서렉트 TSV 데이터에서 행/열 구조 추출
+                if not tsv_output.empty:
+                    # 신뢰도 임계값 이상인 텍스트만 사용
+                    tsv_output = tsv_output[tsv_output['conf'] > 30]
+                    
+                    # 공백이 아닌 텍스트만 사용
+                    tsv_output = tsv_output[tsv_output['text'].str.strip() != '']
+                    
+                    # Y 좌표 기준으로 텍스트 그룹화 (같은 Y는 같은 행)
+                    y_tolerance = 10  # Y 좌표 허용 오차
+                    tsv_output['line_group'] = (tsv_output['top'].diff() > y_tolerance).cumsum()
+                    
+                    rows_data = []
+                    line_groups = tsv_output.groupby('line_group')
+                    
+                    for _, group in line_groups:
+                        # X 좌표로 정렬하여 왼쪽에서 오른쪽으로 텍스트 배치
+                        sorted_group = group.sort_values('left')
+                        row_text = sorted_group['text'].tolist()
+                        if row_text:
+                            rows_data.append(row_text)
+                    
+                    if len(rows_data) > 1:  # 헤더 + 데이터 행
+                        headers = rows_data[0]
+                        data = rows_data[1:]
+                        
+                        # 헤더가 빈 경우 자동 생성
+                        if not any(headers):
+                            headers = [f"Column_{i}" for i in range(len(data[0]))]
+                        
+                        # 행 길이 일치시키기
+                        max_cols = len(headers)
+                        for i in range(len(data)):
+                            if len(data[i]) < max_cols:
+                                data[i].extend([''] * (max_cols - len(data[i])))
+                            elif len(data[i]) > max_cols:
+                                data[i] = data[i][:max_cols]
+                        
+                        df = pd.DataFrame(data, columns=headers)
+                        logger.info(f"테서렉트 TSV에서 {df.shape[0]}행 {df.shape[1]}열 추출")
+                        all_dataframes.append(df)
+            except Exception as tsv_err:
+                logger.warning(f"테서렉트 TSV 처리 중 오류: {str(tsv_err)}")
+            
+            # 2) 테서렉트 호크 레이아웃 분석 시도
+            if not all_dataframes:
+                try:
+                    # --psm 4: 열이 있는 텍스트로 인식
+                    # --psm 6: 균일한 텍스트 블록으로 처리
+                    for psm in [4, 6]:
+                        hocr_config = f'--psm {psm} -c tessedit_create_hocr=1'
+                        hocr = pytesseract.image_to_pdf_or_hocr(enhanced_img, lang='kor+eng', config=hocr_config, extension='hocr')
+                        hocr_text = hocr.decode('utf-8')
+                        
+                        # HOCR 데이터에서 표 구조 추출 시도
+                        df = parse_hocr_to_table(hocr_text)
+                        if df is not None and not df.empty:
+                            logger.info(f"HOCR(PSM {psm})에서 {df.shape[0]}행 {df.shape[1]}열 추출")
+                            all_dataframes.append(df)
+                            break
+                except Exception as hocr_err:
+                    logger.warning(f"HOCR 처리 중 오류: {str(hocr_err)}")
+            
+            # 3) 일반 텍스트 추출 및 표 구조 추론
+            if not all_dataframes:
+                try:
+                    text = pytesseract.image_to_string(enhanced_img, lang='kor+eng', config='--psm 6')
+                    table_data = parse_text_to_table(text)
+                    
+                    if table_data and len(table_data) > 1:  # 헤더 + 데이터 행
+                        headers = table_data[0]
+                        data = table_data[1:]
+                        df = pd.DataFrame(data, columns=headers)
+                        logger.info(f"일반 OCR에서 {df.shape[0]}행 {df.shape[1]}열 추출")
+                        all_dataframes.append(df)
+                except Exception as text_err:
+                    logger.warning(f"일반 텍스트 처리 중 오류: {str(text_err)}")
+        
+        # 5. 추출된 데이터프레임 정제
+        refined_dataframes = []
+        for idx, df in enumerate(all_dataframes):
+            try:
+                if df.empty:
+                    continue
+                
+                # 빈 행/열 제거
+                df = df.replace('', np.nan)
+                df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
+                df = df.reset_index(drop=True)
+                
+                # NaN을 빈 문자열로 변환
+                df = df.fillna('')
+                
+                # 중복 행 제거
+                df = df.drop_duplicates().reset_index(drop=True)
+                
+                # 숫자 데이터 정수/실수 변환
+                for col in df.columns:
+                    try:
+                        # 숫자 형식인지 확인 (쉼표, 소수점 등 처리)
+                        numeric_series = df[col].str.replace(',', '').str.replace(' ', '')
+                        if numeric_series.str.match(r'^-?\d+\.?\d*$').mean() > 0.5:  # 50% 이상이 숫자 패턴과 일치
+                            df[col] = pd.to_numeric(numeric_series, errors='coerce')
+                    except:
+                        pass  # 숫자 변환 실패 시 문자열 유지
+                
+                # 첫 행이 헤더인지 확인
+                first_row_as_header = all_headers_valid(df)
+                if first_row_as_header and len(df) > 1:
+                    new_headers = df.iloc[0].tolist()
+                    df = df.iloc[1:].reset_index(drop=True)
+                    df.columns = [str(h) if h else f"Column_{i}" for i, h in enumerate(new_headers)]
+                
+                # 열 이름 정리
+                df.columns = [str(col) for col in df.columns]
+                
+                # 데이터프레임에 의미 있는 데이터가 있는지 확인
+                if df.shape[0] >= 2 and df.shape[1] >= 2:
+                    refined_dataframes.append(df)
+                    logger.info(f"데이터프레임 {idx+1} 정제 완료: {df.shape[0]}행 {df.shape[1]}열")
+            except Exception as refine_err:
+                logger.warning(f"데이터프레임 {idx+1} 정제 중 오류: {str(refine_err)}")
+        
+        if not refined_dataframes:
+            logger.warning("정제된 데이터프레임이 없음, 텍스트 전용 추출 시도")
+            df = extract_text_without_table_structure(screenshot_path)
+            if df is not None and not df.empty:
+                refined_dataframes.append(df)
+        
+        logger.info(f"최종 추출된 데이터프레임: {len(refined_dataframes)}개")
+        return refined_dataframes
+        
+    except Exception as e:
+        logger.error(f"스크린샷에서 데이터 추출 중 오류: {str(e)}")
+        # 기본 텍스트 추출 시도
+        try:
+            return [extract_text_without_table_structure(screenshot_path)]
+        except:
+            logger.error("기본 텍스트 추출도 실패")
+            return []
+
+def all_headers_valid(df):
+    """
+    첫 번째 행이 헤더로 유효한지 확인합니다.
+    
+    Args:
+        df: pandas DataFrame
+        
+    Returns:
+        bool: 첫 번째 행이 헤더로 유효하면 True
+    """
+    if df.empty or len(df) < 2:
+        return False
+        
+    try:
+        # 첫 번째 행에 숫자가 많으면 헤더가 아닐 가능성이 높음
+        first_row = df.iloc[0]
+        first_row_numeric = 0
+        for value in first_row:
+            if isinstance(value, (int, float)) or (isinstance(value, str) and value.replace('.', '').replace(',', '').isdigit()):
+                first_row_numeric += 1
+                
+        # 50% 이상이 숫자면 헤더가 아닌 것으로 판단
+        if first_row_numeric / len(first_row) > 0.5:
+            return False
+            
+        # 다른 행과 형식이 다른지 확인
+        other_rows_numeric = 0
+        for i in range(1, min(5, len(df))):
+            row = df.iloc[i]
+            for value in row:
+                if isinstance(value, (int, float)) or (isinstance(value, str) and value.replace('.', '').replace(',', '').isdigit()):
+                    other_rows_numeric += 1
+                    
+        # 다른 행의 숫자 비율이 첫 행과 크게 다르면 헤더로 판단
+        other_rows_ratio = other_rows_numeric / (min(5, len(df) - 1) * len(first_row)) if min(5, len(df) - 1) > 0 else 0
+        if abs(first_row_numeric / len(first_row) - other_rows_ratio) > 0.3:
+            return True
+            
+        # 첫 번째 행의 값이 짧은지 확인 (헤더는 보통 짧음)
+        first_row_length = sum(len(str(v)) for v in first_row) / len(first_row)
+        other_rows_length = 0
+        count = 0
+        
+        for i in range(1, min(5, len(df))):
+            row = df.iloc[i]
+            for value in row:
+                other_rows_length += len(str(value))
+                count += 1
+                
+        other_rows_avg_length = other_rows_length / count if count > 0 else 0
+        
+        # 첫 행의 텍스트가 다른 행보다 훨씬 짧으면 헤더
+        if first_row_length < other_rows_avg_length * 0.7:
+            return True
+            
+        # 기본적으로 첫 행을 헤더로 간주하지 않음
+        return False
+        
+    except Exception as e:
+        logger.warning(f"헤더 유효성 검사 오류: {str(e)}")
+        return False
+
+
+
+def parse_text_to_table(text):
+    """
+    OCR로 인식된 텍스트에서 표 구조를 추출합니다.
+    
+    Args:
+        text: OCR로 인식된 텍스트
+        
+    Returns:
+        list: 행 데이터 리스트 또는 None
+    """
+    try:
+        # 텍스트를 줄 단위로 분할
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        if not lines:
+            return None
+            
+        # 구분자 패턴 찾기
+        possible_delimiters = ['\t', '  ', ' | ', '|', ';', ',']
+        best_delimiter = None
+        max_columns = 0
+        
+        for delimiter in possible_delimiters:
+            # 각 구분자로 분할한 최대 열 수 계산
+            columns_count = []
+            for line in lines:
+                columns = line.split(delimiter)
+                if delimiter in '| ':  # 공백이나 파이프 구분자는 여러 개가 연속될 수 있음
+                    columns = [col for col in columns if col.strip()]
+                columns_count.append(len(columns))
+            
+            avg_columns = sum(columns_count) / len(columns_count) if columns_count else 0
+            
+            # 구분자로 분할했을 때 열 수가 일정해야 함
+            if avg_columns > max_columns and avg_columns >= 2:
+                consistency = 1 - (max(columns_count) - min(columns_count)) / max(max(columns_count), 1)
+                if consistency > 0.5:  # 열 수가 일관적이면 (50% 이상 일치)
+                    max_columns = avg_columns
+                    best_delimiter = delimiter
+        
+        # 표로 볼 수 있는 구분자를 찾지 못한 경우
+        if not best_delimiter:
+            # 공백 기반 열 구분 시도 (위치 기반)
+            return parse_positional_table(lines)
+            
+        # 최적의 구분자로 텍스트 파싱
+        table_data = []
+        for line in lines:
+            columns = line.split(best_delimiter)
+            if best_delimiter in '| ':  # 공백이나 파이프 구분자는 여러 개가 연속될 수 있음
+                columns = [col for col in columns if col.strip()]
+            table_data.append(columns)
+        
+        return table_data
+        
+    except Exception as e:
+        logger.warning(f"텍스트 표 파싱 오류: {str(e)}")
+        return None
+
+
+def parse_positional_table(lines):
+    """
+    공백 위치를 기반으로 표 구조를 추출합니다.
+    OCR된 텍스트에서 일정한 위치에 공백이 있는 경우 사용.
+    
+    Args:
+        lines: 텍스트 라인 리스트
+        
+    Returns:
+        list: 행 데이터 리스트 또는 None
+    """
+    try:
+        if not lines or len(lines) < 2:
+            return None
+            
+        # 모든 라인의 공백 위치 찾기
+        space_positions = []
+        max_line_length = max(len(line) for line in lines)
+        
+        for line in lines:
+            positions = []
+            for i, char in enumerate(line):
+                if char == ' ' and i > 0 and i < len(line) - 1:
+                    # 앞뒤 문자가 공백이 아닌 경우만 (연속 공백 방지)
+                    if line[i-1] != ' ' and line[i+1] != ' ':
+                        positions.append(i)
+            space_positions.append(positions)
+        
+        # 모든 줄에서 공통적으로 나타나는 공백 위치 찾기
+        common_positions = set(range(max_line_length))
+        for positions in space_positions:
+            position_set = set()
+            for pos in positions:
+                # 위치 주변 약간의 여유 허용 (OCR 오차 고려)
+                for p in range(max(0, pos-2), min(max_line_length, pos+3)):
+                    position_set.add(p)
+            common_positions &= position_set
+        
+        # 공통 위치가 없으면 작업 종료
+        if not common_positions:
+            # 다른 전략: 길이 기반 아이템 추출
+            return split_by_word_length(lines)
+        
+        # 공통 공백 위치 정렬
+        split_positions = sorted(list(common_positions))
+        
+        # 너무 많은 분할 위치가 있으면 필터링
+        if len(split_positions) > 10:
+            # 위치 간의 간격이 너무 작으면 하나만 유지
+            filtered_positions = [split_positions[0]]
+            for pos in split_positions[1:]:
+                if pos - filtered_positions[-1] > 3:  # 최소 3자 이상 간격
+                    filtered_positions.append(pos)
+            split_positions = filtered_positions
+        
+        # 분할 위치를 사용하여 각 행 분할
+        table_data = []
+        for line in lines:
+            row_data = []
+            start = 0
+            
+            for pos in split_positions:
+                if pos > start:
+                    cell = line[start:pos].strip()
+                    if cell:
+                        row_data.append(cell)
+                    start = pos + 1
+            
+            # 마지막 셀
+            if start < len(line):
+                cell = line[start:].strip()
+                if cell:
+                    row_data.append(cell)
+            
+            if row_data:
+                table_data.append(row_data)
+        
+        return table_data
+        
+    except Exception as e:
+        logger.warning(f"위치 기반 표 파싱 오류: {str(e)}")
+        return None
+
+def split_by_word_length(lines):
+    """
+    단어 길이를 기준으로 텍스트를 표로 변환합니다.
+    Heuristic: 첫 번째 행의 각 단어 길이를 기준으로 분할.
+    
+    Args:
+        lines: 텍스트 라인 리스트
+        
+    Returns:
+        list: 행 데이터 리스트 또는 None
+    """
+    try:
+        if not lines or len(lines) < 2:
+            return None
+        
+        # 첫 번째 행을 공백으로 분할
+        first_row_words = lines[0].split()
+        
+        if len(first_row_words) < 2:
+            return None
+        
+        # 공백만으로 각 행 분할
+        table_data = []
+        for line in lines:
+            row_data = line.split()
+            if row_data:
+                table_data.append(row_data)
+        
+        return table_data
+        
+    except Exception as e:
+        logger.warning(f"단어 길이 기반 표 파싱 오류: {str(e)}")
+        return None
+
+def parse_hocr_to_table(hocr_text):
+    """
+    HOCR 출력에서 표 구조를 추출합니다.
+    
+    Args:
+        hocr_text: Tesseract HOCR 출력 텍스트
+        
+    Returns:
+        pandas.DataFrame: 추출된 표 또는 None
+    """
+    try:
+        import re
+        import pandas as pd
+        
+        # HOCR에서 단어 추출
+        word_pattern = re.compile(r'<span class=\'ocrx_word\'[^>]*title=\'bbox (\d+) (\d+) (\d+) (\d+)[^\']*\'[^>]*>([^<]+)</span>')
+        words = word_pattern.findall(hocr_text)
+        
+        if not words:
+            return None
+        
+        # 단어 정보 추출 (x1, y1, x2, y2, 텍스트)
+        word_data = []
+        for match in words:
+            x1, y1, x2, y2, text = int(match[0]), int(match[1]), int(match[2]), int(match[3]), match[4]
+            word_data.append((x1, y1, x2, y2, text))
+        
+        # y 좌표로 행 그룹화 (같은 y는 같은 행)
+        y_tolerance = 10  # y 좌표 허용 오차
+        word_data.sort(key=lambda w: w[1])  # y 좌표로 정렬
+        
+        rows = []
+        current_row = [word_data[0]]
+        current_y = word_data[0][1]
+        
+        for word in word_data[1:]:
+            y = word[1]
+            if abs(y - current_y) <= y_tolerance:
+                current_row.append(word)
+            else:
+                # 각 행 내에서 단어를 x 좌표로 정렬
+                current_row.sort(key=lambda w: w[0])
+                rows.append(current_row)
+                current_row = [word]
+                current_y = y
+        
+        if current_row:
+            current_row.sort(key=lambda w: w[0])
+            rows.append(current_row)
+        
+        # 행 데이터 추출
+        table_data = []
+        for row in rows:
+            row_text = [word[4] for word in row]
+            table_data.append(row_text)
+        
+        if len(table_data) < 2:  # 헤더 + 데이터 행 필요
+            return None
+        
+        # 행 길이 일치시키기
+        max_cols = max(len(row) for row in table_data)
+        for i in range(len(table_data)):
+            if len(table_data[i]) < max_cols:
+                table_data[i].extend([''] * (max_cols - len(table_data[i])))
+        
+        # DataFrame 생성
+        headers = table_data[0]
+        data = table_data[1:]
+        
+        # 빈 헤더 처리
+        headers = [h if h else f"Column_{i}" for i, h in enumerate(headers)]
+        
+        df = pd.DataFrame(data, columns=headers)
+        return df
+        
+    except Exception as e:
+        logger.warning(f"HOCR 표 파싱 오류: {str(e)}")
+        return None
+
+
+def extract_table_structure(image_path, table_idx):
+    """
+    이미지에서 표 구조 추출을 시도합니다.
+    셀 경계 감지 및 셀 내용 OCR을 수행합니다.
+    
+    Args:
+        image_path: 이미지 파일 경로
+        table_idx: 테이블 인덱스 (로깅용)
+        
+    Returns:
+        pandas.DataFrame: 추출된 표 데이터 또는 None
+    """
+    try:
+        import cv2
+        import numpy as np
+        import pytesseract
+        
+        # 이미지 로드
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+            
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # 적응형 이진화
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # 노이즈 제거
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # 수직선 감지
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
+        vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        
+        # 수평선 감지
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+        horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        
+        # 선 합치기
+        table_grid = cv2.add(vertical_lines, horizontal_lines)
+        
+        # 선 강화
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        table_grid = cv2.dilate(table_grid, kernel, iterations=1)
         
         # 셀 경계 찾기
-        contours, _ = cv2.findContours(table_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(table_grid, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 처리된 이미지 저장 (디버깅용)
-        cv2.imwrite(f"{screenshot_path}_processed.png", table_mask)
-        
-        # 테이블 구조가 없는 경우 일반 OCR 시도
-        if len(contours) < 10:  # 충분한 셀이 없는 경우
-            logger.info("표 구조를 감지하지 못했습니다. 일반 OCR 진행...")
-            return extract_text_without_table_structure(screenshot_path)
-        
-        # 감지된 셀을 정렬하여 테이블 구조 복원
-        # 먼저 충분히 큰 셀만 필터링
+        # 충분한 수의 셀이 있는지 확인
+        if len(contours) < 10:
+            return None
+            
+        # 셀 경계 정보 추출
+        cells = []
         min_cell_area = (image.shape[0] * image.shape[1]) / 1000  # 이미지 크기에 비례한 최소 셀 크기
-        cell_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_cell_area]
         
-        # 셀이 충분하지 않으면 일반 OCR 시도
-        if len(cell_contours) < 5:
-            logger.info(f"감지된 셀이 너무 적습니다 ({len(cell_contours)}). 일반 OCR 진행...")
-            return extract_text_without_table_structure(screenshot_path)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > min_cell_area:
+                x, y, w, h = cv2.boundingRect(cnt)
+                cells.append((x, y, w, h))
         
-        # 셀의 바운딩 박스 추출 및 정렬
-        bounding_boxes = []
-        for cnt in cell_contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            bounding_boxes.append((x, y, w, h))
+        # 셀 위치로 행/열 구조 추정
+        cells.sort(key=lambda c: c[1])  # y 좌표로 정렬
         
-        # 셀 위치에 따라 행과 열로 그룹화
-        # 첫 번째 단계: y 좌표로 행 그룹화
-        y_tolerance = image.shape[0] // 40  # 높이의 2.5% 이내면 같은 행으로 간주
+        # 행 그룹화
         rows = []
-        bounding_boxes.sort(key=lambda b: b[1])  # y 좌표로 정렬
+        y_tolerance = image.shape[0] // 40  # 이미지 높이의 2.5%를 허용 오차로 사용
         
-        current_row = [bounding_boxes[0]]
-        current_y = bounding_boxes[0][1]
+        current_row = [cells[0]] if cells else []
+        current_y = cells[0][1] if cells else 0
         
-        for box in bounding_boxes[1:]:
-            if abs(box[1] - current_y) <= y_tolerance:
-                current_row.append(box)
+        for cell in cells[1:]:
+            y = cell[1]
+            if abs(y - current_y) <= y_tolerance:
+                current_row.append(cell)
             else:
                 rows.append(current_row)
-                current_row = [box]
-                current_y = box[1]
+                current_row = [cell]
+                current_y = y
         
         if current_row:
             rows.append(current_row)
         
         # 각 행 내에서 셀을 x 좌표로 정렬
-        for i in range(len(rows)):
-            rows[i].sort(key=lambda b: b[0])
+        for row in rows:
+            row.sort(key=lambda c: c[0])
         
-        # 행과 열 수 결정
-        if not rows:
-            logger.warning("행 그룹화 실패")
-            return extract_text_without_table_structure(screenshot_path)
-        
+        # 행/열 수 결정
         num_rows = len(rows)
+        if num_rows < 2:  # 헤더와 최소 1개 데이터 행 필요
+            return None
+            
+        # 열 수는 가장 많은 셀을 가진 행 기준
         num_cols = max(len(row) for row in rows)
         
-        logger.info(f"감지된 표 구조: {num_rows} 행 x {num_cols} 열")
+        logger.info(f"테이블 {table_idx} 구조: {num_rows}행 x {num_cols}열")
         
-        # OCR로 각 셀의 텍스트 추출
+        # 인식된 OCR 텍스트를 저장할 그리드
         table_data = []
-        for i, row in enumerate(rows):
+        
+        # 각 행 처리
+        for row_idx, row in enumerate(rows):
             row_data = [''] * num_cols  # 빈 셀로 초기화
             
-            for j, (x, y, w, h) in enumerate(row):
-                if j >= num_cols:  # 열 인덱스가 범위를 벗어나는 경우 건너뛰기
+            for col_idx, (x, y, w, h) in enumerate(row):
+                if col_idx >= num_cols:
                     continue
                     
                 # 이미지에서 셀 영역 추출
-                cell_image = gray[y:y+h, x:x+w]
+                cell_img = gray[y:y+h, x:x+w]
                 
                 # 셀 이미지가 너무 작으면 건너뛰기
-                if cell_image.size == 0 or w < 10 or h < 10:
+                if cell_img.size == 0 or w < 5 or h < 5:
                     continue
                 
-                # 셀 이미지 강화 
-                _, cell_thresh = cv2.threshold(cell_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                # 셀 이미지 향상
+                _, cell_thresh = cv2.threshold(cell_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 
-                # Tesseract OCR 구성 (숫자 및 텍스트를 모두 포함하는 페이지 분할 모드)
-                custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 6'
-                
-                # 셀 내용이 주로 숫자인 경우 특수 구성
-                if j > 0:  # 첫 번째 열이 아닌 경우 (보통 헤더는 텍스트, 값은 숫자)
-                    custom_config = r'-c preserve_interword_spaces=1 --oem 1 --psm 6 -c tessedit_char_whitelist="0123456789,.-% "' 
+                # OCR 구성
+                if row_idx == 0:
+                    # 헤더용 구성
+                    custom_config = r'--psm 6 --oem 3'
+                elif col_idx == 0:
+                    # 첫 번째 열(항목)용 구성
+                    custom_config = r'--psm 6 --oem 3'
+                else:
+                    # 데이터 셀용 구성 (숫자에 최적화)
+                    custom_config = r'--psm 7 --oem 3'
                 
                 # OCR 실행
                 text = pytesseract.image_to_string(cell_thresh, lang='kor+eng', config=custom_config).strip()
                 
-                # 공백 및 개행 정리
-                text = ' '.join(text.split())
-                
                 # 추출된 텍스트가 있으면 저장
                 if text:
-                    row_data[j] = text
+                    # 공백 및 개행 정리
+                    text = ' '.join(text.split())
+                    row_data[col_idx] = text
             
-            table_data.append(row_data)
+            # 유효한 데이터가 있는 행만 추가
+            if any(cell for cell in row_data):
+                table_data.append(row_data)
         
-        # Pandas DataFrame 생성
-        df = pd.DataFrame(table_data)
-        
-        # 첫 번째 행이 헤더인지 확인
-        if len(table_data) > 1:
-            # 데이터 정제
-            df = df.replace(r'^\s*$', '', regex=True)  # 공백 셀 정리
+        # 충분한 데이터가 있는지 확인
+        if len(table_data) < 2 or max(len(row) for row in table_data) < 2:
+            return None
             
-            # 첫 행이 헤더인지 확인 (모든 값이 있고 숫자가 아닌 경우)
-            first_row = df.iloc[0].fillna('')
-            if all(first_row) and not any(cell.replace(',', '').replace('.', '').isdigit() for cell in first_row if cell):
-                # 첫 행을 헤더로 설정
-                headers = first_row.tolist()
-                df = df.iloc[1:].reset_index(drop=True)
-                df.columns = headers
+        # 첫 번째 행을 헤더로 사용
+        headers = table_data[0]
+        data = table_data[1:]
         
-        # 빈 열 제거
-        df = df.loc[:, df.notna().any()]
+        # 빈 헤더 처리
+        headers = [h if h else f"Column_{i}" for i, h in enumerate(headers)]
         
-        # 결과 저장
-        logger.info(f"표 데이터 추출 완료: {df.shape[0]}행 {df.shape[1]}열")
-        return [df]
-    
+        # DataFrame 생성
+        df = pd.DataFrame(data, columns=headers)
+        return df
+        
     except Exception as e:
-        logger.error(f"표 데이터 추출 중 오류: {str(e)}")
-        # 오류 발생 시 일반 OCR 시도
-        return extract_text_without_table_structure(screenshot_path)
-
+        logger.warning(f"표 구조 추출 중 오류: {str(e)}")
+        return None
 
 
 def extract_text_without_table_structure(screenshot_path):
     """
-    Improved function to extract text without relying on table structure detection.
-    Uses general OCR approach and attempts to organize into a tabular format.
+    표 구조 없이 이미지에서 텍스트를 추출하는 개선된 함수
     
     Args:
-        screenshot_path: Path to the screenshot file
+        screenshot_path: 스크린샷 파일 경로
         
     Returns:
-        pandas.DataFrame: DataFrame with extracted text
+        pandas.DataFrame: 추출된 텍스트를 포함한 DataFrame
     """
     try:
-        logger.info(f"Starting general OCR extraction from: {screenshot_path}")
+        from PIL import Image, ImageEnhance
+        import pytesseract
+        import pandas as pd
         
-        # Load and enhance the image
-        image = Image.open(screenshot_path)
+        logger.info(f"표 구조 없이 텍스트 추출 시작: {screenshot_path}")
         
-        # Enhance the image
-        enhancer = ImageEnhance.Contrast(image)
-        enhanced_image = enhancer.enhance(2.0)  # Increase contrast
+        # 이미지 로드 및 향상
+        img = Image.open(screenshot_path)
+        enhancer = ImageEnhance.Contrast(img)
+        enhanced_img = enhancer.enhance(2.0)
         
-        # Apply OCR with custom configuration
-        custom_config = r'-l kor+eng --oem 1 --psm 6'
-        text = pytesseract.image_to_string(enhanced_image, config=custom_config)
+        # OCR 실행 (여러 PSM 모드 시도)
+        best_text = ""
+        best_line_count = 0
         
-        logger.info(f"Extracted text length: {len(text)}")
-        
-        # Split into lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        
-        # Detect potential table structure
-        table_data = []
-        
-        # Try several strategies to determine table structure
-        
-        # Strategy 1: Split by consistent whitespace patterns
-        for line in lines:
-            # Check for tab characters
-            if '\t' in line:
-                parts = [part.strip() for part in line.split('\t')]
-                if len(parts) >= 2:
-                    table_data.append(parts)
-                    continue
+        for psm in [6, 4, 3]:  # 다양한 페이지 분할 모드 시도
+            text = pytesseract.image_to_string(enhanced_img, lang='kor+eng', config=f'--psm {psm}')
+            lines = [line for line in text.split('\n') if line.strip()]
             
-            # Check for multiple space characters (likely column separators)
-            parts = re.split(r'\s{2,}', line)
-            if len(parts) >= 2:
-                table_data.append(parts)
-                continue
-            
-            # Check for common separators
-            for sep in ['|', ';', ',']:
-                if sep in line:
-                    parts = [part.strip() for part in line.split(sep)]
-                    if len(parts) >= 2:
-                        table_data.append(parts)
-                        break
-            
-            # If no pattern identified, add as single-column row
-            if not table_data or table_data[-1] != [line]:
-                table_data.append([line])
+            if len(lines) > best_line_count:
+                best_text = text
+                best_line_count = len(lines)
         
-        # If we didn't find any tabular structure, convert to single-column format
-        if not table_data or max(len(row) for row in table_data) < 2:
-            logger.info("No clear tabular structure found, creating single-column format")
-            table_data = [[line] for line in lines]
+        if not best_text:
+            logger.warning("텍스트를 추출하지 못했습니다")
+            return pd.DataFrame()
+            
+        # 텍스트를 줄 단위로 분할
+        lines = [line.strip() for line in best_text.split('\n') if line.strip()]
         
-        # Normalize table structure
-        max_cols = max(len(row) for row in table_data)
-        normalized_data = []
+        # 표 구조 추론
+        table_data = parse_text_to_table(best_text)
         
-        for row in table_data:
-            # Add empty cells to make row length consistent
-            normalized_row = row + [''] * (max_cols - len(row))
-            normalized_data.append(normalized_row)
-        
-        # Create DataFrame
-        if normalized_data:
-            # First row is header
-            header = normalized_data[0]
+        if table_data and len(table_data) > 1:
+            # 첫 행을 헤더로 사용
+            headers = table_data[0]
+            data = table_data[1:]
             
-            # Clean headers
-            clean_headers = []
-            for h in header:
-                h_str = str(h).strip()
-                if not h_str:
-                    h_str = f"Column_{len(clean_headers)}"
-                clean_headers.append(h_str)
+            # 빈 헤더 처리
+            headers = [h if h else f"Column_{i}" for i, h in enumerate(headers)]
             
-            # Create DataFrame
-            if len(normalized_data) > 1:
-                df = pd.DataFrame(normalized_data[1:], columns=clean_headers)
-            else:
-                # Only header row, create empty DataFrame with these columns
-                df = pd.DataFrame(columns=clean_headers)
-            
-            # Clean data
-            df = df.replace(r'^\s*', '', regex=True)
-            
-            # Remove empty rows and columns
-            df = df.replace('', np.nan)
-            df = df.dropna(how='all').reset_index(drop=True)
-            df = df.loc[:, ~df.isna().all()]
-            df = df.fillna('')  # Convert NaN back to empty string
-            
-            # Remove duplicate rows
-            df = df.drop_duplicates().reset_index(drop=True)
-            
+            df = pd.DataFrame(data, columns=headers)
+            logger.info(f"텍스트 파싱으로 표 구조 추출: {df.shape[0]}행 {df.shape[1]}열")
             return df
-        else:
-            # Create a minimal DataFrame with information about the failure
-            logger.warning("Failed to extract any structured data")
-            return pd.DataFrame({'OCR_Text': [line.strip() for line in lines if line.strip()]})
+        
+        # 표 구조를 찾지 못한 경우 두 열 구조로 변환
+        col_name = "텍스트"
+        df = pd.DataFrame({col_name: lines})
+        
+        # 행 번호 추가
+        df.insert(0, "행", range(1, len(df) + 1))
+        
+        logger.info(f"텍스트만 추출: {df.shape[0]}행")
+        return df
     
     except Exception as e:
-        logger.error(f"Error in general OCR extraction: {str(e)}")
-        # Return minimal DataFrame with error info
-        return pd.DataFrame({'Error': [f"OCR extraction failed: {str(e)}"]})
+        logger.error(f"텍스트 전용 추출 오류: {str(e)}")
+        # 최소한의 데이터라도 반환
+        return pd.DataFrame({"오류": [f"텍스트 추출 실패: {str(e)}"]})
         
 
 def execute_javascript(driver, script, async_script=False, max_retries=3, description=""):
