@@ -2787,7 +2787,16 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         return None
 
 def access_iframe_direct(driver, file_params):
-    """iframe에 직접 접근하여 데이터 추출"""
+    """
+    iframe에 직접 접근하여 SynapDocViewServer의 데이터를 추출하는 개선된 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        file_params: 파일 파라미터를 포함한 딕셔너리
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리 또는 None
+    """
     if not file_params or not file_params.get('atch_file_no') or not file_params.get('file_ord'):
         logger.error("파일 파라미터가 없습니다.")
         return None
@@ -2800,7 +2809,7 @@ def access_iframe_direct(driver, file_params):
     logger.info(f"바로보기 URL: {view_url}")
     
     # 여러 번 재시도
-    max_retries = 3
+    max_retries = int(os.environ.get('IFRAME_MAX_RETRIES', '3'))
     for attempt in range(max_retries):
         try:
             # 페이지 로드
@@ -2831,6 +2840,33 @@ def access_iframe_direct(driver, file_params):
                     logger.warning("시스템 점검 중입니다. 문서를 열 수 없습니다.")
                     return None
             
+            # SynapDocViewServer 탐색
+            logger.info("SynapDocViewServer 내부 구조 탐색 시작")
+            structure_info = explore_synap_doc_viewer(driver)
+            
+            # 구조 정보를 기반으로 데이터 추출
+            if structure_info:
+                extracted_data = extract_synap_data_using_structure_info(driver, structure_info)
+                if extracted_data:
+                    logger.info(f"SynapDocViewServer 구조 정보를 통해 {len(extracted_data)}개 시트 추출 성공")
+                    
+                    # DataFrame으로 변환
+                    sheets_data = {}
+                    for sheet_name, sheet_data in extracted_data.items():
+                        headers = sheet_data.get('headers', [])
+                        data = sheet_data.get('data', [])
+                        
+                        if headers and data:
+                            try:
+                                df = pd.DataFrame(data, columns=headers)
+                                sheets_data[sheet_name] = df
+                                logger.info(f"시트 '{sheet_name}'을 DataFrame으로 변환: {df.shape[0]}행 {df.shape[1]}열")
+                            except Exception as df_err:
+                                logger.warning(f"시트 '{sheet_name}' DataFrame 변환 오류: {str(df_err)}")
+                    
+                    if sheets_data:
+                        return sheets_data
+            
             # SynapDocViewServer 또는 문서 뷰어 감지
             if 'SynapDocViewServer' in current_url or 'doc.msit.go.kr' in current_url:
                 logger.info("문서 뷰어 감지됨")
@@ -2847,7 +2883,7 @@ def access_iframe_direct(driver, file_params):
                             driver.switch_to.window(handle)
                             break
                 
-                # 시트 탭 찾기
+                # 1. 시트 탭 찾아서 처리
                 sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
                 if sheet_tabs:
                     logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
@@ -2860,59 +2896,117 @@ def access_iframe_direct(driver, file_params):
                         # 첫 번째가 아닌 시트는 클릭하여 전환
                         if i > 0:
                             try:
-                                tab.click()
+                                # JavaScript로 클릭 (더 안정적)
+                                driver.execute_script("arguments[0].click();", tab)
                                 time.sleep(3)  # 시트 전환 대기
                             except Exception as click_err:
                                 logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
                                 continue
                         
                         try:
-                            # iframe 찾기
-                            iframe = WebDriverWait(driver, 40).until(
-                                EC.presence_of_element_located((By.ID, "innerWrap"))
-                            )
-                            
-                            # iframe으로 전환
-                            driver.switch_to.frame(iframe)
-                            
-                            # 페이지 소스 가져오기
-                            iframe_html = driver.page_source
-                            
-                            # HTML 직접 파싱 시도 (새로운 접근 방식)
-                            sheets_data = extract_data_from_html(iframe_html)
-                            if sheets_data:
-                                for html_sheet_name, html_df in sheets_data.items():
-                                    combined_name = f"{sheet_name}_{html_sheet_name}" if len(sheets_data) > 1 else sheet_name
-                                    all_sheets[combined_name] = html_df
-                                logger.info(f"시트 '{sheet_name}'에서 HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
-                            else:
-                                # 기존 테이블 추출 시도
-                                df = extract_table_from_html(iframe_html)
-                                
-                                # 기본 프레임으로 복귀
-                                driver.switch_to.default_content()
-                                
-                                if df is not None and not df.empty:
-                                    all_sheets[sheet_name] = df
-                                    logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-                                else:
-                                    logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                            # mainTable 구조에서 직접 데이터 추출
+                            table_data = driver.execute_script("""
+                                try {
+                                    const mainTable = document.getElementById('mainTable');
+                                    if (!mainTable) return null;
                                     
-                                    # 테이블 추출 실패 시 OCR 시도
-                                    if CONFIG['ocr_enabled']:
-                                        # 현재 화면 캡처
-                                        ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
-                                        driver.save_screenshot(ocr_screenshot)
+                                    // 여러 방법으로 행 찾기
+                                    let rows = mainTable.querySelectorAll('div[class*="tr"]');
+                                    if (!rows || rows.length === 0) {
+                                        // 직접 자식 요소 시도
+                                        rows = Array.from(mainTable.children);
+                                    }
+                                    
+                                    if (!rows || rows.length === 0) return null;
+                                    
+                                    const tableData = [];
+                                    for (let i = 0; i < rows.length; i++) {
+                                        const row = rows[i];
                                         
-                                        # OCR로 데이터 추출
-                                        ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                                        if ocr_data and len(ocr_data) > 0:
-                                            all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
-                                            logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
-                        except Exception as iframe_err:
-                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
+                                        // 여러 방법으로 셀 찾기
+                                        let cells = row.querySelectorAll('div[class*="td"]');
+                                        if (!cells || cells.length === 0) {
+                                            // 직접 자식 요소 시도
+                                            cells = Array.from(row.children);
+                                        }
+                                        
+                                        if (!cells || cells.length === 0) continue;
+                                        
+                                        const rowData = [];
+                                        for (let j = 0; j < cells.length; j++) {
+                                            rowData.push(cells[j].textContent.trim());
+                                        }
+                                        
+                                        if (rowData.length > 0) {
+                                            tableData.push(rowData);
+                                        }
+                                    }
+                                    
+                                    return tableData;
+                                } catch (e) {
+                                    return { error: e.message };
+                                }
+                            """)
+                            
+                            if isinstance(table_data, list) and table_data:
+                                # 첫 번째 행을 헤더로 가정
+                                try:
+                                    headers = table_data[0]
+                                    data = table_data[1:]
+                                    
+                                    if headers and data:
+                                        df = pd.DataFrame(data, columns=headers)
+                                        all_sheets[sheet_name] = df
+                                        logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                                    else:
+                                        logger.warning(f"시트 '{sheet_name}'에서 충분한 데이터가 없습니다")
+                                except Exception as df_err:
+                                    logger.warning(f"시트 '{sheet_name}' DataFrame 변환 오류: {str(df_err)}")
+                            else:
+                                logger.warning(f"시트 '{sheet_name}'에서 테이블 데이터를 추출하지 못했습니다")
+                                
+                                # 대체 방법: iframe 접근
+                                try:
+                                    # iframe 찾기
+                                    iframe = WebDriverWait(driver, 10).until(
+                                        EC.presence_of_element_located((By.ID, "innerWrap"))
+                                    )
+                                    
+                                    # iframe으로 전환
+                                    driver.switch_to.frame(iframe)
+                                    
+                                    # iframe HTML 가져오기
+                                    iframe_html = driver.page_source
+                                    
+                                    # HTML에서 데이터 추출
+                                    iframe_data = extract_data_from_html(iframe_html)
+                                    
+                                    # 기본 프레임으로 복귀
+                                    driver.switch_to.default_content()
+                                    
+                                    if iframe_data:
+                                        # 가장 큰 데이터프레임 선택
+                                        largest_df = None
+                                        max_size = 0
+                                        
+                                        for df_name, df in iframe_data.items():
+                                            size = df.size
+                                            if size > max_size:
+                                                max_size = size
+                                                largest_df = df
+                                        
+                                        if largest_df is not None:
+                                            all_sheets[sheet_name] = largest_df
+                                            logger.info(f"시트 '{sheet_name}'에서 iframe을 통해 데이터 추출 성공: {largest_df.shape[0]}행 {largest_df.shape[1]}열")
+                                except Exception as iframe_err:
+                                    logger.warning(f"시트 '{sheet_name}' iframe 접근 오류: {str(iframe_err)}")
+                                    try:
+                                        driver.switch_to.default_content()
+                                    except:
+                                        pass
+                        except Exception as sheet_err:
+                            logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(sheet_err)}")
                             try:
-                                # 오류 발생 시 기본 프레임으로 복귀
                                 driver.switch_to.default_content()
                             except:
                                 pass
@@ -2925,54 +3019,97 @@ def access_iframe_direct(driver, file_params):
                         if attempt < max_retries - 1:
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
-                        else:
-                            return None
                 else:
-                    logger.info("시트 탭 없음, 단일 iframe 처리 시도")
+                    # 시트 탭이 없는 경우, 단일 문서 처리
+                    logger.info("시트 탭 없음, 단일 iframe 또는 mainTable 처리 시도")
+                    
+                    # 먼저 mainTable에서 직접 추출 시도
+                    table_data = driver.execute_script("""
+                        try {
+                            const mainTable = document.getElementById('mainTable');
+                            if (!mainTable) return null;
+                            
+                            // 여러 방법으로 행 찾기
+                            let rows = mainTable.querySelectorAll('div[class*="tr"]');
+                            if (!rows || rows.length === 0) {
+                                // 직접 자식 요소 시도
+                                rows = Array.from(mainTable.children);
+                            }
+                            
+                            if (!rows || rows.length === 0) return null;
+                            
+                            const tableData = [];
+                            for (let i = 0; i < rows.length; i++) {
+                                const row = rows[i];
+                                
+                                // 여러 방법으로 셀 찾기
+                                let cells = row.querySelectorAll('div[class*="td"]');
+                                if (!cells || cells.length === 0) {
+                                    // 직접 자식 요소 시도
+                                    cells = Array.from(row.children);
+                                }
+                                
+                                if (!cells || cells.length === 0) continue;
+                                
+                                const rowData = [];
+                                for (let j = 0; j < cells.length; j++) {
+                                    rowData.push(cells[j].textContent.trim());
+                                }
+                                
+                                if (rowData.length > 0) {
+                                    tableData.push(rowData);
+                                }
+                            }
+                            
+                            return tableData;
+                        } catch (e) {
+                            return { error: e.message };
+                        }
+                    """)
+                    
+                    if isinstance(table_data, list) and table_data:
+                        try:
+                            # 첫 번째 행을 헤더로 가정
+                            headers = table_data[0]
+                            data = table_data[1:]
+                            
+                            df = pd.DataFrame(data, columns=headers)
+                            logger.info(f"mainTable에서 직접 데이터 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+                            return {"mainTable": df}
+                        except Exception as df_err:
+                            logger.warning(f"mainTable DataFrame 변환 오류: {str(df_err)}")
+                    
+                    # mainTable 추출 실패 시 iframe 접근 시도
                     try:
-                        iframe = WebDriverWait(driver, 40).until(
+                        iframe = WebDriverWait(driver, 10).until(
                             EC.presence_of_element_located((By.ID, "innerWrap"))
                         )
+                        
+                        # iframe으로 전환
                         driver.switch_to.frame(iframe)
                         
                         # iframe HTML 가져오기
                         iframe_html = driver.page_source
                         
-                        # HTML 직접 파싱 시도 (새로운 접근 방식)
-                        sheets_data = extract_data_from_html(iframe_html)
-                        if sheets_data:
-                            logger.info(f"단일 iframe에서 HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
-                            return sheets_data
+                        # HTML에서 데이터 추출
+                        iframe_data = extract_data_from_html(iframe_html)
                         
-                        # 기존 테이블 추출 시도
-                        df = extract_table_from_html(iframe_html)
+                        # 기본 프레임으로 복귀
                         driver.switch_to.default_content()
                         
-                        if df is not None and not df.empty:
-                            logger.info(f"단일 iframe에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
-                            return {"기본 시트": df}
+                        if iframe_data:
+                            logger.info(f"iframe에서 {len(iframe_data)}개 시트 추출 성공")
+                            return iframe_data
                         else:
-                            logger.warning("단일 iframe에서 테이블 추출 실패")
+                            logger.warning("iframe에서 데이터를 추출하지 못했습니다")
                             
-                            # OCR 시도
-                            if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
-                                # 현재 화면 캡처
-                                ocr_screenshot = f"single_iframe_{int(time.time())}.png"
-                                driver.save_screenshot(ocr_screenshot)
-                                
-                                # OCR로 데이터 추출
-                                ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                                if ocr_data and len(ocr_data) > 0:
-                                    logger.info(f"OCR로 데이터 추출 성공")
-                                    return {"OCR 추출": ocr_data[0]}
-                            
-                            if attempt < max_retries - 1:
-                                logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                                continue
-                            else:
-                                return None
+                            # 마지막 시도로 전체 HTML 분석
+                            html_data = extract_data_from_html(driver.page_source)
+                            if html_data:
+                                logger.info(f"전체 HTML에서 {len(html_data)}개 시트 추출 성공")
+                                return html_data
                     except Exception as iframe_err:
-                        logger.error(f"단일 iframe 처리 중 오류: {str(iframe_err)}")
+                        logger.warning(f"iframe 접근 오류: {str(iframe_err)}")
                         try:
                             driver.switch_to.default_content()
                         except:
@@ -2981,63 +3118,38 @@ def access_iframe_direct(driver, file_params):
                         if attempt < max_retries - 1:
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
-                        else:
-                            return None
             else:
                 logger.info("SynapDocViewServer 미감지, 일반 HTML 페이지 처리")
+                
+                # 일반 HTML 페이지에서 테이블 추출
                 try:
-                    # 현재 창 핸들 저장 (팝업이 있을 수 있음)
-                    original_handle = driver.current_window_handle
-                    
-                    # 새 창이 열렸는지 확인
-                    window_handles = driver.window_handles
-                    if len(window_handles) > 1:
-                        logger.info(f"새 창이 열렸습니다. 전환 시도...")
-                        for handle in window_handles:
-                            if handle != original_handle:
-                                driver.switch_to.window(handle)
-                                break
-                    
-                    # HTML 직접 파싱 시도 (새로운 접근 방식)
-                    sheets_data = extract_data_from_html(driver.page_source)
-                    if sheets_data:
-                        logger.info(f"HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
-                        return sheets_data
-                    
+                    # HTML에서 데이터 추출
+                    html_data = extract_data_from_html(driver.page_source)
+                    if html_data:
+                        logger.info(f"HTML에서 {len(html_data)}개 시트 추출 성공")
+                        return html_data
+                        
                     # pandas의 read_html 사용
                     tables = pd.read_html(driver.page_source)
                     
                     if tables:
-                        largest_table = max(tables, key=lambda t: t.size)
-                        logger.info(f"가장 큰 테이블 선택: {largest_table.shape}")
-                        return {"기본 테이블": largest_table}
+                        sheets_data = {}
+                        for i, table in enumerate(tables):
+                            sheets_data[f"Table_{i+1}"] = table
+                            
+                        logger.info(f"pandas.read_html로 {len(sheets_data)}개 테이블 추출 성공")
+                        return sheets_data
                     else:
                         logger.warning("페이지에서 테이블을 찾을 수 없습니다.")
-                        
-                        # OCR 시도
-                        if CONFIG['ocr_enabled'] and attempt == max_retries - 1:
-                            # 현재 화면 캡처
-                            ocr_screenshot = f"html_page_{int(time.time())}.png"
-                            driver.save_screenshot(ocr_screenshot)
-                            
-                            # OCR로 데이터 추출
-                            ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                            if ocr_data and len(ocr_data) > 0:
-                                logger.info(f"OCR로 HTML 페이지 데이터 추출 성공")
-                                return {"OCR 추출": ocr_data[0]}
                         
                         if attempt < max_retries - 1:
                             logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                             continue
-                        else:
-                            return None
-                except Exception as table_err:
-                    logger.error(f"HTML 테이블 추출 중 오류: {str(table_err)}")
+                except Exception as html_err:
+                    logger.warning(f"HTML 테이블 추출 중 오류: {str(html_err)}")
                     if attempt < max_retries - 1:
                         logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                         continue
-                    else:
-                        return None
         
         except Exception as e:
             logger.error(f"iframe 전환 및 데이터 추출 중 오류: {str(e)}")
@@ -3065,8 +3177,6 @@ def access_iframe_direct(driver, file_params):
                 logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
                 time.sleep(3)
                 continue
-            else:
-                return None
     
     return None
 
@@ -3662,6 +3772,624 @@ def extract_from_document_viewer(driver):
         except:
             pass
         return None
+
+def explore_synap_doc_viewer(driver, file_params=None):
+    """
+    SynapDocViewServer의 내부 구조를 탐색하고 분석하는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        file_params: 파일 접근 파라미터 (선택 사항)
+        
+    Returns:
+        dict: 수집된 정보 및 분석 결과
+    """
+    results = {
+        'timestamp': int(time.time()),
+        'url': driver.current_url,
+        'title': driver.title,
+        'structure': {},
+        'objects': {},
+        'html_snippets': {},
+        'potential_data': {}
+    }
+    
+    try:
+        # 1. 현재 페이지 정보 수집
+        logger.info("SynapDocViewServer 탐색 시작...")
+        logger.info(f"현재 URL: {driver.current_url}")
+        logger.info(f"페이지 제목: {driver.title}")
+        
+        # 전체 HTML 저장 (디버깅용)
+        html_path = f"synap_html_snapshot_{int(time.time())}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(driver.page_source)
+        logger.info(f"HTML 스냅샷 저장됨: {html_path}")
+        results['html_path'] = html_path
+        
+        # 2. JavaScript 환경 탐색
+        js_env = driver.execute_script("""
+            return {
+                // window 객체의 주요 속성 탐색
+                windowKeys: Object.keys(window).filter(k => 
+                    k.includes('Synap') || 
+                    k.includes('WM') || 
+                    k.includes('sheet') || 
+                    k.includes('table') ||
+                    k.includes('cell') ||
+                    k.includes('doc')
+                ),
+                
+                // 주요 객체 존재 여부 확인
+                hasLocalSynap: typeof localSynap !== 'undefined',
+                hasWM: typeof WM !== 'undefined',
+                hasSheetIndex: typeof sheetIndex !== 'undefined',
+                
+                // 문서 구조 정보
+                documentTitle: document.title,
+                docURL: document.URL,
+                iframes: document.querySelectorAll('iframe').length,
+                
+                // 주요 HTML 요소 존재 여부
+                hasMainTable: !!document.getElementById('mainTable'),
+                hasContainer: !!document.getElementById('container'),
+                hasSheetList: !!document.querySelector('.sheet-list'),
+                hasSheetTabs: !!document.querySelectorAll('.sheet-list__sheet-tab').length
+            };
+        """)
+        
+        logger.info(f"JavaScript 환경 정보: {json.dumps(js_env, indent=2)}")
+        results['js_env'] = js_env
+        
+        # 3. 주요 객체 구조 탐색
+        if js_env.get('hasLocalSynap'):
+            localSynap_info = driver.execute_script("""
+                try {
+                    if (typeof localSynap === 'undefined') return null;
+                    
+                    // 안전하게 객체 속성 추출
+                    function safeGetProps(obj) {
+                        if (!obj) return null;
+                        
+                        const props = {};
+                        for (const key of Object.keys(obj)) {
+                            try {
+                                const val = obj[key];
+                                const type = typeof val;
+                                
+                                if (type === 'function') {
+                                    props[key] = 'function';
+                                } else if (type === 'object') {
+                                    props[key] = val === null ? 'null' : 
+                                        Array.isArray(val) ? `array(${val.length})` : 'object';
+                                } else if (['string', 'number', 'boolean'].includes(type)) {
+                                    props[key] = String(val).substring(0, 100); // 문자열 제한
+                                } else {
+                                    props[key] = type;
+                                }
+                            } catch (e) {
+                                props[key] = `[Error: ${e.message}]`;
+                            }
+                        }
+                        return props;
+                    }
+                    
+                    return {
+                        properties: safeGetProps(localSynap),
+                        methods: Object.getOwnPropertyNames(Object.getPrototypeOf(localSynap))
+                            .filter(name => typeof localSynap[name] === 'function'),
+                        // 중요 메소드 존재 여부
+                        hasSetZoom: typeof localSynap.setZoom === 'function',
+                        hasGetSheets: typeof localSynap.getSheets === 'function',
+                        hasUpdateChartInfo: typeof localSynap.updateChartInfo === 'function'
+                    };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            logger.info(f"localSynap 객체 정보: {json.dumps(localSynap_info, indent=2)}")
+            results['objects']['localSynap'] = localSynap_info
+        
+        # WM 객체 탐색
+        if js_env.get('hasWM'):
+            wm_info = driver.execute_script("""
+                try {
+                    if (typeof WM === 'undefined') return null;
+                    
+                    return {
+                        methods: Object.getOwnPropertyNames(WM)
+                            .filter(name => typeof WM[name] === 'function'),
+                        hasGetSheets: typeof WM.getSheets === 'function',
+                        currentSheetIndex: typeof sheetIndex !== 'undefined' ? sheetIndex : null
+                    };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            logger.info(f"WM 객체 정보: {json.dumps(wm_info, indent=2)}")
+            results['objects']['WM'] = wm_info
+            
+            # WM.getSheets() 호출 시도
+            if wm_info.get('hasGetSheets'):
+                sheets_info = driver.execute_script("""
+                    try {
+                        const sheets = WM.getSheets();
+                        if (!sheets) return { error: 'No sheets returned' };
+                        
+                        return {
+                            count: sheets.length,
+                            sheets: sheets.map((sheet, idx) => {
+                                try {
+                                    return {
+                                        index: idx,
+                                        name: sheet.getName ? sheet.getName() : `Sheet${idx+1}`,
+                                        hasData: !!sheet.getData,
+                                        rowCount: sheet.getRowCount ? sheet.getRowCount() : null,
+                                        colCount: sheet.getColCount ? sheet.getColCount() : null
+                                    };
+                                } catch (e) {
+                                    return { index: idx, error: e.message };
+                                }
+                            })
+                        };
+                    } catch (e) {
+                        return { error: e.message };
+                    }
+                """)
+                
+                logger.info(f"시트 정보: {json.dumps(sheets_info, indent=2)}")
+                results['objects']['sheets'] = sheets_info
+                
+                # 각 시트의 데이터 수집 시도
+                if isinstance(sheets_info, dict) and 'sheets' in sheets_info:
+                    for sheet_info in sheets_info.get('sheets', []):
+                        sheet_idx = sheet_info.get('index')
+                        sheet_name = sheet_info.get('name', f"Sheet_{sheet_idx}")
+                        
+                        # 시트 데이터 추출 시도
+                        sheet_data = driver.execute_script(f"""
+                            try {{
+                                const sheets = WM.getSheets();
+                                if (!sheets || !sheets[{sheet_idx}] || !sheets[{sheet_idx}].getData) 
+                                    return null;
+                                
+                                const data = sheets[{sheet_idx}].getData();
+                                if (!data || !Array.isArray(data)) return null;
+                                
+                                // 최대 10행 x 10열 제한 (로그 크기 제한)
+                                return data.slice(0, 10).map(row => 
+                                    Array.isArray(row) ? row.slice(0, 10) : row
+                                );
+                            }} catch (e) {{
+                                return {{ error: e.message }};
+                            }}
+                        """)
+                        
+                        if sheet_data:
+                            logger.info(f"시트 '{sheet_name}' 데이터 샘플: {sheet_data[:3] if isinstance(sheet_data, list) else sheet_data}")
+                            results['potential_data'][f"sheet_{sheet_idx}"] = sheet_data
+        
+        # 4. DOM 구조 탐색
+        # mainTable 구조 탐색
+        if js_env.get('hasMainTable'):
+            main_table_info = driver.execute_script("""
+                try {
+                    const mainTable = document.getElementById('mainTable');
+                    if (!mainTable) return null;
+                    
+                    // 행 찾기
+                    const rows = mainTable.querySelectorAll('div[class*="tr"]');
+                    const rowCount = rows.length;
+                    
+                    // 첫 행의 셀 개수로 열 수 추정
+                    const firstRow = rows[0];
+                    const cells = firstRow ? firstRow.querySelectorAll('div[class*="td"]') : [];
+                    const colCount = cells.length;
+                    
+                    // mainTable 내 모든 셀 개수
+                    const allCells = mainTable.querySelectorAll('div[class*="td"]');
+                    
+                    // 첫 행의 셀 내용
+                    const headerContents = [];
+                    if (cells && cells.length > 0) {
+                        for (let i = 0; i < Math.min(cells.length, 10); i++) {
+                            headerContents.push(cells[i].textContent.trim());
+                        }
+                    }
+                    
+                    // 첫 행의 첫 셀과 마지막 셀의 내용
+                    const firstCellContent = cells && cells[0] ? cells[0].textContent.trim() : null;
+                    const lastCellContent = cells && cells[cells.length-1] ? 
+                        cells[cells.length-1].textContent.trim() : null;
+                    
+                    return {
+                        element: 'mainTable',
+                        rowCount,
+                        colCount,
+                        totalCells: allCells.length,
+                        class: mainTable.className,
+                        headerContents,
+                        firstCellContent,
+                        lastCellContent,
+                        style: mainTable.getAttribute('style')
+                    };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            logger.info(f"mainTable 구조 정보: {json.dumps(main_table_info, indent=2)}")
+            results['structure']['mainTable'] = main_table_info
+            
+            # 테이블 데이터 샘플 추출
+            table_data_sample = driver.execute_script("""
+                try {
+                    const mainTable = document.getElementById('mainTable');
+                    if (!mainTable) return null;
+                    
+                    const rows = mainTable.querySelectorAll('div[class*="tr"]');
+                    if (!rows || rows.length === 0) {
+                        // 대체 방법: 모든 직계 자식 div를 행으로 간주
+                        const childDivs = mainTable.querySelectorAll(':scope > div');
+                        if (!childDivs || childDivs.length === 0) return null;
+                        
+                        // 최대 10개 행 처리
+                        const tableData = [];
+                        for (let i = 0; i < Math.min(childDivs.length, 10); i++) {
+                            const row = childDivs[i];
+                            const cells = row.querySelectorAll('div');
+                            if (!cells || cells.length === 0) continue;
+                            
+                            const rowData = [];
+                            for (let j = 0; j < Math.min(cells.length, 10); j++) {
+                                rowData.push(cells[j].textContent.trim());
+                            }
+                            
+                            if (rowData.length > 0) {
+                                tableData.push(rowData);
+                            }
+                        }
+                        
+                        return tableData;
+                    }
+                    
+                    // 최대 10개 행 처리
+                    const tableData = [];
+                    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+                        const row = rows[i];
+                        const cells = row.querySelectorAll('div[class*="td"]');
+                        if (!cells || cells.length === 0) continue;
+                        
+                        const rowData = [];
+                        for (let j = 0; j < Math.min(cells.length, 10); j++) {
+                            rowData.push(cells[j].textContent.trim());
+                        }
+                        
+                        if (rowData.length > 0) {
+                            tableData.push(rowData);
+                        }
+                    }
+                    
+                    return tableData;
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            if table_data_sample:
+                logger.info(f"테이블 데이터 샘플: {table_data_sample[:3] if isinstance(table_data_sample, list) else table_data_sample}")
+                results['potential_data']['table_sample'] = table_data_sample
+        
+        # 5. 시트 탭 정보 수집
+        if js_env.get('hasSheetTabs'):
+            sheet_tabs_info = driver.execute_script("""
+                try {
+                    const tabs = document.querySelectorAll('.sheet-list__sheet-tab');
+                    if (!tabs || tabs.length === 0) return null;
+                    
+                    return {
+                        count: tabs.length,
+                        tabs: Array.from(tabs).map((tab, idx) => ({
+                            index: idx,
+                            text: tab.textContent.trim(),
+                            isActive: tab.classList.contains('active') || 
+                                     tab.classList.contains('sheet-list__sheet-tab--active'),
+                            id: tab.id || null,
+                            hasClickHandler: tab.onclick !== null || 
+                                            tab.getAttribute('onclick') !== null
+                        }))
+                    };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            logger.info(f"시트 탭 정보: {json.dumps(sheet_tabs_info, indent=2)}")
+            results['structure']['sheetTabs'] = sheet_tabs_info
+        
+        # 6. iframe 탐색
+        iframe_count = driver.execute_script("return document.querySelectorAll('iframe').length;")
+        if iframe_count > 0:
+            iframe_info = driver.execute_script("""
+                try {
+                    const iframes = document.querySelectorAll('iframe');
+                    return Array.from(iframes).map((iframe, idx) => ({
+                        index: idx,
+                        id: iframe.id || null,
+                        name: iframe.name || null,
+                        src: iframe.src || null,
+                        width: iframe.width || null,
+                        height: iframe.height || null
+                    }));
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            logger.info(f"iframe 정보: {json.dumps(iframe_info, indent=2)}")
+            results['structure']['iframes'] = iframe_info
+            
+            # 각 iframe 내용 탐색
+            for i in range(iframe_count):
+                try:
+                    driver.switch_to.frame(i)
+                    
+                    iframe_content_info = driver.execute_script("""
+                        return {
+                            title: document.title,
+                            hasTable: !!document.querySelector('table'),
+                            hasMainTable: !!document.getElementById('mainTable'),
+                            bodyText: document.body.textContent.substring(0, 200) + '...'
+                        };
+                    """)
+                    
+                    logger.info(f"iframe {i} 내용: {json.dumps(iframe_content_info, indent=2)}")
+                    results['structure'][f'iframe_{i}_content'] = iframe_content_info
+                    
+                    # 기본 컨텐츠로 돌아가기
+                    driver.switch_to.default_content()
+                except Exception as iframe_err:
+                    logger.warning(f"iframe {i} 접근 오류: {str(iframe_err)}")
+                    try:
+                        driver.switch_to.default_content()
+                    except:
+                        pass
+        
+        # 7. 최종 HTML 구조 요약
+        html_summary = driver.execute_script("""
+            return {
+                bodyChildren: document.body.children.length,
+                divCount: document.querySelectorAll('div').length,
+                tableCount: document.querySelectorAll('table').length,
+                iframeCount: document.querySelectorAll('iframe').length,
+                mainIds: Array.from(document.querySelectorAll('[id]')).map(el => el.id).slice(0, 20)
+            };
+        """)
+        
+        logger.info(f"HTML 구조 요약: {json.dumps(html_summary, indent=2)}")
+        results['structure']['summary'] = html_summary
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"SynapDocViewServer 탐색 중 오류: {str(e)}")
+        results['error'] = str(e)
+        return results
+
+
+def extract_synap_data_using_structure_info(driver, structure_info):
+    """
+    SynapDocViewServer 구조 정보를 기반으로 데이터 추출
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        structure_info: SynapDocViewServer 구조 정보
+        
+    Returns:
+        dict: 추출된 시트 데이터
+    """
+    extracted_data = {}
+    
+    try:
+        js_env = structure_info.get('js_env', {})
+        objects = structure_info.get('objects', {})
+        
+        # 1. WM.getSheets()가 있는 경우
+        wm_info = objects.get('WM', {})
+        sheets_info = objects.get('sheets', {})
+        
+        if wm_info.get('hasGetSheets') and isinstance(sheets_info.get('sheets'), list):
+            logger.info("WM.getSheets() 메소드를 통한 데이터 추출 시도")
+            
+            sheets = sheets_info.get('sheets', [])
+            for sheet in sheets:
+                sheet_idx = sheet.get('index')
+                sheet_name = sheet.get('name', f"Sheet_{sheet_idx}")
+                
+                sheet_data = driver.execute_script(f"""
+                    try {{
+                        const sheets = WM.getSheets();
+                        if (!sheets || !sheets[{sheet_idx}]) return null;
+                        
+                        const sheet = sheets[{sheet_idx}];
+                        if (!sheet.getData) return null;
+                        
+                        return sheet.getData();
+                    }} catch (e) {{
+                        return {{ error: e.message }};
+                    }}
+                """)
+                
+                if isinstance(sheet_data, list) and sheet_data:
+                    # 헤더와 데이터 구분
+                    headers = sheet_data[0] if sheet_data else []
+                    data = sheet_data[1:] if len(sheet_data) > 1 else []
+                    
+                    extracted_data[sheet_name] = {
+                        'headers': headers,
+                        'data': data,
+                        'source': 'WM.getSheets'
+                    }
+                    
+                    logger.info(f"시트 '{sheet_name}' 데이터 추출 성공: {len(data)}행 {len(headers)}열")
+            
+            if extracted_data:
+                return extracted_data
+        
+        # 2. mainTable에서 직접 추출
+        main_table_info = structure_info.get('structure', {}).get('mainTable', {})
+        
+        if main_table_info and not isinstance(main_table_info, str):
+            logger.info("mainTable에서 직접 데이터 추출 시도")
+            
+            table_data = driver.execute_script("""
+                try {
+                    const mainTable = document.getElementById('mainTable');
+                    if (!mainTable) return null;
+                    
+                    // 다양한 방법으로 행 찾기
+                    let rows = mainTable.querySelectorAll('div[class*="tr"]');
+                    if (!rows || rows.length === 0) {
+                        rows = mainTable.children;
+                    }
+                    
+                    if (!rows || rows.length === 0) return null;
+                    
+                    const tableData = [];
+                    for (let i = 0; i < rows.length; i++) {
+                        const row = rows[i];
+                        
+                        // 다양한 방법으로 셀 찾기
+                        let cells = row.querySelectorAll('div[class*="td"]');
+                        if (!cells || cells.length === 0) {
+                            cells = row.children;
+                        }
+                        
+                        if (!cells || cells.length === 0) continue;
+                        
+                        const rowData = [];
+                        for (let j = 0; j < cells.length; j++) {
+                            rowData.push(cells[j].textContent.trim());
+                        }
+                        
+                        if (rowData.length > 0) {
+                            tableData.push(rowData);
+                        }
+                    }
+                    
+                    return tableData;
+                } catch (e) {
+                    return { error: e.message };
+                }
+            """)
+            
+            if isinstance(table_data, list) and table_data:
+                sheet_name = "MainTable"
+                
+                # 첫 번째 행이 헤더인지 판단
+                if len(table_data) > 1:
+                    headers = table_data[0]
+                    data = table_data[1:]
+                    
+                    extracted_data[sheet_name] = {
+                        'headers': headers,
+                        'data': data,
+                        'source': 'mainTable_direct'
+                    }
+                    
+                    logger.info(f"mainTable에서 데이터 추출 성공: {len(data)}행 {len(headers)}열")
+                    return extracted_data
+        
+        # 3. 시트 탭이 있는 경우, 각 탭 클릭하여 데이터 추출
+        sheet_tabs_info = structure_info.get('structure', {}).get('sheetTabs', {})
+        if isinstance(sheet_tabs_info, dict) and sheet_tabs_info.get('tabs'):
+            logger.info("시트 탭 클릭을 통한 데이터 추출 시도")
+            
+            tabs = sheet_tabs_info.get('tabs', [])
+            for tab in tabs:
+                tab_idx = tab.get('index')
+                tab_text = tab.get('text', f"Tab_{tab_idx}")
+                
+                # 탭 클릭
+                try:
+                    driver.execute_script(f"""
+                        const tabs = document.querySelectorAll('.sheet-list__sheet-tab');
+                        if (tabs && tabs[{tab_idx}]) {{
+                            tabs[{tab_idx}].click();
+                        }}
+                    """)
+                    
+                    logger.info(f"탭 '{tab_text}' 클릭")
+                    time.sleep(2)  # 탭 전환 대기
+                    
+                    # 현재 표시된 데이터 추출
+                    tab_data = driver.execute_script("""
+                        try {
+                            const mainTable = document.getElementById('mainTable');
+                            if (!mainTable) return null;
+                            
+                            // 다양한 방법으로 행 찾기
+                            let rows = mainTable.querySelectorAll('div[class*="tr"]');
+                            if (!rows || rows.length === 0) {
+                                rows = mainTable.children;
+                            }
+                            
+                            if (!rows || rows.length === 0) return null;
+                            
+                            const tableData = [];
+                            for (let i = 0; i < rows.length; i++) {
+                                const row = rows[i];
+                                
+                                // 다양한 방법으로 셀 찾기
+                                let cells = row.querySelectorAll('div[class*="td"]');
+                                if (!cells || cells.length === 0) {
+                                    cells = row.children;
+                                }
+                                
+                                if (!cells || cells.length === 0) continue;
+                                
+                                const rowData = [];
+                                for (let j = 0; j < cells.length; j++) {
+                                    rowData.push(cells[j].textContent.trim());
+                                }
+                                
+                                if (rowData.length > 0) {
+                                    tableData.push(rowData);
+                                }
+                            }
+                            
+                            return tableData;
+                        } catch (e) {
+                            return { error: e.message };
+                        }
+                    """)
+                    
+                    if isinstance(tab_data, list) and tab_data:
+                        sheet_name = tab_text.strip()
+                        
+                        # 첫 번째 행이 헤더인지 판단
+                        if len(tab_data) > 1:
+                            headers = tab_data[0]
+                            data = tab_data[1:]
+                            
+                            extracted_data[sheet_name] = {
+                                'headers': headers,
+                                'data': data,
+                                'source': 'tab_click'
+                            }
+                            
+                            logger.info(f"탭 '{tab_text}'에서 데이터 추출 성공: {len(data)}행 {len(headers)}열")
+                
+                except Exception as tab_err:
+                    logger.warning(f"탭 '{tab_text}' 처리 중 오류: {str(tab_err)}")
+        
+        return extracted_data
+            
+    except Exception as e:
+        logger.error(f"SynapDocViewServer 데이터 추출 중 오류: {str(e)}")
+        return extracted_data
 
 def extract_with_javascript(driver):
     """
@@ -6392,7 +7120,7 @@ async def run_monitor(days_range=4, check_sheets=True):
     
     try:
         # Start time recording
-        start_time = time.time()
+         start_time = time.time()
         logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
 
         # Create screenshot directory
@@ -6434,7 +7162,23 @@ async def run_monitor(days_range=4, check_sheets=True):
             """, description="웹드라이버 감지 회피")
         except Exception as setup_err:
             logger.warning(f"웹드라이버 강화 설정 중 오류: {str(setup_err)}")
+
+        # OCR 설정 확인
+        try:
+            from PIL import Image, ImageEnhance, ImageFilter
+            import cv2
+            import pytesseract
+            # 특히 GitHub Actions에서 pytesseract 설정 확인
+            pytesseract_cmd = os.environ.get('PYTESSERACT_CMD', 'tesseract')
+            pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
+            logger.info(f"OCR 설정: tesseract_cmd={pytesseract_cmd}")
+            OCR_IMPORTS_AVAILABLE = True
+        except ImportError as e:
+            OCR_IMPORTS_AVAILABLE = False
+            logger.warning(f"OCR 관련 라이브러리 임포트 실패: {str(e)}")
         
+
+
         # Access landing page
         try:
             # Navigate to landing page
@@ -6619,17 +7363,52 @@ async def run_monitor(days_range=4, check_sheets=True):
                     # Direct access with OCR fallback - CORE IMPROVEMENT
                     if 'atch_file_no' in file_params and 'file_ord' in file_params:
                         # ENHANCED: Clear logging of extraction process
-                        logger.info(f"Starting document extraction via iframe with OCR fallback")
+                        logger.info(f"문서 추출 시작 - atch_file_no: {file_params['atch_file_no']}, file_ord: {file_params['file_ord']}")
                         
-                        # Try to extract data with enhanced iframe access and OCR fallback
-                        sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
+                        # 먼저 SynapDocViewServer 구조 탐색 시도
+                        structure_info = explore_synap_doc_viewer(driver, file_params)
+                        logger.info(f"SynapDocViewServer 구조 탐색 완료: {len(structure_info.keys())} 항목 수집")
                         
-                        if sheets_data:
+                        # 구조 정보 기반 데이터 추출 시도
+                        if structure_info and not 'error' in structure_info:
+                            extracted_data = extract_synap_data_using_structure_info(driver, structure_info)
+                            
+                            # DataFrame으로 변환
+                            sheets_data = {}
+                            if extracted_data:
+                                for sheet_name, sheet_data in extracted_data.items():
+                                    headers = sheet_data.get('headers', [])
+                                    data = sheet_data.get('data', [])
+                                    
+                                    if headers and data:
+                                        try:
+                                            df = pd.DataFrame(data, columns=headers)
+                                            sheets_data[sheet_name] = df
+                                            logger.info(f"시트 '{sheet_name}'을 DataFrame으로 변환: {df.shape[0]}행 {df.shape[1]}열")
+                                        except Exception as df_err:
+                                            logger.warning(f"시트 '{sheet_name}' DataFrame 변환 오류: {str(df_err)}")
+                            
+                            if sheets_data and any(not df.empty for df in sheets_data.values()):
+                                logger.info(f"구조 탐색으로 데이터 추출 성공: {len(sheets_data)}개 시트")
+                            else:
+                                # 구조 분석 실패 시 기존 직접 접근 함수 사용
+                                logger.info("구조 정보 기반 추출 실패, 직접 접근 시도")
+                                sheets_data = access_iframe_direct(driver, file_params)
+                        else:
+                            # 구조 분석이 없는 경우 직접 접근 함수 사용
+                            sheets_data = access_iframe_direct(driver, file_params)
+                        
+                        # 데이터 추출 성공 여부에 따라 OCR 폴백 결정
+                        if not sheets_data or not any(not df.empty for df in sheets_data.values()):
+                            logger.info("직접 접근 실패, OCR 폴백 시도")
+                            sheets_data = access_iframe_with_ocr_fallback(driver, file_params)
+                        
+                        if sheets_data and any(not df.empty for df in sheets_data.values()):
                             # Log detailed information about extracted data
                             sheet_names = list(sheets_data.keys())
                             sheet_sizes = {name: sheets_data[name].shape for name in sheet_names}
-                            logger.info(f"Successful data extraction: {len(sheet_names)} sheets extracted")
-                            logger.info(f"Sheet dimensions: {sheet_sizes}")
+                            logger.info(f"데이터 추출 성공: {len(sheet_names)}개 시트")
+                            logger.info(f"시트 크기: {sheet_sizes}")
                             
                             # Prepare update data
                             update_data = {
@@ -6645,6 +7424,27 @@ async def run_monitor(days_range=4, check_sheets=True):
                             if success:
                                 logger.info(f"Google Sheets 업데이트 성공: {post['title']}")
                                 data_updates.append(update_data)
+                            else:
+                                logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
+                        else:
+                            logger.warning(f"모든 방법으로 데이터 추출 실패: {post['title']}")
+                            
+                            # ENHANCED: Create a better placeholder with diagnostic info
+                            placeholder_df = create_improved_placeholder_dataframe(post, file_params)
+                            
+                            if not placeholder_df.empty:
+                                update_data = {
+                                    'dataframe': placeholder_df,
+                                    'post_info': post
+                                }
+                                
+                                if 'date' in file_params:
+                                    update_data['date'] = file_params['date']
+                                
+                                success = update_google_sheets(gs_client, update_data)
+                                if success:
+                                    logger.info(f"대체 데이터로 업데이트 성공: {post['title']}")
+                                    data_updates.append(update_data)
                             else:
                                 logger.warning(f"Google Sheets 업데이트 실패: {post['title']}")
                         else:
@@ -6738,6 +7538,15 @@ async def run_monitor(days_range=4, check_sheets=True):
                     
                     # ENHANCED: More robust error recovery
                     try:
+                        # 오류 스크린샷 저장
+                        error_screenshot = f"error_{int(time.time())}.png"
+                        driver.save_screenshot(error_screenshot)
+                        logger.info(f"오류 스크린샷 저장: {error_screenshot}")
+                        
+                        # 페이지 소스 저장
+                        with open(f"error_source_{int(time.time())}.html", 'w', encoding='utf-8') as f:
+                            f.write(driver.page_source)
+                        
                         # Reset browser context without losing cookies
                         reset_browser_context(driver, delete_cookies=False)
                         logger.info("게시물 처리 오류 후 브라우저 컨텍스트 초기화")
@@ -6750,6 +7559,15 @@ async def run_monitor(days_range=4, check_sheets=True):
                         logger.info("통계 페이지로 복귀 성공")
                     except Exception as recovery_err:
                         logger.error(f"오류 복구 실패: {str(recovery_err)}")
+                        
+                        # 브라우저 완전 재설정 시도
+                        try:
+                            driver.quit()
+                            driver = setup_driver()
+                            driver.get(CONFIG['stats_url'])
+                            logger.info("브라우저 완전 재설정 성공")
+                        except Exception as reset_err:
+                            logger.error(f"브라우저 재설정 실패: {str(reset_err)}")
                         
                         # Take screenshot for debugging
                         try:
@@ -6796,6 +7614,7 @@ async def run_monitor(days_range=4, check_sheets=True):
     except Exception as e:
         logger.error(f"모니터링 중 오류 발생: {str(e)}")
         
+        # 오류 처리 향상
         try:
             # Save error screenshot
             if driver:
@@ -6804,6 +7623,19 @@ async def run_monitor(days_range=4, check_sheets=True):
                     logger.info("오류 발생 시점 스크린샷 저장 완료")
                 except Exception as ss_err:
                     logger.error(f"오류 스크린샷 저장 실패: {str(ss_err)}")
+            
+            # 스택 트레이스 저장
+            import traceback
+            error_trace = traceback.format_exc()
+            logger.error(f"상세 오류 정보: {error_trace}")
+            
+            # 진단 정보 수집
+            try:
+                if driver:
+                    js_info = driver.execute_script("return {url: document.URL, readyState: document.readyState, title: document.title};")
+                    logger.info(f"페이지 진단 정보: {json.dumps(js_info)}")
+            except:
+                pass
             
             # Send error notification
             bot = telegram.Bot(token=CONFIG['telegram_token'])
@@ -6891,8 +7723,222 @@ def create_improved_placeholder_dataframe(post_info, file_params=None):
         })
 
 
+def retry_with_backoff(func, max_retries=3, base_delay=2, *args, **kwargs):
+    """
+    지수 백오프 방식으로 함수 재시도
+    
+    Args:
+        func: 실행할 함수
+        max_retries: 최대 재시도 횟수
+        base_delay: 기본 지연 시간 (초)
+        *args, **kwargs: 함수에 전달할 인자들
+        
+    Returns:
+        함수의 반환값
+        
+    Raises:
+        마지막 예외를 다시 발생시킴
+    """
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            wait_time = base_delay * (2 ** attempt)  # 지수 백오프
+            logger.warning(f"시도 {attempt+1}/{max_retries} 실패: {str(e)}, {wait_time}초 후 재시도")
+            time.sleep(wait_time)
+    
+    logger.error(f"{max_retries}번 시도 후 실패: {str(last_exception)}")
+    raise last_exception
+
+def process_in_chunks(large_data, chunk_size=1000, process_func=None):
+    """
+    대용량 데이터를 청크로 나누어 처리
+    
+    Args:
+        large_data: 대용량 데이터 (리스트 또는 유사한 시퀀스)
+        chunk_size: 청크 크기
+        process_func: 각 청크를 처리할 함수
+        
+    Returns:
+        전체 처리 결과 리스트
+    """
+    if process_func is None:
+        def process_func(x): return x
+        
+    results = []
+    
+    try:
+        for i in range(0, len(large_data), chunk_size):
+            chunk = large_data[i:i+chunk_size]
+            
+            # 청크 처리
+            chunk_result = process_func(chunk)
+            
+            if chunk_result:
+                if isinstance(chunk_result, list):
+                    results.extend(chunk_result)
+                else:
+                    results.append(chunk_result)
+            
+            # 명시적 메모리 해제
+            chunk = None
+            chunk_result = None
+            
+            # 가비지 컬렉션 강제 실행
+            import gc
+            gc.collect()
+            
+            # 잠시 대기 (시스템에 부담 감소)
+            time.sleep(0.1)
+            
+        return results
+    except Exception as e:
+        logger.error(f"청크 처리 중 오류: {str(e)}")
+        return results  # 부분적으로라도 처리된 결과 반환
+
+def collect_diagnostic_info(driver, error=None):
+    """
+    드라이버 상태와 페이지에 대한 진단 정보 수집
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        error: 발생한 예외 객체 (선택 사항)
+        
+    Returns:
+        dict: 수집된 진단 정보
+    """
+    info = {
+        'timestamp': datetime.now().isoformat(),
+        'error': str(error) if error else None
+    }
+    
+    try:
+        # 기본 페이지 정보
+        info['url'] = driver.current_url
+        info['title'] = driver.title
+        
+        # JavaScript 진단 정보
+        js_info = driver.execute_script("""
+            return {
+                readyState: document.readyState,
+                url: document.URL,
+                referrer: document.referrer,
+                domain: document.domain,
+                iframesCount: document.querySelectorAll('iframe').length,
+                tablesCount: document.querySelectorAll('table').length,
+                mainTableExists: !!document.getElementById('mainTable'),
+                viewportHeight: window.innerHeight,
+                viewportWidth: window.innerWidth,
+                hasJQuery: typeof jQuery !== 'undefined',
+                hasSynap: typeof localSynap !== 'undefined'
+            };
+        """)
+        info['page_info'] = js_info
+        
+        # DOM 상태 확인
+        dom_info = driver.execute_script("""
+            return {
+                bodyChildCount: document.body ? document.body.children.length : 0,
+                headChildCount: document.head ? document.head.children.length : 0,
+                scriptsCount: document.scripts ? document.scripts.length : 0,
+                formsCount: document.forms ? document.forms.length : 0
+            };
+        """)
+        info['dom_info'] = dom_info
+        
+        # iframe 정보
+        iframe_info = []
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for i, iframe in enumerate(iframes):
+            try:
+                iframe_info.append({
+                    'index': i,
+                    'id': iframe.get_attribute('id'),
+                    'name': iframe.get_attribute('name'),
+                    'src': iframe.get_attribute('src'),
+                    'width': iframe.get_attribute('width'),
+                    'height': iframe.get_attribute('height'),
+                    'is_displayed': iframe.is_displayed()
+                })
+            except:
+                iframe_info.append({'index': i, 'error': 'Could not get attributes'})
+        
+        info['iframes'] = iframe_info
+        
+        # 오류가 있는 경우 스크린샷 저장
+        if error:
+            try:
+                screenshot_path = f"error_screenshot_{int(time.time())}.png"
+                driver.save_screenshot(screenshot_path)
+                info['screenshot_path'] = screenshot_path
+            except Exception as ss_err:
+                info['screenshot_error'] = str(ss_err)
+            
+            # 페이지 소스 저장
+            try:
+                source_path = f"error_source_{int(time.time())}.html"
+                with open(source_path, 'w', encoding='utf-8') as f:
+                    f.write(driver.page_source)
+                info['source_path'] = source_path
+            except Exception as src_err:
+                info['source_error'] = str(src_err)
+                
+            # 스택 트레이스 저장
+            import traceback
+            info['traceback'] = traceback.format_exc()
+        
+        return info
+        
+    except Exception as diag_err:
+        logger.error(f"진단 정보 수집 중 오류: {str(diag_err)}")
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'error': str(error) if error else None,
+            'diagnostic_error': str(diag_err)
+        }
+
+def setup_enhanced_logging():
+    """GitHub Actions 환경에 최적화된 로깅 설정"""
+    # 기존 로거 가져오기
+    logger = logging.getLogger('msit_monitor')
+    
+    # 로그 포맷 설정
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    )
+    
+    # 파일 핸들러 추가
+    file_handler = logging.FileHandler('msit_monitor_detailed.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # 콘솔 핸들러 추가
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # 로그 레벨 설정
+    logger.setLevel(logging.DEBUG)
+    
+    # 로거 반환
+    return logger
+
+
 async def main():
     """메인 함수: 환경 변수 처리 및 모니터링 실행"""
+    # 향상된 로깅 설정
+    global logger
+    logger = setup_enhanced_logging()
+    
+    # GitHub Actions 환경 감지
+    is_github_actions = os.environ.get('GITHUB_ACTIONS', 'false').lower() == 'true'
+    if is_github_actions:
+        logger.info("GitHub Actions 환경에서 실행 중")
+    
     # 환경 변수 가져오기 (향상된 버전)
     try:
         days_range = int(os.environ.get('DAYS_RANGE', '4'))
@@ -6909,9 +7955,14 @@ async def main():
     ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
     CONFIG['ocr_enabled'] = ocr_enabled_str in ('true', 'yes', '1', 'y')
     
+    # 재시도 설정
+    CONFIG['max_retries'] = int(os.environ.get('MAX_RETRIES', '3'))
+    CONFIG['page_load_timeout'] = int(os.environ.get('PAGE_LOAD_TIMEOUT', '30'))
+    
     # 환경 설정 로그
     logger.info(f"MSIT 모니터 시작 - days_range={days_range}, check_sheets={check_sheets}, ocr_enabled={CONFIG['ocr_enabled']}")
     logger.info(f"스프레드시트 이름: {spreadsheet_name}")
+    logger.info(f"재시도 설정: max_retries={CONFIG['max_retries']}, page_load_timeout={CONFIG['page_load_timeout']}")
     
     # 전역 설정 업데이트
     CONFIG['spreadsheet_name'] = spreadsheet_name
@@ -6922,20 +7973,46 @@ async def main():
             import pytesseract
             from PIL import Image, ImageEnhance, ImageFilter
             import cv2
-            logger.info("OCR 관련 라이브러리 로드 성공")
+            
+            # Tesseract 경로 설정
+            pytesseract_cmd = os.environ.get('PYTESSERACT_CMD', 'tesseract')
+            pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
+            logger.info(f"Tesseract 경로 설정: {pytesseract_cmd}")
             
             # Tesseract 가용성 확인
             try:
-                pytesseract.get_tesseract_version()
-                logger.info("Tesseract OCR 설치 확인됨")
+                version = pytesseract.get_tesseract_version()
+                logger.info(f"Tesseract OCR 버전: {version}")
             except Exception as tess_err:
                 logger.warning(f"Tesseract OCR 설치 확인 실패: {str(tess_err)}")
-                CONFIG['ocr_enabled'] = False
-                logger.warning("OCR 기능 비활성화")
+                if is_github_actions:
+                    # GitHub Actions에서는 tesseract 설치 여부 확인
+                    import subprocess
+                    try:
+                        result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
+                        if result.stdout:
+                            logger.info(f"Tesseract 실행 파일 경로: {result.stdout.strip()}")
+                        else:
+                            logger.warning("Tesseract 실행 파일을 찾을 수 없음")
+                            CONFIG['ocr_enabled'] = False
+                    except Exception as which_err:
+                        logger.warning(f"Tesseract 경로 확인 실패: {str(which_err)}")
+                        CONFIG['ocr_enabled'] = False
+                else:
+                    CONFIG['ocr_enabled'] = False
+            
+            logger.info("OCR 관련 라이브러리 로드 성공")
         except ImportError as import_err:
             logger.warning(f"OCR 라이브러리 가져오기 실패: {str(import_err)}")
             CONFIG['ocr_enabled'] = False
-            logger.warning("OCR 기능 비활성화")
+    
+    # GC 구성 최적화 (메모리 관리)
+    try:
+        import gc
+        gc.enable()
+        logger.info("가비지 컬렉션 최적화 설정 완료")
+    except:
+        pass
     
     # 모니터링 실행
     try:
@@ -6946,9 +8023,14 @@ async def main():
         # 치명적 오류 시 텔레그램 알림 시도
         try:
             bot = telegram.Bot(token=CONFIG['telegram_token'])
+            # 오류 메시지 제한 (너무 길면 자름)
+            error_msg = str(e)
+            if len(error_msg) > 500:
+                error_msg = error_msg[:500] + "..."
+                
             await bot.send_message(
                 chat_id=int(CONFIG['chat_id']),
-                text=f"⚠️ *MSIT 모니터링 치명적 오류*\n\n{str(e)}\n\n시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                text=f"⚠️ *MSIT 모니터링 치명적 오류*\n\n{error_msg}\n\n시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 parse_mode='Markdown'
             )
         except Exception as telegram_err:
