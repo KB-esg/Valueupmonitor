@@ -7104,26 +7104,21 @@ async def send_telegram_message(posts, data_updates=None):
             logger.error(f"단순화된 텔레그램 메시지 전송 중 오류: {str(simple_err)}")
 
 
-async def run_monitor(days_range=4, check_sheets=True):
+async def run_monitor(days_range: int = 4, check_sheets: bool = True) -> None:
     """
     Enhanced monitoring function with improved document processing flow.
-    
+
     Args:
-        days_range: Number of days to look back for new posts
-        check_sheets: Whether to update Google Sheets
-    
-    Returns:
-        None
+        days_range (int): Number of days to look back for new posts.
+        check_sheets (bool): Whether to update Google Sheets.
     """
     driver = None
     gs_client = None
-    
+
     try:
-        # Start time recording
         start_time = time.time()
         logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
-
-        # Create screenshot directory
+             # Create screenshot directory
         screenshots_dir = Path("./screenshots")
         screenshots_dir.mkdir(exist_ok=True)
 
