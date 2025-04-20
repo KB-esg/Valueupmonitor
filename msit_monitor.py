@@ -7120,7 +7120,7 @@ async def run_monitor(days_range=4, check_sheets=True):
     
     try:
         # Start time recording
-         start_time = time.time()
+        start_time = time.time()
         logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
 
         # Create screenshot directory
