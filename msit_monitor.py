@@ -2403,7 +2403,7 @@ def clean_dataframe(df):
             cleaned = df[col].astype(str).str.replace(',', '').str.replace('%', '')
             
             # Check if column looks numeric
-            if cleaned.str.match(r'^-?\d+\.?\d*).mean() > 0.7:  # If >70% match numeric pattern
+            if cleaned.str.match(r'^-?\d+\.?\d*').mean() > 0.7:  # If >70% match numeric pattern
                 try:
                     df[col] = pd.to_numeric(cleaned, errors='coerce')
                     df[col] = df[col].fillna(0)  # Replace NaN from failed conversions
