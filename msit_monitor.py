@@ -1842,9 +1842,6 @@ def access_iframe_direct(driver, file_params):
             current_url = driver.current_url
             logger.info(f"현재 URL: {current_url}")
            
-            # 디버깅용 HTML 저장 (추가된 부분)
-            save_html_for_debugging(driver, f"document_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
-            
             # 스크린샷 저장
             take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
             
@@ -1912,35 +1909,37 @@ def access_iframe_direct(driver, file_params):
                             # 페이지 소스 가져오기
                             iframe_html = driver.page_source
                             
-                            # iframe HTML 저장 (추가된 부분)
-                            iframe_html_path = f"iframe_content_{sheet_name}_{int(time.time())}.html"
-                            with open(iframe_html_path, 'w', encoding='utf-8') as f:
-                                f.write(iframe_html)
-                            logger.info(f"iframe 콘텐츠 HTML 저장 완료: {iframe_html_path}")
-                            
-                            # 테이블 추출
-                            df = extract_table_from_html(iframe_html)
-                            
-                            # 기본 프레임으로 복귀
-                            driver.switch_to.default_content()
-                            
-                            if df is not None and not df.empty:
-                                all_sheets[sheet_name] = df
-                                logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                            # HTML 직접 파싱 시도 (새로운 접근 방식)
+                            sheets_data = extract_data_from_html(iframe_html)
+                            if sheets_data:
+                                for html_sheet_name, html_df in sheets_data.items():
+                                    combined_name = f"{sheet_name}_{html_sheet_name}" if len(sheets_data) > 1 else sheet_name
+                                    all_sheets[combined_name] = html_df
+                                logger.info(f"시트 '{sheet_name}'에서 HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
                             else:
-                                logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
+                                # 기존 테이블 추출 시도
+                                df = extract_table_from_html(iframe_html)
                                 
-                                # 테이블 추출 실패 시 OCR 시도
-                                if CONFIG['ocr_enabled']:
-                                    # 현재 화면 캡처
-                                    ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
-                                    driver.save_screenshot(ocr_screenshot)
+                                # 기본 프레임으로 복귀
+                                driver.switch_to.default_content()
+                                
+                                if df is not None and not df.empty:
+                                    all_sheets[sheet_name] = df
+                                    logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {df.shape[0]}행, {df.shape[1]}열")
+                                else:
+                                    logger.warning(f"시트 '{sheet_name}'에서 테이블 추출 실패")
                                     
-                                    # OCR로 데이터 추출
-                                    ocr_data = extract_data_from_screenshot(ocr_screenshot)
-                                    if ocr_data and len(ocr_data) > 0:
-                                        all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
-                                        logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
+                                    # 테이블 추출 실패 시 OCR 시도
+                                    if CONFIG['ocr_enabled']:
+                                        # 현재 화면 캡처
+                                        ocr_screenshot = f"sheet_{sheet_name}_{int(time.time())}.png"
+                                        driver.save_screenshot(ocr_screenshot)
+                                        
+                                        # OCR로 데이터 추출
+                                        ocr_data = extract_data_from_screenshot(ocr_screenshot)
+                                        if ocr_data and len(ocr_data) > 0:
+                                            all_sheets[sheet_name] = ocr_data[0]  # 첫 번째 추출 데이터 사용
+                                            logger.info(f"시트 '{sheet_name}'에서 OCR로 데이터 추출 성공")
                         except Exception as iframe_err:
                             logger.error(f"시트 '{sheet_name}' 처리 중 오류: {str(iframe_err)}")
                             try:
@@ -1967,14 +1966,17 @@ def access_iframe_direct(driver, file_params):
                         )
                         driver.switch_to.frame(iframe)
                         
-                        # iframe HTML 저장 (추가된 부분)
-                        iframe_html_path = f"single_iframe_{int(time.time())}.html"
-                        html_content = driver.page_source
-                        with open(iframe_html_path, 'w', encoding='utf-8') as f:
-                            f.write(html_content)
-                        logger.info(f"단일 iframe HTML 저장 완료: {iframe_html_path}")
+                        # iframe HTML 가져오기
+                        iframe_html = driver.page_source
                         
-                        df = extract_table_from_html(html_content)
+                        # HTML 직접 파싱 시도 (새로운 접근 방식)
+                        sheets_data = extract_data_from_html(iframe_html)
+                        if sheets_data:
+                            logger.info(f"단일 iframe에서 HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
+                            return sheets_data
+                        
+                        # 기존 테이블 추출 시도
+                        df = extract_table_from_html(iframe_html)
                         driver.switch_to.default_content()
                         
                         if df is not None and not df.empty:
@@ -2027,11 +2029,11 @@ def access_iframe_direct(driver, file_params):
                                 driver.switch_to.window(handle)
                                 break
                     
-                    # 일반 HTML 페이지 저장 (추가된 부분)
-                    html_page_path = f"html_page_{int(time.time())}.html"
-                    with open(html_page_path, 'w', encoding='utf-8') as f:
-                        f.write(driver.page_source)
-                    logger.info(f"HTML 페이지 저장 완료: {html_page_path}")
+                    # HTML 직접 파싱 시도 (새로운 접근 방식)
+                    sheets_data = extract_data_from_html(driver.page_source)
+                    if sheets_data:
+                        logger.info(f"HTML 직접 파싱으로 {len(sheets_data)}개 테이블 추출 성공")
+                        return sheets_data
                     
                     # pandas의 read_html 사용
                     tables = pd.read_html(driver.page_source)
@@ -4223,6 +4225,117 @@ def execute_batched_updates(worksheet, updates, batch_size):
     except Exception as e:
         logger.error(f"Error executing batched updates: {str(e)}")
         return False
+
+def extract_data_from_html(html_content):
+    """
+    HTML 콘텐츠에서 직접 표 데이터를 추출
+    
+    Args:
+        html_content (str): HTML 문자열
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        all_sheets = {}
+        
+        # 테이블 영역 찾기
+        main_table = soup.find('div', id='mainTable')
+        if not main_table:
+            logger.warning("mainTable을 찾을 수 없습니다")
+            return None
+            
+        # 모든 행 찾기
+        rows = main_table.find_all('div', class_='tr')
+        if not rows:
+            logger.warning("테이블 행을 찾을 수 없습니다")
+            return None
+        
+        logger.info(f"HTML에서 {len(rows)}개의 행을 찾았습니다")
+        
+        # 섹션 구분을 위한 변수들
+        current_section = "기본_테이블"
+        current_headers = []
+        table_data = []
+        in_header_row = False
+        
+        for row_idx, row in enumerate(rows):
+            # 제목 행인지 확인 (새로운 섹션 시작)
+            section_title_div = row.find('div', class_=lambda c: c and (c.startswith('style0') or 'of' in c))
+            
+            if section_title_div and section_title_div.get_text(strip=True):
+                # 이전 섹션의 데이터가 있으면 저장
+                if table_data and current_headers:
+                    # DataFrame 생성 및 저장
+                    df = pd.DataFrame(table_data, columns=current_headers)
+                    if not df.empty:
+                        all_sheets[current_section] = df
+                        logger.info(f"섹션 '{current_section}' 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+                    table_data = []
+                    current_headers = []
+                
+                # 새 섹션 제목 추출
+                section_text = section_title_div.get_text(strip=True)
+                current_section = section_text if section_text else f"섹션_{len(all_sheets)+1}"
+                in_header_row = True  # 섹션 다음 행은 헤더로 간주
+                continue
+            
+            # 헤더 행 처리
+            if in_header_row:
+                header_cells = row.find_all('div', class_=lambda c: c and c.startswith('td style'))
+                if header_cells:
+                    current_headers = []
+                    for cell in header_cells:
+                        cell_text = cell.get_text(strip=True)
+                        if not cell_text:  # 빈 헤더는 자동 생성
+                            cell_text = f"Col_{len(current_headers)}"
+                        current_headers.append(cell_text)
+                    in_header_row = False
+                continue
+            
+            # 일반 데이터 행 처리
+            if current_headers:  # 헤더가 있을 때만 데이터 행 처리
+                cells = row.find_all('div', class_=lambda c: c and c.startswith('td style'))
+                if not cells:
+                    continue
+                    
+                row_data = []
+                for cell_idx, cell in enumerate(cells):
+                    # 셀 텍스트 추출
+                    cell_text = cell.get_text(strip=True)
+                    # 숫자에서 쉼표 제거
+                    if cell_text and ',' in cell_text and all(c.isdigit() or c in ',-. ' for c in cell_text.replace(',', '')):
+                        cell_text = cell_text.replace(',', '')
+                    row_data.append(cell_text)
+                
+                # 헤더 수와 데이터 수 맞추기
+                if len(row_data) < len(current_headers):
+                    row_data.extend([''] * (len(current_headers) - len(row_data)))
+                elif len(row_data) > len(current_headers):
+                    row_data = row_data[:len(current_headers)]
+                
+                if row_data:
+                    table_data.append(row_data)
+        
+        # 마지막 섹션 처리
+        if table_data and current_headers:
+            df = pd.DataFrame(table_data, columns=current_headers)
+            if not df.empty:
+                all_sheets[current_section] = df
+                logger.info(f"마지막 섹션 '{current_section}' 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+        
+        # 결과 확인
+        if not all_sheets:
+            logger.warning("HTML에서 추출된 유효한 데이터 테이블이 없습니다")
+            return None
+        
+        logger.info(f"HTML에서 총 {len(all_sheets)}개 테이블 추출 성공")
+        return all_sheets
+        
+    except Exception as e:
+        logger.error(f"HTML에서 데이터 추출 중 오류: {str(e)}")
+        return None
 
 
 async def send_telegram_message(posts, data_updates=None):
