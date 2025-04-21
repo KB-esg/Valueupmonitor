@@ -419,6 +419,293 @@ def go_to_next_page(driver):
         logger.error(f"다음 페이지 이동 중 에러: {str(e)}")
         return False
 
+def navigate_to_specific_page(driver, target_page):
+    """
+    특정 페이지로 직접 이동하는 함수 (클릭 방식 사용)
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        target_page: 이동하려는 페이지 번호
+        
+    Returns:
+        bool: 페이지 이동 성공 여부
+    """
+    try:
+        # 현재 페이지 파악
+        current_page = get_current_page(driver)
+        logger.info(f"현재 페이지: {current_page}, 목표 페이지: {target_page}")
+        
+        if current_page == target_page:
+            logger.info(f"이미 목표 페이지({target_page})에 있습니다.")
+            return True
+        
+        # 페이지네이션 영역 찾기
+        try:
+            page_nav = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "pageNavi"))
+            )
+        except TimeoutException:
+            logger.error("페이지 네비게이션을 찾을 수 없습니다.")
+            return False
+        
+        # 직접 페이지 링크 찾기
+        page_links = page_nav.find_elements(By.CSS_SELECTOR, "a.page-link")
+        
+        # 페이지 번호와 링크 매핑
+        page_map = {}
+        for link in page_links:
+            try:
+                page_text = link.text.strip()
+                if page_text.isdigit():
+                    page_num = int(page_text)
+                    page_map[page_num] = link
+            except Exception as e:
+                continue
+        
+        # 목표 페이지 링크가 있으면 직접 클릭
+        if target_page in page_map:
+            logger.info(f"페이지 {target_page} 링크 발견, 직접 클릭 시도")
+            link = page_map[target_page]
+            
+            # JavaScript로 클릭 (더 안정적)
+            driver.execute_script("arguments[0].click();", link)
+            
+            # 페이지 변경 대기
+            wait_for_page_change(driver, current_page)
+            
+            # 페이지 변경 확인
+            new_page = get_current_page(driver)
+            logger.info(f"페이지 이동 결과: {current_page} → {new_page}")
+            return new_page == target_page
+        
+        # 목표 페이지가 현재 페이지네이션에 없는 경우 확인
+        # 처음/이전/다음/마지막 네비게이션 링크 확인
+        if target_page > current_page:
+            # 다음 페이지 링크 찾기
+            next_link = page_nav.find_elements(By.CSS_SELECTOR, "a.next, a.page-navi.next")
+            if next_link:
+                logger.info("다음 페이지 링크 클릭")
+                driver.execute_script("arguments[0].click();", next_link[0])
+                wait_for_page_change(driver, current_page)
+                
+                # 재귀적으로 다시 시도
+                return navigate_to_specific_page(driver, target_page)
+        else:
+            # 이전 페이지 링크 찾기
+            prev_link = page_nav.find_elements(By.CSS_SELECTOR, "a.prev, a.page-navi.prev")
+            if prev_link:
+                logger.info("이전 페이지 링크 클릭")
+                driver.execute_script("arguments[0].click();", prev_link[0])
+                wait_for_page_change(driver, current_page)
+                
+                # 재귀적으로 다시 시도
+                return navigate_to_specific_page(driver, target_page)
+        
+        # 직접 이동이 불가능한 경우 순차적으로 이동
+        logger.warning(f"페이지 {target_page}에 대한 직접 링크를 찾을 수 없음, 순차적 이동 시도")
+        
+        # 방향 결정 (앞으로 또는 뒤로)
+        if target_page > current_page:
+            step = 1
+        else:
+            step = -1
+        
+        # 순차적으로 이동
+        current = current_page
+        while current != target_page:
+            next_page = current + step
+            
+            # 다음/이전 페이지로 이동
+            success = go_to_adjacent_page(driver, next_page)
+            if not success:
+                logger.error(f"페이지 {current}에서 {next_page}로 이동 실패")
+                return False
+            
+            current = next_page
+            logger.info(f"현재 페이지: {current}")
+            
+            # 과도한 요청 방지
+            time.sleep(2)
+        
+        return current == target_page
+        
+    except Exception as e:
+        logger.error(f"페이지 {target_page}로 이동 중 오류: {str(e)}")
+        return False
+
+def get_current_page(driver):
+    """
+    현재 페이지 번호를 가져오는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        
+    Returns:
+        int: 현재 페이지 번호 (기본값 1)
+    """
+    try:
+        # 현재 활성화된 페이지 링크 찾기
+        page_nav = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "pageNavi"))
+        )
+        
+        # 여러 선택자 시도
+        selectors = [
+            "a.page-link[aria-current='page']",  # aria-current 속성이 있는 경우
+            "a.on[href*='pageIndex']",           # 'on' 클래스가 있는 경우
+            "a.page-link.active",                # active 클래스가 있는 경우
+            ".pagination .active a"              # 다른 구조
+        ]
+        
+        for selector in selectors:
+            elements = page_nav.find_elements(By.CSS_SELECTOR, selector)
+            if elements:
+                try:
+                    return int(elements[0].text.strip())
+                except ValueError:
+                    continue
+        
+        # 모든 페이지 링크 검사 (스타일로 현재 페이지 유추)
+        page_links = page_nav.find_elements(By.CSS_SELECTOR, "a.page-link")
+        for link in page_links:
+            # 스타일 또는 클래스로 현재 페이지 확인
+            is_current = False
+            
+            # 클래스 확인
+            classes = link.get_attribute("class").split()
+            if "active" in classes or "on" in classes or "current" in classes:
+                is_current = True
+            
+            # 글꼴 두께 확인
+            font_weight = link.value_of_css_property("font-weight")
+            if font_weight in ["700", "bold"]:
+                is_current = True
+                
+            # 배경색 확인
+            bg_color = link.value_of_css_property("background-color")
+            if bg_color != "rgba(0, 0, 0, 0)" and bg_color != "transparent":
+                is_current = True
+            
+            if is_current:
+                try:
+                    return int(link.text.strip())
+                except ValueError:
+                    continue
+        
+        # URL에서 페이지 번호 추출 시도
+        url = driver.current_url
+        match = re.search(r'pageIndex=(\d+)', url)
+        if match:
+            return int(match.group(1))
+            
+        # 모든 방법으로 찾지 못한 경우 기본값 1 반환
+        logger.warning("현재 페이지 번호를 찾지 못했습니다. 기본값 1을 사용합니다.")
+        return 1
+        
+    except Exception as e:
+        logger.error(f"현재 페이지 번호 확인 중 오류: {str(e)}")
+        return 1
+
+def wait_for_page_change(driver, previous_page):
+    """
+    페이지 변경을 기다리는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        previous_page: 이전 페이지 번호
+        
+    Returns:
+        bool: 페이지 변경 성공 여부
+    """
+    try:
+        # 페이지 로딩 대기
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+        )
+        
+        # 스크립트 실행 완료 대기
+        time.sleep(2)
+        
+        # 현재 페이지 번호 확인
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            current_page = get_current_page(driver)
+            if current_page != previous_page:
+                logger.info(f"페이지 변경 감지: {previous_page} → {current_page}")
+                return True
+                
+            logger.debug(f"페이지 변경 대기 중... ({attempt+1}/{max_attempts})")
+            time.sleep(1)
+        
+        logger.warning(f"페이지 변경 타임아웃: 아직 페이지 {previous_page}에 있습니다.")
+        return False
+        
+    except Exception as e:
+        logger.error(f"페이지 변경 대기 중 오류: {str(e)}")
+        return False
+
+def go_to_adjacent_page(driver, page_num):
+    """
+    인접한 페이지로 이동하는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        page_num: 이동하려는 페이지 번호
+        
+    Returns:
+        bool: 페이지 이동 성공 여부
+    """
+    try:
+        current_page = get_current_page(driver)
+        
+        # 현재 페이지와 같으면 이동 필요 없음
+        if current_page == page_num:
+            return True
+            
+        # 인접한 페이지가 아니면 오류
+        if abs(current_page - page_num) != 1:
+            logger.error(f"인접한 페이지가 아닙니다: {current_page} → {page_num}")
+            return False
+        
+        # 페이지네이션 영역 찾기
+        page_nav = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "pageNavi"))
+        )
+        
+        # 목표 페이지 링크 찾기
+        page_links = page_nav.find_elements(By.CSS_SELECTOR, "a.page-link")
+        
+        for link in page_links:
+            try:
+                if int(link.text.strip()) == page_num:
+                    # JavaScript로 클릭 (더 안정적)
+                    driver.execute_script("arguments[0].click();", link)
+                    
+                    # 페이지 변경 대기
+                    return wait_for_page_change(driver, current_page)
+            except ValueError:
+                continue
+        
+        # 다음/이전 버튼으로 이동
+        if page_num > current_page:
+            next_buttons = page_nav.find_elements(By.CSS_SELECTOR, "a.next, a.page-navi.next")
+            if next_buttons:
+                driver.execute_script("arguments[0].click();", next_buttons[0])
+                return wait_for_page_change(driver, current_page)
+        else:
+            prev_buttons = page_nav.find_elements(By.CSS_SELECTOR, "a.prev, a.page-navi.prev")
+            if prev_buttons:
+                driver.execute_script("arguments[0].click();", prev_buttons[0])
+                return wait_for_page_change(driver, current_page)
+        
+        logger.error(f"페이지 {page_num}으로 이동할 수 있는 링크를 찾을 수 없습니다.")
+        return False
+        
+    except Exception as e:
+        logger.error(f"인접 페이지 {page_num}으로 이동 중 오류: {str(e)}")
+        return False
+
+
 def save_html_for_debugging(driver, name_prefix, include_iframe=True):
     """
     Save HTML content for debugging purposes.
@@ -2202,44 +2489,6 @@ def try_ajax_access(driver, post):
         logger.error(f"AJAX 접근 시도 중 오류: {str(e)}")
         return None
         
-def create_placeholder_dataframe(post_info):
-    """데이터 추출 실패 시 기본 데이터프레임 생성"""
-    try:
-        # 날짜 정보 추출
-        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2)
-            
-            # 보고서 유형 결정
-            report_type = determine_report_type(post_info['title'])
-            
-            # 기본 데이터프레임 생성
-            df = pd.DataFrame({
-                '구분': [f'{year}년 {month}월 통계'],
-                '값': ['데이터를 추출할 수 없습니다'],
-                '비고': [f'{post_info["title"]} - 접근 오류'],
-                '링크': [post_info.get('url', '링크 없음')]
-            })
-            
-            logger.info(f"플레이스홀더 데이터프레임 생성: {year}년 {month}월 {report_type}")
-            return df
-            
-        return pd.DataFrame({
-            '구분': ['알 수 없음'],
-            '값': ['데이터 추출 실패'],
-            '비고': [f'게시물: {post_info["title"]} - 날짜 정보 없음']
-        })  # 날짜 정보가 없으면 최소 정보 포함
-        
-    except Exception as e:
-        logger.error(f"플레이스홀더 데이터프레임 생성 중 오류: {str(e)}")
-        # 오류 발생 시도 최소한의 정보 포함
-        return pd.DataFrame({
-            '구분': ['오류 발생'],
-            '업데이트 상태': ['데이터프레임 생성 실패'],
-            '비고': [f'오류: {str(e)}']
-        })
-
 
 
 def access_iframe_with_ocr_fallback(driver, file_params):
@@ -6920,14 +7169,19 @@ async def send_telegram_message(posts, data_updates=None):
             logger.error(f"단순화된 텔레그램 메시지 전송 중 오류: {str(simple_err)}")
 
 
-async def run_monitor(days_range=4, check_sheets=True):
+async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5, start_date=None, end_date=None, reverse_order=True):
     """
-    Enhanced monitoring function with improved document processing flow.
+    Enhanced monitoring function with reverse page exploration.
     
     Args:
         days_range: Number of days to look back for new posts
         check_sheets: Whether to update Google Sheets
-    
+        start_page: Starting page number to parse
+        end_page: Ending page number to parse
+        start_date: Optional start date string (YYYY-MM-DD)
+        end_date: Optional end date string (YYYY-MM-DD)
+        reverse_order: Whether to explore pages in reverse order (highest to lowest)
+        
     Returns:
         None
     """
@@ -6937,7 +7191,11 @@ async def run_monitor(days_range=4, check_sheets=True):
     try:
         # Start time recording
         start_time = time.time()
-        logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, check_sheets={check_sheets}) ===")
+        
+        if reverse_order:
+            logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, 페이지={end_page}~{start_page} 역순, check_sheets={check_sheets}) ===")
+        else:
+            logger.info(f"=== MSIT 통신 통계 모니터링 시작 (days_range={days_range}, 페이지={start_page}~{end_page}, check_sheets={check_sheets}) ===")
 
         # Create screenshot directory
         screenshots_dir = Path("./screenshots")
@@ -7090,54 +7348,56 @@ async def run_monitor(days_range=4, check_sheets=True):
         except Exception as ss_err:
             logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
         
+        # 역순 탐색 적용 (end_page부터 start_page 방향으로)
+        if reverse_order:
+            page_sequence = range(end_page, start_page - 1, -1)
+            logger.info(f"역순 페이지 탐색 시작: {end_page} → {start_page}")
+        else:
+            page_sequence = range(start_page, end_page + 1)
+            logger.info(f"순차 페이지 탐색 시작: {start_page} → {end_page}")
+        
         # Track all posts and telecom statistics posts
         all_posts = []
         telecom_stats_posts = []
         continue_search = True
-        page_num = 1
         
-        # Parse pages
-        while continue_search:
+        # 각 페이지 탐색
+        for page_num in page_sequence:
+            if not continue_search:
+                logger.info(f"날짜 범위 조건으로 인해 검색 중단")
+                break
+                
+            logger.info(f"페이지 {page_num} 탐색 시도...")
+            
+            # 특정 페이지로 이동
+            page_navigation_success = navigate_to_specific_page(driver, page_num)
+            
+            if not page_navigation_success:
+                logger.warning(f"페이지 {page_num}으로 이동 실패, 다음 페이지로 진행")
+                continue
+            
             logger.info(f"페이지 {page_num} 파싱 중...")
             
-            # Check page load state
-            try:
-                # Verify page is properly loaded
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+            # 날짜 기반 필터링을 위한 조건 수정
+            if start_date and end_date:
+                page_posts, stats_posts, should_continue = parse_page_with_date_range(
+                    driver, page_num, start_date=start_date, end_date=end_date
                 )
-            except TimeoutException:
-                logger.warning(f"페이지 {page_num} 로드 시간 초과, 새로고침 시도")
-                driver.refresh()
-                time.sleep(3)
+            else:
+                page_posts, stats_posts, should_continue = parse_page(
+                    driver, page_num, days_range=days_range
+                )
                 
-                try:
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-                    )
-                    logger.info("새로고침 후 페이지 로드 성공")
-                except TimeoutException:
-                    logger.error("새로고침 후에도 페이지 로드 실패, 다음 단계로 진행")
-            
-            page_posts, stats_posts, should_continue = parse_page(driver, page_num, days_range=days_range)
             all_posts.extend(page_posts)
             telecom_stats_posts.extend(stats_posts)
             
             logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
             
-            if not should_continue:
-                logger.info(f"날짜 범위 밖의 게시물 발견. 검색 중단")
-                break
-                
-            if has_next_page(driver):
-                if go_to_next_page(driver):
-                    page_num += 1
-                else:
-                    logger.warning(f"페이지 {page_num}에서 다음 페이지로 이동 실패")
-                    break
-            else:
-                logger.info(f"마지막 페이지 ({page_num}) 도달")
-                break
+            # 날짜 범위 밖의 게시물 발견 시 검색 중단 여부 설정
+            continue_search = should_continue
+            
+            # 페이지 사이 대기
+            time.sleep(2)
         
         # Process telecom statistics posts with enhanced extraction
         data_updates = []
@@ -7348,6 +7608,18 @@ async def run_monitor(days_range=4, check_sheets=True):
                         except Exception as reset_err:
                             logger.error(f"브라우저 재설정 실패: {str(reset_err)}")
         
+        # 수정: 데이터 업데이트 후 통합 시트 업데이트 처리
+        if CONFIG.get('update_consolidation', False) and data_updates:
+            logger.info("통합 시트 업데이트 시작...")
+            try:
+                consolidated_updates = update_consolidated_sheets(gs_client, data_updates)
+                if consolidated_updates:
+                    logger.info(f"통합 시트 업데이트 성공: {consolidated_updates}개 시트")
+                else:
+                    logger.warning("통합 시트 업데이트 실패")
+            except Exception as consol_err:
+                logger.error(f"통합 시트 업데이트 중 오류: {str(consol_err)}")
+        
         # Calculate end time and execution time
         end_time = time.time()
         execution_time = end_time - start_time
@@ -7414,6 +7686,320 @@ async def run_monitor(days_range=4, check_sheets=True):
         
         logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
 
+
+
+def update_consolidated_sheets(client, data_updates):
+    """
+    Raw 시트의 데이터를 통합 시트에 추가하는 함수
+    
+    Args:
+        client: gspread 클라이언트
+        data_updates: 데이터 업데이트 정보 리스트
+        
+    Returns:
+        int: 업데이트된 통합 시트 수
+    """
+    if not client or not data_updates:
+        logger.error("통합 시트 업데이트 실패: 클라이언트 또는 데이터 없음")
+        return 0
+    
+    try:
+        # 스프레드시트 열기
+        spreadsheet = open_spreadsheet_with_retry(client)
+        if not spreadsheet:
+            logger.error("통합 시트 업데이트를 위한 스프레드시트 열기 실패")
+            return 0
+        
+        # 워크시트 목록 가져오기
+        all_worksheets = spreadsheet.worksheets()
+        worksheet_titles = [ws.title for ws in all_worksheets]
+        logger.info(f"현재 스프레드시트의 워크시트 목록: {len(worksheet_titles)}개")
+        
+        # Raw 시트와 해당하는 통합 시트를 매핑
+        consolidation_map = {}
+        
+        for ws_title in worksheet_titles:
+            # "_Raw" 접미사가 있는 시트를 찾음
+            if ws_title.endswith("_Raw"):
+                base_name = ws_title[:-4]  # "_Raw" 제거
+                consolidated_title = f"{base_name}_통합"
+                
+                # 통합 시트가 존재하는지 확인
+                if consolidated_title in worksheet_titles:
+                    consolidation_map[ws_title] = consolidated_title
+                    logger.info(f"통합 매핑 발견: {ws_title} → {consolidated_title}")
+        
+        if not consolidation_map:
+            logger.warning("통합할 시트 매핑을 찾을 수 없음")
+            
+            # 통합 시트 자동 생성 (선택 사항)
+            for ws_title in worksheet_titles:
+                if ws_title.endswith("_Raw") and not f"{ws_title[:-4]}_통합" in worksheet_titles:
+                    base_name = ws_title[:-4]
+                    consolidated_title = f"{base_name}_통합"
+                    
+                    try:
+                        logger.info(f"통합 시트 자동 생성: {consolidated_title}")
+                        new_ws = spreadsheet.add_worksheet(title=consolidated_title, rows=1000, cols=50)
+                        
+                        # 초기 헤더 설정
+                        new_ws.update_cell(1, 1, "기준일자")
+                        time.sleep(CONFIG.get('api_request_wait', 2))
+                        
+                        consolidation_map[ws_title] = consolidated_title
+                    except Exception as create_err:
+                        logger.error(f"통합 시트 생성 실패 {consolidated_title}: {str(create_err)}")
+        
+        # 각 통합 시트 업데이트
+        updated_count = 0
+        
+        for data_update in data_updates:
+            if not data_update.get('sheets'):
+                continue
+                
+            # 날짜 정보 추출
+            if 'date' in data_update:
+                year = data_update['date']['year']
+                month = data_update['date']['month']
+                date_str = f"{year}년 {month}월"
+            else:
+                # 제목에서 추출
+                post_info = data_update.get('post_info', {})
+                title = post_info.get('title', '')
+                
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', title)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2)
+                    date_str = f"{year}년 {month}월"
+                else:
+                    current_date = datetime.now()
+                    date_str = f"{current_date.year}년 {current_date.month}월"
+            
+            # 각 Raw 시트에 대한 통합 시트 업데이트
+            for sheet_name, df in data_update['sheets'].items():
+                # 시트 이름을 기준으로 매핑 확인
+                raw_sheet_name = None
+                consolidated_sheet_name = None
+                
+                # 시트 이름에서 매핑 찾기
+                for raw_name, consol_name in consolidation_map.items():
+                    raw_base = raw_name[:-4]  # "_Raw" 제거
+                    
+                    # 정확한 이름 매칭 우선
+                    if raw_name == sheet_name:
+                        raw_sheet_name = raw_name
+                        consolidated_sheet_name = consol_name
+                        break
+                    
+                    # 부분 매칭 시도
+                    if raw_base.lower() in sheet_name.lower() or sheet_name.lower() in raw_base.lower():
+                        raw_sheet_name = raw_name
+                        consolidated_sheet_name = consol_name
+                        break
+                
+                # 부분 매칭 시도 (키워드 기반)
+                if not raw_sheet_name:
+                    for raw_name, consol_name in consolidation_map.items():
+                        if "트래픽" in sheet_name.lower() and "트래픽" in raw_name.lower():
+                            raw_sheet_name = raw_name
+                            consolidated_sheet_name = consol_name
+                            break
+                        elif "무선" in sheet_name.lower() and "무선" in raw_name.lower():
+                            raw_sheet_name = raw_name
+                            consolidated_sheet_name = consol_name
+                            break
+                        elif "유선" in sheet_name.lower() and "유선" in raw_name.lower():
+                            raw_sheet_name = raw_name
+                            consolidated_sheet_name = consol_name
+                            break
+                
+                if not raw_sheet_name or not consolidated_sheet_name:
+                    logger.warning(f"시트 '{sheet_name}'에 대한 통합 시트 매핑을 찾을 수 없음")
+                    continue
+                
+                # 데이터프레임 검사
+                if df is None or df.empty:
+                    logger.warning(f"시트 '{sheet_name}'의 데이터가 비어 있음, 통합 업데이트 건너뜀")
+                    continue
+                
+                try:
+                    # Raw 시트에서 데이터 가져오기
+                    raw_ws = None
+                    try:
+                        raw_ws = spreadsheet.worksheet(raw_sheet_name)
+                    except gspread.exceptions.WorksheetNotFound:
+                        logger.warning(f"Raw 시트 '{raw_sheet_name}'를 찾을 수 없음, 건너뜀")
+                        continue
+                    
+                    # 통합 시트 열기 또는 생성
+                    consolidated_ws = None
+                    try:
+                        consolidated_ws = spreadsheet.worksheet(consolidated_sheet_name)
+                        logger.info(f"통합 시트 '{consolidated_sheet_name}' 접근 성공")
+                    except gspread.exceptions.WorksheetNotFound:
+                        logger.info(f"통합 시트 '{consolidated_sheet_name}'가 없어 새로 생성")
+                        consolidated_ws = spreadsheet.add_worksheet(title=consolidated_sheet_name, rows=1000, cols=50)
+                        # 첫 번째 열 헤더 설정
+                        consolidated_ws.update_cell(1, 1, "기준일자")
+                        time.sleep(CONFIG.get('api_request_wait', 2))
+                    
+                    # 통합 시트 현재 상태 확인
+                    headers = consolidated_ws.row_values(1)
+                    
+                    if not headers or len(headers) == 0:
+                        # 헤더가 없는 경우 초기화
+                        headers = ["기준일자"]
+                        consolidated_ws.update_cell(1, 1, "기준일자")
+                        time.sleep(CONFIG.get('api_request_wait', 2))
+                    
+                    # 날짜가 이미 헤더에 있는지 확인
+                    if date_str in headers:
+                        date_col_idx = headers.index(date_str) + 1
+                        logger.info(f"기존 날짜 열 '{date_str}'를 찾음: 열 {date_col_idx}")
+                    else:
+                        # 새 날짜 열 추가
+                        date_col_idx = len(headers) + 1
+                        consolidated_ws.update_cell(1, date_col_idx, date_str)
+                        logger.info(f"새 날짜 열 '{date_str}' 추가: 열 {date_col_idx}")
+                        time.sleep(CONFIG.get('api_request_wait', 2))
+                    
+                    # Raw 시트의 데이터 가져오기 (첫 번째 열을 기준으로 가정)
+                    try:
+                        raw_headers = raw_ws.row_values(1)
+                        if not raw_headers:
+                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에 헤더가 없음")
+                            continue
+                            
+                        # Raw 시트에서 첫 번째 열(항목) 데이터 가져오기
+                        key_col_idx = 1
+                        all_keys = raw_ws.col_values(key_col_idx)[1:]  # 헤더 제외
+                        
+                        # Raw 시트에서 데이터 열 수 확인
+                        raw_data_range = raw_ws.get_all_values()
+                        if not raw_data_range:
+                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에서 데이터를 가져올 수 없음")
+                            continue
+                        
+                        # 마지막 열 인덱스 구하기
+                        last_col_idx = len(raw_data_range[0]) if raw_data_range else 0
+                        
+                        # 마지막 열의 데이터 가져오기
+                        raw_values = []
+                        if last_col_idx > 1:  # 최소 2개 이상의 열이 있어야 함
+                            try:
+                                raw_values = raw_ws.col_values(last_col_idx)[1:]  # 헤더 제외
+                                logger.info(f"Raw 시트의 마지막 열({last_col_idx})에서 값 가져옴")
+                            except Exception as col_err:
+                                logger.warning(f"마지막 열({last_col_idx}) 값 가져오기 실패: {str(col_err)}")
+                                
+                                # 두 번째 열로 대체
+                                try:
+                                    raw_values = raw_ws.col_values(2)[1:]  # 헤더 제외
+                                    logger.info("대안으로 두 번째 열에서 값 가져옴")
+                                except Exception as alt_err:
+                                    logger.error(f"Raw 시트 값 가져오기 실패: {str(alt_err)}")
+                                    continue
+                        else:
+                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에 충분한 열이 없음 (필요: 최소 2열)")
+                            continue
+                        
+                        # 키와 값의 길이가 같은지 확인
+                        if len(all_keys) != len(raw_values):
+                            logger.warning(f"키와 값의 개수가 일치하지 않음: 키({len(all_keys)}) != 값({len(raw_values)})")
+                            
+                            # 길이를 맞추기 위한 처리
+                            if len(all_keys) > len(raw_values):
+                                # 값이 부족한 경우, 빈 문자열로 채움
+                                raw_values.extend([''] * (len(all_keys) - len(raw_values)))
+                                logger.info(f"부족한 값을 빈 문자열로 채움: {len(raw_values)}")
+                            else:
+                                # 값이 더 많은 경우, 초과분 제거
+                                raw_values = raw_values[:len(all_keys)]
+                                logger.info(f"초과 값 제거 후 길이 조정: {len(raw_values)}")
+                        
+                        # 통합 시트의 기존 항목 가져오기
+                        existing_items = consolidated_ws.col_values(1)[1:]  # 헤더 제외
+                        
+                        # 배치 업데이트 준비
+                        cell_updates = []
+                        new_rows = []
+                        
+                        # 각 항목에 대해 업데이트 준비
+                        for i, (item, value) in enumerate(zip(all_keys, raw_values)):
+                            if not item or not item.strip():
+                                continue  # 빈 항목 건너뛰기
+                            
+                            # 항목이 이미 존재하는지 확인
+                            if item in existing_items:
+                                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
+                            else:
+                                # 새 항목은 끝에 추가
+                                row_idx = len(existing_items) + 2
+                                new_rows.append(item)  # 새 행 추적
+                                
+                                # 항목 업데이트
+                                cell_updates.append({
+                                    'range': f'A{row_idx}',
+                                    'values': [[item]]
+                                })
+                                existing_items.append(item)  # 로컬 리스트 업데이트
+                            
+                            # 날짜 열에 값 업데이트
+                            value_str = value if value else ""
+                            cell_updates.append({
+                                'range': f'{chr(64 + date_col_idx)}{row_idx}',
+                                'values': [[value_str]]
+                            })
+                        
+                        # 배치 업데이트 실행
+                        if cell_updates:
+                            logger.info(f"통합 시트 '{consolidated_sheet_name}' 업데이트: {len(cell_updates)}개 셀, 새 항목: {len(new_rows)}개")
+                            
+                            # 배치 사이즈 설정 (API 제한 방지)
+                            batch_size = 10
+                            for i in range(0, len(cell_updates), batch_size):
+                                batch = cell_updates[i:i+batch_size]
+                                
+                                try:
+                                    consolidated_ws.batch_update(batch)
+                                    logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
+                                    time.sleep(CONFIG.get('api_request_wait', 2))  # API 속도 제한 방지
+                                except gspread.exceptions.APIError as api_err:
+                                    # API 오류 처리
+                                    if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                                        logger.warning(f"API 속도 제한 발생: {str(api_err)}")
+                                        time.sleep(5)  # 더 긴 대기
+                                        
+                                        # 더 작은 배치로 재시도
+                                        for update in batch:
+                                            try:
+                                                consolidated_ws.batch_update([update])
+                                                time.sleep(3)  # 각 업데이트 사이 더 긴 대기
+                                            except Exception as single_err:
+                                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
+                                    else:
+                                        logger.error(f"일괄 업데이트 실패: {str(api_err)}")
+                                except Exception as batch_err:
+                                    logger.error(f"일괄 업데이트 중 오류: {str(batch_err)}")
+                            
+                            updated_count += 1
+                            logger.info(f"통합 시트 '{consolidated_sheet_name}' 업데이트 완료")
+                        else:
+                            logger.warning(f"통합 시트 '{consolidated_sheet_name}'에 업데이트할 셀이 없습니다")
+                    
+                    except Exception as data_err:
+                        logger.error(f"Raw 시트 데이터 처리 중 오류: {str(data_err)}")
+                
+                except Exception as sheet_err:
+                    logger.error(f"통합 시트 '{consolidated_sheet_name}' 업데이트 중 오류: {str(sheet_err)}")
+        
+        logger.info(f"통합 시트 업데이트 결과: {updated_count}개 시트 성공")
+        return updated_count
+        
+    except Exception as e:
+        logger.error(f"통합 시트 업데이트 함수 오류: {str(e)}")
+        return 0
 
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
