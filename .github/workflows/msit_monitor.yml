@@ -5,8 +5,26 @@ on:
     - cron: '40 23 1-31/2 * *'  # UTC 23:40 (KST 08:40) 홀수날마다 실행
   workflow_dispatch:
     inputs:
+      start_date:
+        description: '검토 시작 날짜 (YYYY-MM-DD 형식)'
+        required: false
+        type: string
+      end_date:
+        description: '검토 종료 날짜 (YYYY-MM-DD 형식)'
+        required: false
+        type: string
+      start_page:
+        description: '시작 페이지 번호'
+        required: false
+        default: '1'
+        type: string
+      end_page:
+        description: '종료 페이지 번호'
+        required: false
+        default: '5'
+        type: string
       days_range:
-        description: '몇 일 전까지의 게시물을 확인할지 설정'
+        description: '몇 일 전까지의 게시물을 확인할지 설정 (날짜 범위 미지정 시 사용)'
         required: false
         default: '4'
         type: string
@@ -22,6 +40,11 @@ on:
         type: string
       ocr_enabled:
         description: 'OCR 기능 활성화 여부'
+        required: false
+        default: 'true'
+        type: boolean
+      reverse_order:
+        description: '역순 페이지 탐색 여부 (큰 페이지 번호부터)'
         required: false
         default: 'true'
         type: boolean
@@ -83,10 +106,18 @@ jobs:
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
         MSIT_GSPREAD_ref: ${{ secrets.MSIT_GSPREAD_ref }}
         MSIT_SPREADSHEET_ID: ${{ secrets.MSIT_SPREADSHEET_ID }}
+        # 날짜 범위 설정 관련 환경 변수
+        START_DATE: ${{ github.event.inputs.start_date }}
+        END_DATE: ${{ github.event.inputs.end_date }}
+        START_PAGE: ${{ github.event.inputs.start_page || '1' }}
+        END_PAGE: ${{ github.event.inputs.end_page || '5' }}
         DAYS_RANGE: ${{ github.event.inputs.days_range || '4' }}
+        # 기타 설정 환경 변수
         CHECK_SHEETS: ${{ github.event.inputs.check_sheets || 'true' }}
         SPREADSHEET_NAME: ${{ github.event.inputs.spreadsheet_name || 'MSIT 통신 통계' }}
         OCR_ENABLED: ${{ github.event.inputs.ocr_enabled || 'true' }}
+        REVERSE_ORDER: ${{ github.event.inputs.reverse_order || 'true' }}
+        UPDATE_CONSOLIDATION: 'true'
         PYTHONIOENCODING: utf-8
       run: |
         export DISPLAY=:99
@@ -173,7 +204,11 @@ jobs:
         echo "타임스탬프: ${TIMESTAMP}" >> artifacts/run_info.txt
         echo "실행자: ${{ github.actor }}" >> artifacts/run_info.txt
         echo "워크플로우: ${{ github.workflow }}" >> artifacts/run_info.txt
+        echo "검토 기간: ${{ github.event.inputs.start_date || '지정 안됨' }} ~ ${{ github.event.inputs.end_date || '지정 안됨' }}" >> artifacts/run_info.txt
+        echo "페이지 범위: ${{ github.event.inputs.start_page || '1' }} ~ ${{ github.event.inputs.end_page || '5' }}" >> artifacts/run_info.txt
+        echo "Days Range: ${{ github.event.inputs.days_range || '4' }}" >> artifacts/run_info.txt
         echo "OCR 활성화: ${{ github.event.inputs.ocr_enabled || 'true' }}" >> artifacts/run_info.txt
+        echo "역순 탐색: ${{ github.event.inputs.reverse_order || 'true' }}" >> artifacts/run_info.txt
         tar -czf monitoring-artifacts-${TIMESTAMP}.tar.gz artifacts/
         echo "ARTIFACT_PATH=monitoring-artifacts-${TIMESTAMP}.tar.gz" >> $GITHUB_ENV
         echo "ARTIFACT_NAME=monitoring-artifacts-${TIMESTAMP}" >> $GITHUB_ENV
@@ -192,6 +227,10 @@ jobs:
           - **실행 번호**: ${{ github.run_number }}
           - **실행 시간**: ${{ env.TIMESTAMP }}
           - **실행 유형**: ${{ github.event_name }}
+          - **검토 기간**: ${{ github.event.inputs.start_date || '지정 안됨' }} ~ ${{ github.event.inputs.end_date || '지정 안됨' }}
+          - **페이지 범위**: ${{ github.event.inputs.start_page || '1' }} ~ ${{ github.event.inputs.end_page || '5' }}
+          - **역순 탐색**: ${{ github.event.inputs.reverse_order || 'true' }}
           - **OCR 활성화**: ${{ github.event.inputs.ocr_enabled || 'true' }}
+          
           이 릴리스에는 모니터링 스크립트 실행 결과와 관련 로그 및 스크린샷이 포함되어 있습니다.
         token: ${{ secrets.GITHUB_TOKEN }}
