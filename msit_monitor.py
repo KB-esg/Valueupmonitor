@@ -8371,80 +8371,86 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 
 def update_consolidated_sheets(client, data_updates):
     """
-    Raw 시트의 데이터를 통합 시트에 추가하는 함수
+    Enhanced function to update consolidated sheets with data from Raw sheets.
+    The function extracts the latest column from each Raw sheet and appends it
+    to the corresponding consolidated sheet as the next available column.
     
     Args:
-        client: gspread 클라이언트
-        data_updates: 데이터 업데이트 정보 리스트
+        client: gspread client instance
+        data_updates: List of data update information dictionaries
         
     Returns:
-        int: 업데이트된 통합 시트 수
+        int: Number of successfully updated consolidated sheets
     """
     if not client or not data_updates:
-        logger.error("통합 시트 업데이트 실패: 클라이언트 또는 데이터 없음")
+        logger.error("Failed to update consolidated sheets: missing client or data")
         return 0
     
     try:
-        # 스프레드시트 열기
+        # Open spreadsheet
         spreadsheet = open_spreadsheet_with_retry(client)
         if not spreadsheet:
-            logger.error("통합 시트 업데이트를 위한 스프레드시트 열기 실패")
+            logger.error("Failed to open spreadsheet for consolidated update")
             return 0
         
-        # 워크시트 목록 가져오기
-        all_worksheets = spreadsheet.worksheets()
-        worksheet_titles = [ws.title for ws in all_worksheets]
-        logger.info(f"현재 스프레드시트의 워크시트 목록: {len(worksheet_titles)}개")
+        # Get list of all worksheets to minimize API calls
+        try:
+            all_worksheets = spreadsheet.worksheets()
+            worksheet_titles = [ws.title for ws in all_worksheets]
+            logger.info(f"Found {len(worksheet_titles)} worksheets in spreadsheet")
+        except Exception as ws_err:
+            logger.warning(f"Failed to get worksheet list: {str(ws_err)}")
+            worksheet_titles = []
         
-        # Raw 시트와 해당하는 통합 시트를 매핑
+        # Map Raw sheets to their consolidated counterparts
         consolidation_map = {}
         
         for ws_title in worksheet_titles:
-            # "_Raw" 접미사가 있는 시트를 찾음
+            # Find sheets with "_Raw" suffix
             if ws_title.endswith("_Raw"):
-                base_name = ws_title[:-4]  # "_Raw" 제거
+                base_name = ws_title[:-4]  # Remove "_Raw"
                 consolidated_title = f"{base_name}_통합"
                 
-                # 통합 시트가 존재하는지 확인
+                # Check if consolidated sheet exists
                 if consolidated_title in worksheet_titles:
                     consolidation_map[ws_title] = consolidated_title
-                    logger.info(f"통합 매핑 발견: {ws_title} → {consolidated_title}")
+                    logger.info(f"Found consolidation mapping: {ws_title} → {consolidated_title}")
         
+        # Create missing consolidated sheets if needed
         if not consolidation_map:
-            logger.warning("통합할 시트 매핑을 찾을 수 없음")
+            logger.warning("No consolidation mappings found. Creating default mappings.")
             
-            # 통합 시트 자동 생성 (선택 사항)
             for ws_title in worksheet_titles:
                 if ws_title.endswith("_Raw") and not f"{ws_title[:-4]}_통합" in worksheet_titles:
                     base_name = ws_title[:-4]
                     consolidated_title = f"{base_name}_통합"
                     
                     try:
-                        logger.info(f"통합 시트 자동 생성: {consolidated_title}")
+                        logger.info(f"Creating new consolidated sheet: {consolidated_title}")
                         new_ws = spreadsheet.add_worksheet(title=consolidated_title, rows=1000, cols=50)
                         
-                        # 초기 헤더 설정
+                        # Initialize header
                         new_ws.update_cell(1, 1, "기준일자")
                         time.sleep(CONFIG.get('api_request_wait', 2))
                         
                         consolidation_map[ws_title] = consolidated_title
                     except Exception as create_err:
-                        logger.error(f"통합 시트 생성 실패 {consolidated_title}: {str(create_err)}")
+                        logger.error(f"Failed to create consolidated sheet {consolidated_title}: {str(create_err)}")
         
-        # 각 통합 시트 업데이트
+        # Process updates for each sheet
         updated_count = 0
         
         for data_update in data_updates:
             if not data_update.get('sheets'):
                 continue
                 
-            # 날짜 정보 추출
+            # Extract date information
             if 'date' in data_update:
                 year = data_update['date']['year']
                 month = data_update['date']['month']
                 date_str = f"{year}년 {month}월"
             else:
-                # 제목에서 추출
+                # Extract date from title
                 post_info = data_update.get('post_info', {})
                 title = post_info.get('title', '')
                 
@@ -8457,231 +8463,243 @@ def update_consolidated_sheets(client, data_updates):
                     current_date = datetime.now()
                     date_str = f"{current_date.year}년 {current_date.month}월"
             
-            # 각 Raw 시트에 대한 통합 시트 업데이트
+            logger.info(f"Processing consolidated updates for date: {date_str}")
+            
+            # Process each sheet
             for sheet_name, df in data_update['sheets'].items():
-                # 시트 이름을 기준으로 매핑 확인
+                # Find matching Raw and consolidated sheet names
                 raw_sheet_name = None
                 consolidated_sheet_name = None
                 
-                # 시트 이름에서 매핑 찾기
+                # Look for exact match first
                 for raw_name, consol_name in consolidation_map.items():
-                    raw_base = raw_name[:-4]  # "_Raw" 제거
-                    
-                    # 정확한 이름 매칭 우선
                     if raw_name == sheet_name:
                         raw_sheet_name = raw_name
                         consolidated_sheet_name = consol_name
                         break
-                    
-                    # 부분 매칭 시도
-                    if raw_base.lower() in sheet_name.lower() or sheet_name.lower() in raw_base.lower():
-                        raw_sheet_name = raw_name
-                        consolidated_sheet_name = consol_name
-                        break
                 
-                # 부분 매칭 시도 (키워드 기반)
+                # Try partial matching if exact match wasn't found
                 if not raw_sheet_name:
                     for raw_name, consol_name in consolidation_map.items():
-                        if "트래픽" in sheet_name.lower() and "트래픽" in raw_name.lower():
+                        raw_base = raw_name[:-4]  # Remove "_Raw"
+                        
+                        if (raw_base.lower() in sheet_name.lower() or 
+                            sheet_name.lower() in raw_base.lower()):
                             raw_sheet_name = raw_name
                             consolidated_sheet_name = consol_name
                             break
-                        elif "무선" in sheet_name.lower() and "무선" in raw_name.lower():
-                            raw_sheet_name = raw_name
-                            consolidated_sheet_name = consol_name
-                            break
-                        elif "유선" in sheet_name.lower() and "유선" in raw_name.lower():
-                            raw_sheet_name = raw_name
-                            consolidated_sheet_name = consol_name
+                
+                # Try keyword matching as last resort
+                if not raw_sheet_name:
+                    keywords = ["트래픽", "무선", "유선", "가입", "통계"]
+                    for raw_name, consol_name in consolidation_map.items():
+                        for keyword in keywords:
+                            if (keyword in sheet_name.lower() and 
+                                keyword in raw_name.lower()):
+                                raw_sheet_name = raw_name
+                                consolidated_sheet_name = consol_name
+                                break
+                        if raw_sheet_name:
                             break
                 
                 if not raw_sheet_name or not consolidated_sheet_name:
-                    logger.warning(f"시트 '{sheet_name}'에 대한 통합 시트 매핑을 찾을 수 없음")
+                    logger.warning(f"Could not find consolidation mapping for sheet: {sheet_name}")
                     continue
                 
-                # 데이터프레임 검사
+                # Check dataframe validity
                 if df is None or df.empty:
-                    logger.warning(f"시트 '{sheet_name}'의 데이터가 비어 있음, 통합 업데이트 건너뜀")
+                    logger.warning(f"Empty dataframe for sheet {sheet_name}, skipping")
                     continue
+                
+                logger.info(f"Processing consolidation: {raw_sheet_name} → {consolidated_sheet_name}")
                 
                 try:
-                    # Raw 시트에서 데이터 가져오기
-                    raw_ws = None
+                    # Access the Raw sheet
                     try:
                         raw_ws = spreadsheet.worksheet(raw_sheet_name)
+                        logger.info(f"Accessed Raw sheet: {raw_sheet_name}")
                     except gspread.exceptions.WorksheetNotFound:
-                        logger.warning(f"Raw 시트 '{raw_sheet_name}'를 찾을 수 없음, 건너뜀")
+                        logger.warning(f"Raw sheet not found: {raw_sheet_name}")
                         continue
                     
-                    # 통합 시트 열기 또는 생성
-                    consolidated_ws = None
+                    # Access or create consolidated sheet
                     try:
                         consolidated_ws = spreadsheet.worksheet(consolidated_sheet_name)
-                        logger.info(f"통합 시트 '{consolidated_sheet_name}' 접근 성공")
+                        logger.info(f"Accessed consolidated sheet: {consolidated_sheet_name}")
                     except gspread.exceptions.WorksheetNotFound:
-                        logger.info(f"통합 시트 '{consolidated_sheet_name}'가 없어 새로 생성")
-                        consolidated_ws = spreadsheet.add_worksheet(title=consolidated_sheet_name, rows=1000, cols=50)
-                        # 첫 번째 열 헤더 설정
+                        logger.info(f"Creating new consolidated sheet: {consolidated_sheet_name}")
+                        consolidated_ws = spreadsheet.add_worksheet(
+                            title=consolidated_sheet_name, rows=1000, cols=50)
                         consolidated_ws.update_cell(1, 1, "기준일자")
                         time.sleep(CONFIG.get('api_request_wait', 2))
                     
-                    # 통합 시트 현재 상태 확인
-                    headers = consolidated_ws.row_values(1)
+                    # Get all data from Raw sheet (more efficient than multiple API calls)
+                    raw_data = raw_ws.get_all_values()
+                    if not raw_data:
+                        logger.warning(f"No data found in Raw sheet: {raw_sheet_name}")
+                        continue
                     
-                    if not headers or len(headers) == 0:
-                        # 헤더가 없는 경우 초기화
-                        headers = ["기준일자"]
-                        consolidated_ws.update_cell(1, 1, "기준일자")
-                        time.sleep(CONFIG.get('api_request_wait', 2))
+                    # Find the last non-empty column in Raw sheet
+                    raw_headers = raw_data[0] if raw_data else []
+                    last_data_col = -1
                     
-                    # 날짜가 이미 헤더에 있는지 확인
-                    if date_str in headers:
-                        date_col_idx = headers.index(date_str) + 1
-                        logger.info(f"기존 날짜 열 '{date_str}'를 찾음: 열 {date_col_idx}")
+                    # Start from the last column and work backwards to find data
+                    for col_idx in range(len(raw_headers)-1, 0, -1):
+                        col_values = [row[col_idx] for row in raw_data[1:] 
+                                     if col_idx < len(row) and row[col_idx] and 
+                                     row[col_idx].lower() not in ('none', 'nan', '-')]
+                        
+                        if col_values:  # Found a column with data
+                            last_data_col = col_idx
+                            break
+                    
+                    if last_data_col <= 0:
+                        logger.warning(f"Could not find data columns in Raw sheet: {raw_sheet_name}")
+                        continue
+                    
+                    logger.info(f"Found last data column at index {last_data_col} in {raw_sheet_name}")
+                    
+                    # Extract the keys (first column) and values (last data column)
+                    keys = []
+                    values = []
+                    
+                    for i, row in enumerate(raw_data):
+                        if i == 0:  # Skip header row
+                            continue
+                        
+                        if len(row) > 0:  # Ensure row has first column
+                            key = row[0] if row[0] else f"Item_{i}"
+                            
+                            # Get value from last data column if it exists
+                            value = row[last_data_col] if len(row) > last_data_col else ""
+                            
+                            if key and key.lower() not in ('none', 'nan'):
+                                keys.append(key)
+                                values.append(value)
+                    
+                    if not keys:
+                        logger.warning(f"No valid keys found in Raw sheet: {raw_sheet_name}")
+                        continue
+                    
+                    logger.info(f"Extracted {len(keys)} key-value pairs from {raw_sheet_name}")
+                    
+                    # Get data from consolidated sheet
+                    consolidated_data = consolidated_ws.get_all_values()
+                    
+                    # Check if consolidated sheet has data
+                    if not consolidated_data:
+                        logger.warning(f"Empty consolidated sheet: {consolidated_sheet_name}")
+                        consolidated_headers = ["기준일자"]
+                        consolidated_items = []
                     else:
-                        # 새 날짜 열 추가
-                        date_col_idx = len(headers) + 1
+                        consolidated_headers = consolidated_data[0]
+                        consolidated_items = [row[0] for row in consolidated_data[1:]]
+                    
+                    # Find or add date column
+                    if date_str in consolidated_headers:
+                        date_col_idx = consolidated_headers.index(date_str) + 1
+                        logger.info(f"Found existing date column: {date_str} at position {date_col_idx}")
+                    else:
+                        # Add new date column at the end
+                        date_col_idx = len(consolidated_headers) + 1
                         consolidated_ws.update_cell(1, date_col_idx, date_str)
-                        logger.info(f"새 날짜 열 '{date_str}' 추가: 열 {date_col_idx}")
+                        logger.info(f"Added new date column: {date_str} at position {date_col_idx}")
                         time.sleep(CONFIG.get('api_request_wait', 2))
+                        consolidated_headers.append(date_str)
                     
-                    # Raw 시트의 데이터 가져오기 (첫 번째 열을 기준으로 가정)
-                    try:
-                        raw_headers = raw_ws.row_values(1)
-                        if not raw_headers:
-                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에 헤더가 없음")
-                            continue
-                            
-                        # Raw 시트에서 첫 번째 열(항목) 데이터 가져오기
-                        key_col_idx = 1
-                        all_keys = raw_ws.col_values(key_col_idx)[1:]  # 헤더 제외
-                        
-                        # Raw 시트에서 데이터 열 수 확인
-                        raw_data_range = raw_ws.get_all_values()
-                        if not raw_data_range:
-                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에서 데이터를 가져올 수 없음")
+                    # Prepare batch updates
+                    batch_updates = []
+                    new_items = []
+                    
+                    # Process each key-value pair
+                    for key, value in zip(keys, values):
+                        if not key or not key.strip():
                             continue
                         
-                        # 마지막 열 인덱스 구하기
-                        last_col_idx = len(raw_data_range[0]) if raw_data_range else 0
-                        
-                        # 마지막 열의 데이터 가져오기
-                        raw_values = []
-                        if last_col_idx > 1:  # 최소 2개 이상의 열이 있어야 함
-                            try:
-                                raw_values = raw_ws.col_values(last_col_idx)[1:]  # 헤더 제외
-                                logger.info(f"Raw 시트의 마지막 열({last_col_idx})에서 값 가져옴")
-                            except Exception as col_err:
-                                logger.warning(f"마지막 열({last_col_idx}) 값 가져오기 실패: {str(col_err)}")
-                                
-                                # 두 번째 열로 대체
-                                try:
-                                    raw_values = raw_ws.col_values(2)[1:]  # 헤더 제외
-                                    logger.info("대안으로 두 번째 열에서 값 가져옴")
-                                except Exception as alt_err:
-                                    logger.error(f"Raw 시트 값 가져오기 실패: {str(alt_err)}")
-                                    continue
+                        # Find or add row for this key
+                        if key in consolidated_items:
+                            row_idx = consolidated_items.index(key) + 2  # +2 for header and 0-index
                         else:
-                            logger.warning(f"Raw 시트 '{raw_sheet_name}'에 충분한 열이 없음 (필요: 최소 2열)")
-                            continue
-                        
-                        # 키와 값의 길이가 같은지 확인
-                        if len(all_keys) != len(raw_values):
-                            logger.warning(f"키와 값의 개수가 일치하지 않음: 키({len(all_keys)}) != 값({len(raw_values)})")
+                            row_idx = len(consolidated_items) + 2
+                            new_items.append(key)
                             
-                            # 길이를 맞추기 위한 처리
-                            if len(all_keys) > len(raw_values):
-                                # 값이 부족한 경우, 빈 문자열로 채움
-                                raw_values.extend([''] * (len(all_keys) - len(raw_values)))
-                                logger.info(f"부족한 값을 빈 문자열로 채움: {len(raw_values)}")
-                            else:
-                                # 값이 더 많은 경우, 초과분 제거
-                                raw_values = raw_values[:len(all_keys)]
-                                logger.info(f"초과 값 제거 후 길이 조정: {len(raw_values)}")
-                        
-                        # 통합 시트의 기존 항목 가져오기
-                        existing_items = consolidated_ws.col_values(1)[1:]  # 헤더 제외
-                        
-                        # 배치 업데이트 준비
-                        cell_updates = []
-                        new_rows = []
-                        
-                        # 각 항목에 대해 업데이트 준비
-                        for i, (item, value) in enumerate(zip(all_keys, raw_values)):
-                            if not item or not item.strip():
-                                continue  # 빈 항목 건너뛰기
-                            
-                            # 항목이 이미 존재하는지 확인
-                            if item in existing_items:
-                                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
-                            else:
-                                # 새 항목은 끝에 추가
-                                row_idx = len(existing_items) + 2
-                                new_rows.append(item)  # 새 행 추적
-                                
-                                # 항목 업데이트
-                                cell_updates.append({
-                                    'range': f'A{row_idx}',
-                                    'values': [[item]]
-                                })
-                                existing_items.append(item)  # 로컬 리스트 업데이트
-                            
-                            # 날짜 열에 값 업데이트
-                            value_str = value if value else ""
-                            cell_updates.append({
-                                'range': f'{chr(64 + date_col_idx)}{row_idx}',
-                                'values': [[value_str]]
+                            # Add key to first column
+                            batch_updates.append({
+                                'range': f'A{row_idx}',
+                                'values': [[key]]
                             })
+                            consolidated_items.append(key)
                         
-                        # 배치 업데이트 실행
-                        if cell_updates:
-                            logger.info(f"통합 시트 '{consolidated_sheet_name}' 업데이트: {len(cell_updates)}개 셀, 새 항목: {len(new_rows)}개")
-                            
-                            # 배치 사이즈 설정 (API 제한 방지)
-                            batch_size = 10
-                            for i in range(0, len(cell_updates), batch_size):
-                                batch = cell_updates[i:i+batch_size]
-                                
-                                try:
-                                    consolidated_ws.batch_update(batch)
-                                    logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
-                                    time.sleep(CONFIG.get('api_request_wait', 2))  # API 속도 제한 방지
-                                except gspread.exceptions.APIError as api_err:
-                                    # API 오류 처리
-                                    if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                                        logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                                        time.sleep(5)  # 더 긴 대기
-                                        
-                                        # 더 작은 배치로 재시도
-                                        for update in batch:
-                                            try:
-                                                consolidated_ws.batch_update([update])
-                                                time.sleep(3)  # 각 업데이트 사이 더 긴 대기
-                                            except Exception as single_err:
-                                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
-                                    else:
-                                        logger.error(f"일괄 업데이트 실패: {str(api_err)}")
-                                except Exception as batch_err:
-                                    logger.error(f"일괄 업데이트 중 오류: {str(batch_err)}")
-                            
-                            updated_count += 1
-                            logger.info(f"통합 시트 '{consolidated_sheet_name}' 업데이트 완료")
-                        else:
-                            logger.warning(f"통합 시트 '{consolidated_sheet_name}'에 업데이트할 셀이 없습니다")
+                        # Add value to date column
+                        value_str = value if pd.notna(value) and value else ""
+                        batch_updates.append({
+                            'range': f'{chr(64 + date_col_idx)}{row_idx}',
+                            'values': [[value_str]]
+                        })
                     
-                    except Exception as data_err:
-                        logger.error(f"Raw 시트 데이터 처리 중 오류: {str(data_err)}")
+                    # Execute batch updates
+                    if batch_updates:
+                        logger.info(f"Preparing to update {len(batch_updates)} cells in {consolidated_sheet_name}")
+                        logger.info(f"Added {len(new_items)} new items to consolidated sheet")
+                        
+                        # Use smaller batches to avoid API limits
+                        batch_size = 10
+                        success = True
+                        
+                        for i in range(0, len(batch_updates), batch_size):
+                            batch = batch_updates[i:i+batch_size]
+                            
+                            try:
+                                consolidated_ws.batch_update(batch)
+                                logger.info(f"Updated batch {i//batch_size + 1}/{(len(batch_updates)-1)//batch_size + 1}")
+                                time.sleep(CONFIG.get('api_request_wait', 2))
+                            except gspread.exceptions.APIError as api_err:
+                                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                                    logger.warning(f"API rate limit hit: {str(api_err)}")
+                                    logger.info("Retrying with longer delays...")
+                                    
+                                    # Try again with longer delays
+                                    time.sleep(5)
+                                    for update in batch:
+                                        try:
+                                            consolidated_ws.batch_update([update])
+                                            time.sleep(3)
+                                        except Exception as single_err:
+                                            logger.error(f"Single update failed: {str(single_err)}")
+                                            success = False
+                                else:
+                                    logger.error(f"API error: {str(api_err)}")
+                                    success = False
+                            except Exception as batch_err:
+                                logger.error(f"Batch update error: {str(batch_err)}")
+                                success = False
+                        
+                        if success:
+                            updated_count += 1
+                            logger.info(f"Successfully updated consolidated sheet: {consolidated_sheet_name}")
+                            
+                            # Add update timestamp to verify
+                            try:
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                info_row = len(consolidated_items) + 5  # Add some space after data
+                                
+                                consolidated_ws.update_cell(info_row, 1, "Last Updated")
+                                consolidated_ws.update_cell(info_row, 2, timestamp)
+                                consolidated_ws.update_cell(info_row, date_col_idx, "✓")
+                            except Exception as ts_err:
+                                logger.warning(f"Could not add timestamp: {str(ts_err)}")
+                    else:
+                        logger.warning(f"No updates to make for {consolidated_sheet_name}")
                 
                 except Exception as sheet_err:
-                    logger.error(f"통합 시트 '{consolidated_sheet_name}' 업데이트 중 오류: {str(sheet_err)}")
+                    logger.error(f"Error processing sheet {sheet_name}: {str(sheet_err)}")
         
-        logger.info(f"통합 시트 업데이트 결과: {updated_count}개 시트 성공")
+        logger.info(f"Consolidated sheet update complete: {updated_count} sheets updated")
         return updated_count
-        
+    
     except Exception as e:
-        logger.error(f"통합 시트 업데이트 함수 오류: {str(e)}")
+        logger.error(f"Consolidated sheet update failed: {str(e)}")
         return 0
-
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
     Enhanced function to create more informative placeholder DataFrames.
