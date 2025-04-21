@@ -48,6 +48,11 @@ on:
         required: false
         default: 'true'
         type: boolean
+      cleanup_old_sheets:
+        description: '날짜가 포함된 오래된 시트 정리 여부'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: write
@@ -118,6 +123,7 @@ jobs:
         OCR_ENABLED: ${{ github.event.inputs.ocr_enabled || 'true' }}
         REVERSE_ORDER: ${{ github.event.inputs.reverse_order || 'true' }}
         UPDATE_CONSOLIDATION: 'true'
+        CLEANUP_OLD_SHEETS: ${{ github.event.inputs.cleanup_old_sheets || 'false' }}
         PYTHONIOENCODING: utf-8
       run: |
         export DISPLAY=:99
@@ -209,6 +215,7 @@ jobs:
         echo "Days Range: ${{ github.event.inputs.days_range || '4' }}" >> artifacts/run_info.txt
         echo "OCR 활성화: ${{ github.event.inputs.ocr_enabled || 'true' }}" >> artifacts/run_info.txt
         echo "역순 탐색: ${{ github.event.inputs.reverse_order || 'true' }}" >> artifacts/run_info.txt
+        echo "시트 정리: ${{ github.event.inputs.cleanup_old_sheets || 'false' }}" >> artifacts/run_info.txt
         tar -czf monitoring-artifacts-${TIMESTAMP}.tar.gz artifacts/
         echo "ARTIFACT_PATH=monitoring-artifacts-${TIMESTAMP}.tar.gz" >> $GITHUB_ENV
         echo "ARTIFACT_NAME=monitoring-artifacts-${TIMESTAMP}" >> $GITHUB_ENV
@@ -231,6 +238,7 @@ jobs:
           - **페이지 범위**: ${{ github.event.inputs.start_page || '1' }} ~ ${{ github.event.inputs.end_page || '5' }}
           - **역순 탐색**: ${{ github.event.inputs.reverse_order || 'true' }}
           - **OCR 활성화**: ${{ github.event.inputs.ocr_enabled || 'true' }}
+          - **시트 정리**: ${{ github.event.inputs.cleanup_old_sheets || 'false' }}
           
           이 릴리스에는 모니터링 스크립트 실행 결과와 관련 로그 및 스크린샷이 포함되어 있습니다.
         token: ${{ secrets.GITHUB_TOKEN }}
