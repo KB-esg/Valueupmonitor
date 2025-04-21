@@ -298,6 +298,432 @@ def is_in_date_range(date_str, days=4):
         logger.error(f"날짜 파싱 에러: {str(e)}")
         return True  # 오류 발생 시 기본적으로 포함
 
+def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=None):
+    """
+    지정된 날짜 범위 내의 게시물만 파싱하는 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        page_num: 현재 페이지 번호
+        start_date: 시작 날짜 문자열 (YYYY-MM-DD)
+        end_date: 종료 날짜 문자열 (YYYY-MM-DD)
+        
+    Returns:
+        Tuple[List, List, bool]: 모든 게시물, 통신 통계 게시물, 검색 계속 여부
+    """
+    all_posts = []
+    telecom_stats_posts = []
+    continue_search = True
+    
+    try:
+        # 날짜 객체로 변환
+        start_date_obj = None
+        end_date_obj = None
+        
+        if start_date:
+            try:
+                start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+            except ValueError:
+                logger.warning(f"잘못된 시작 날짜 형식: {start_date}, 날짜 필터링 무시됨")
+                
+        if end_date:
+            try:
+                end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            except ValueError:
+                logger.warning(f"잘못된 종료 날짜 형식: {end_date}, 날짜 필터링 무시됨")
+        
+        # 다양한 로딩 지표로 페이지 로드 대기
+        selectors = [
+            (By.CLASS_NAME, "board_list"),
+            (By.CSS_SELECTOR, ".board_list .toggle"),
+            (By.CSS_SELECTOR, "table.board_list tr")
+        ]
+        
+        loaded = False
+        for by_type, selector in selectors:
+            try:
+                WebDriverWait(driver, 15).until(  # 대기 시간 증가
+                    EC.presence_of_element_located((by_type, selector))
+                )
+                loaded = True
+                logger.info(f"페이지 로드 감지됨: {selector}")
+                break
+            except TimeoutException:
+                continue
+        
+        if not loaded:
+            logger.error("페이지 로드 시간 초과")
+            return [], [], False
+        
+        # 페이지가 로드되면 약간의 지연 시간 추가
+        time.sleep(3)  # 더 긴 지연 시간
+        
+        # 스크롤을 천천히 내려 모든 요소 로드
+        try:
+            # 스크롤을 부드럽게 내리기
+            execute_javascript(driver, """
+                function smoothScroll() {
+                    const height = document.body.scrollHeight;
+                    const step = Math.floor(height / 10);
+                    let i = 0;
+                    const timer = setInterval(function() {
+                        window.scrollBy(0, step);
+                        i++;
+                        if (i >= 10) clearInterval(timer);
+                    }, 100);
+                }
+                smoothScroll();
+            """, description="페이지 스크롤")
+            time.sleep(2)  # 스크롤 완료 대기
+            
+            # 페이지 맨 위로 돌아가기
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+        except Exception as scroll_err:
+            logger.warning(f"스크롤 중 오류: {str(scroll_err)}")
+        
+        # 페이지 소스 저장 (디버깅용)
+        try:
+            with open(f'page_{page_num}_source.html', 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            logger.info(f"현재 페이지 소스 저장 완료: page_{page_num}_source.html")
+        except Exception as save_err:
+            logger.warning(f"페이지 소스 저장 중 오류: {str(save_err)}")
+        
+        # 스크린샷 저장
+        take_screenshot(driver, f"parsed_page_{page_num}")
+        
+        # BeautifulSoup으로 파싱
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # 게시물 선택자 (다양한 사이트 레이아웃 지원)
+        post_selectors = [
+            "div.toggle:not(.thead)",
+            "table.board_list tr:not(.thead)",
+            ".board_list li",
+            ".board_list .post-item"
+        ]
+        
+        posts = []
+        for selector in post_selectors:
+            posts = soup.select(selector)
+            if posts:
+                logger.info(f"{len(posts)}개 게시물 항목 발견 (선택자: {selector})")
+                break
+        
+        if not posts:
+            # DOM에서 직접 시도
+            try:
+                logger.warning("BeautifulSoup으로 게시물을 찾을 수 없음, Selenium으로 직접 시도")
+                direct_posts = []
+                for selector in post_selectors:
+                    direct_posts = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if direct_posts:
+                        logger.info(f"Selenium으로 {len(direct_posts)}개 게시물 항목 발견 (선택자: {selector})")
+                        break
+                        
+                if direct_posts:
+                    # Selenium 요소를 사용하여 정보 추출
+                    for item in direct_posts:
+                        try:
+                            # 헤더 행 건너뛰기
+                            if 'thead' in item.get_attribute('class') or item.tag_name == 'th':
+                                continue
+                                
+                            # 날짜 추출
+                            date_sel = [".date", "div.date", "td.date", ".post-date"]
+                            date_elem = None
+                            for sel in date_sel:
+                                try:
+                                    date_elem = item.find_element(By.CSS_SELECTOR, sel)
+                                    if date_elem:
+                                        break
+                                except:
+                                    continue
+                                    
+                            if not date_elem:
+                                continue
+                                
+                            date_str = date_elem.text.strip()
+                            if not date_str or date_str == '등록일':
+                                continue
+                                
+                            logger.info(f"날짜 문자열 발견: {date_str}")
+                            
+                            # 게시물 날짜 파싱
+                            post_date = parse_post_date(date_str)
+                            if not post_date:
+                                logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
+                                continue
+                            
+                            # 날짜 범위 확인
+                            in_range = True
+                            
+                            if start_date_obj and post_date < start_date_obj:
+                                logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
+                                in_range = False
+                                # 종료 날짜보다 이전 게시물이면 검색 중단
+                                if not end_date_obj or post_date < end_date_obj:
+                                    continue_search = False
+                            
+                            if end_date_obj and post_date > end_date_obj:
+                                logger.debug(f"종료 날짜 이후 게시물: {post_date} > {end_date_obj}")
+                                in_range = False
+                            
+                            if not in_range:
+                                logger.debug(f"날짜 범위 밖 게시물 건너뜀: {date_str} ({post_date})")
+                                continue
+                            
+                            # 제목 추출
+                            title_sel = ["p.title", ".title", "td.title", ".subject a", "a.nttInfoBtn"]
+                            title_elem = None
+                            for sel in title_sel:
+                                try:
+                                    title_elem = item.find_element(By.CSS_SELECTOR, sel)
+                                    if title_elem:
+                                        break
+                                except:
+                                    continue
+                                    
+                            if not title_elem:
+                                continue
+                                
+                            title = title_elem.text.strip()
+                            
+                            # 제목 요소의 href 또는 클릭 속성에서 ID 추출
+                            post_id = None
+                            onclick = title_elem.get_attribute('onclick')
+                            if onclick:
+                                match = re.search(r"fn_detail\((\d+)\)", onclick)
+                                if match:
+                                    post_id = match.group(1)
+                                    
+                            if not post_id:
+                                # 부모 요소 또는 조상 요소에서 ID 추출 시도
+                                parent = item
+                                for _ in range(3):  # 최대 3단계 상위까지 확인
+                                    parent_onclick = parent.get_attribute('onclick')
+                                    if parent_onclick and 'fn_detail' in parent_onclick:
+                                        match = re.search(r"fn_detail\((\d+)\)", parent_onclick)
+                                        if match:
+                                            post_id = match.group(1)
+                                            break
+                                    try:
+                                        parent = parent.find_element(By.XPATH, "..")
+                                    except:
+                                        break
+                                        
+                            # 게시물 URL 생성
+                            post_url = get_post_url(post_id) if post_id else None
+                            
+                            # 부서 정보 추출
+                            dept_sel = ["dd[id*='td_CHRG_DEPT_NM']", ".dept", "td.dept", ".department"]
+                            dept_elem = None
+                            for sel in dept_sel:
+                                try:
+                                    dept_elem = item.find_element(By.CSS_SELECTOR, sel)
+                                    if dept_elem:
+                                        break
+                                except:
+                                    continue
+                                    
+                            dept_text = dept_elem.text.strip() if dept_elem else "부서 정보 없음"
+                            
+                            # 게시물 정보 딕셔너리 생성
+                            post_info = {
+                                'title': title,
+                                'date': date_str,
+                                'post_date': post_date,  # 파싱된 날짜 객체 추가
+                                'department': dept_text,
+                                'url': post_url,
+                                'post_id': post_id
+                            }
+                            
+                            # 모든 게시물 리스트에 추가
+                            all_posts.append(post_info)
+                            
+                            # 통신 통계 게시물인지 확인
+                            if is_telecom_stats_post(title):
+                                logger.info(f"통신 통계 게시물 발견: {title}")
+                                telecom_stats_posts.append(post_info)
+                                
+                        except Exception as direct_err:
+                            logger.error(f"직접 추출 중 오류: {str(direct_err)}")
+                            continue
+                else:
+                    logger.warning("게시물을 찾을 수 없음")
+                    return [], [], False
+            except Exception as direct_attempt_err:
+                logger.error(f"직접 파싱 시도 중 오류: {str(direct_attempt_err)}")
+                return [], [], False
+        else:
+            # BeautifulSoup으로 찾은 게시물 처리
+            for item in posts:
+                try:
+                    # 헤더 행 건너뛰기
+                    if 'thead' in item.get('class', []) or item.name == 'th':
+                        continue
+                    
+                    # 날짜 정보 추출 (여러 선택자 시도)
+                    date_selectors = [
+                        "div.date[aria-label='등록일']",
+                        "div.date",
+                        ".date",
+                        "td.date",
+                        ".post-date"
+                    ]
+                    
+                    date_elem = None
+                    for selector in date_selectors:
+                        date_elem = item.select_one(selector)
+                        if date_elem:
+                            break
+                            
+                    if not date_elem:
+                        logger.debug("날짜 요소를 찾을 수 없음, 건너뜀")
+                        continue
+                        
+                    date_str = date_elem.text.strip()
+                    if not date_str or date_str == '등록일':
+                        continue
+                    
+                    logger.debug(f"날짜 문자열 발견: {date_str}")
+                    
+                    # 게시물 날짜 파싱
+                    post_date = parse_post_date(date_str)
+                    if not post_date:
+                        logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
+                        continue
+                    
+                    # 날짜 범위 확인
+                    in_range = True
+                    
+                    if start_date_obj and post_date < start_date_obj:
+                        logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
+                        in_range = False
+                        # 시작 날짜보다 이전이면 더 이상 검색할 필요 없음
+                        continue_search = False
+                    
+                    if end_date_obj and post_date > end_date_obj:
+                        logger.debug(f"종료 날짜 이후 게시물: {post_date} > {end_date_obj}")
+                        in_range = False
+                    
+                    if not in_range:
+                        logger.debug(f"날짜 범위 밖 게시물 건너뜀: {date_str}")
+                        continue
+                    
+                    # 제목 및 게시물 ID 추출
+                    title_selectors = [
+                        "p.title",
+                        ".title",
+                        "td.title",
+                        ".subject a",
+                        "a.nttInfoBtn"
+                    ]
+                    
+                    title_elem = None
+                    for selector in title_selectors:
+                        title_elem = item.select_one(selector)
+                        if title_elem:
+                            break
+                            
+                    if not title_elem:
+                        logger.debug("제목 요소를 찾을 수 없음, 건너뜀")
+                        continue
+                        
+                    title = title_elem.text.strip()
+                    post_id = extract_post_id(item)
+                    post_url = get_post_url(post_id)
+                    
+                    # 부서 정보 추출 (여러 선택자 시도)
+                    dept_selectors = [
+                        "dd[id*='td_CHRG_DEPT_NM']",
+                        ".dept",
+                        "td.dept",
+                        ".department"
+                    ]
+                    
+                    dept_elem = None
+                    for selector in dept_selectors:
+                        dept_elem = item.select_one(selector)
+                        if dept_elem:
+                            break
+                            
+                    dept_text = dept_elem.text.strip() if dept_elem else "부서 정보 없음"
+                    
+                    # 게시물 정보 딕셔너리 생성
+                    post_info = {
+                        'title': title,
+                        'date': date_str,
+                        'post_date': post_date,  # 파싱된 날짜 객체 추가
+                        'department': dept_text,
+                        'url': post_url,
+                        'post_id': post_id
+                    }
+                    
+                    # 모든 게시물 리스트에 추가
+                    all_posts.append(post_info)
+                    
+                    # 통신 통계 게시물인지 확인
+                    if is_telecom_stats_post(title):
+                        logger.info(f"통신 통계 게시물 발견: {title}")
+                        telecom_stats_posts.append(post_info)
+                        
+                except Exception as e:
+                    logger.error(f"게시물 파싱 중 에러: {str(e)}")
+                    continue
+        
+        return all_posts, telecom_stats_posts, continue_search
+        
+    except Exception as e:
+        logger.error(f"페이지 파싱 중 에러: {str(e)}")
+        return [], [], False
+
+def parse_post_date(date_str):
+    """
+    다양한 형식의 날짜 문자열을 날짜 객체로 변환
+    
+    Args:
+        date_str: 날짜 문자열
+        
+    Returns:
+        date: 파싱된 datetime.date 객체 또는 None
+    """
+    try:
+        # 날짜 문자열 정규화
+        date_str = date_str.replace(',', ' ').strip()
+        
+        # 다양한 날짜 형식 시도
+        date_formats = [
+            '%Y. %m. %d',  # "YYYY. MM. DD" 형식
+            '%Y-%m-%d',    # "YYYY-MM-DD" 형식
+            '%Y/%m/%d',    # "YYYY/MM/DD" 형식
+            '%Y.%m.%d',    # "YYYY.MM.DD" 형식
+            '%Y년 %m월 %d일',  # "YYYY년 MM월 DD일" 형식
+        ]
+        
+        for date_format in date_formats:
+            try:
+                return datetime.strptime(date_str, date_format).date()
+            except ValueError:
+                continue
+        
+        # 정규식으로 시도
+        match = re.search(r'(\d{4})[.\-\s/]+(\d{1,2})[.\-\s/]+(\d{1,2})', date_str)
+        if match:
+            year, month, day = map(int, match.groups())
+            try:
+                return datetime(year, month, day).date()
+            except ValueError:
+                logger.warning(f"날짜 값이 유효하지 않음: {year}-{month}-{day}")
+        
+        logger.warning(f"알 수 없는 날짜 형식: {date_str}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"날짜 파싱 오류: {str(e)}")
+        return None
+
 def has_next_page(driver):
     """다음 페이지가 있는지 확인"""
     try:
