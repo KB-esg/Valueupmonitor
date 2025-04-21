@@ -45,6 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger('msit_monitor')
 
 # 전역 설정 변수
+# Find the CONFIG dictionary (around line 36)
 CONFIG = {
     'landing_url': "https://www.msit.go.kr",
     'stats_url': "https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=74&mId=99",
@@ -62,7 +63,10 @@ CONFIG = {
     'gspread_creds': os.environ.get('MSIT_GSPREAD_ref'),
     'spreadsheet_id': os.environ.get('MSIT_SPREADSHEET_ID'),
     'spreadsheet_name': os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계'),
-    'ocr_enabled': os.environ.get('OCR_ENABLED', 'true').lower() in ('true', 'yes', '1', 'y')
+    'ocr_enabled': os.environ.get('OCR_ENABLED', 'true').lower() in ('true', 'yes', '1', 'y'),
+    
+    # ADD THIS LINE - new configuration option for cleanup
+    'cleanup_old_sheets': os.environ.get('CLEANUP_OLD_SHEETS', 'false').lower() in ('true', 'yes', '1', 'y')
 }
 
 # 임시 디렉토리 설정
@@ -6348,6 +6352,7 @@ def update_google_sheets(client, data):
 def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post_info=None):
     """
     Update multiple sheets in the spreadsheet.
+    Modified to prevent creating date-specific summary sheets.
     
     Args:
         spreadsheet: gspread Spreadsheet object
@@ -6366,7 +6371,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
     success_count = 0
     total_sheets = len(sheets_data)
     
-    # Create a summary sheet first
+    # Create a summary sheet first (with fixed name, no date)
     try:
         summary_sheet_name = f"요약_{report_type}"
         summary_sheet_name = clean_sheet_name_for_gsheets(summary_sheet_name)
@@ -6418,7 +6423,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
     # Sort sheets by size (Process smallest sheets first to avoid API rate limits)
     sorted_sheets = sorted(sheets_data.items(), key=lambda x: 0 if x[1] is None else x[1].size)
     
-    # Add a combined sheet with all data if there are multiple sheets
+    # Add a combined sheet with all data if there are multiple sheets (with fixed name, no date)
     if len(sheets_data) > 1:
         try:
             # Create a combined dataframe
@@ -6444,7 +6449,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
                     cols = ['데이터출처'] + cols
                     combined_df = combined_df[cols]
                 
-                # Update as a single sheet - CHANGED: Use "Raw" in sheet name
+                # Update as a single sheet with fixed name (no date in name)
                 combined_sheet_name = f"전체데이터_{clean_sheet_name_for_gsheets(report_type)}_Raw"
                 success = update_single_sheet_raw(spreadsheet, combined_sheet_name, combined_df, date_str, post_info)
                 if success:
@@ -6463,7 +6468,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
             # Clean sheet name to be valid
             clean_sheet_name = clean_sheet_name_for_gsheets(sheet_name)
             
-            # CHANGED: Add "Raw" suffix to sheet name instead of date
+            # Add "_Raw" suffix to sheet name
             raw_sheet_name = f"{clean_sheet_name}_Raw"
             
             # Check if this sheet already exists (to avoid unnecessary API calls)
@@ -6480,7 +6485,7 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
             
             # Update the sheet
             try:
-                # CHANGED: Use Raw update method
+                # Use Raw update method
                 success = update_single_sheet_raw(spreadsheet, raw_sheet_name, df, date_str, post_info)
                 if success:
                     success_count += 1
@@ -6500,6 +6505,75 @@ def update_multiple_sheets(spreadsheet, sheets_data, date_str, report_type, post
     
     logger.info(f"{success_count}/{total_sheets} 시트 업데이트 완료")
     return success_count > 0
+
+
+def cleanup_date_specific_sheets(spreadsheet):
+    """
+    Removes date-specific summary and data sheets that should no longer be created.
+    Only keeps permanent _Raw and _통합 sheets.
+    
+    Args:
+        spreadsheet: gspread Spreadsheet object
+        
+    Returns:
+        int: Number of sheets removed
+    """
+    try:
+        # Get all worksheets
+        all_worksheets = spreadsheet.worksheets()
+        sheets_to_remove = []
+        
+        # Find date-specific sheets by pattern matching
+        date_patterns = [
+            r'요약_.*_\d{4}년\s*\d{1,2}월',  # Matches "요약_무선통신서비스 가입 현황_전체데이터_2025년 1월"
+            r'.*\d{4}년\s*\d{1,2}월.*'       # Any sheet with year/month in the name
+        ]
+        
+        # Find sheets to keep - only those ending with _Raw or _통합
+        keep_patterns = [r'.*_Raw$', r'.*_통합$']
+        
+        for worksheet in all_worksheets:
+            title = worksheet.title
+            
+            # Check if it's a sheet we want to keep
+            is_keeper = False
+            for pattern in keep_patterns:
+                if re.match(pattern, title):
+                    is_keeper = True
+                    break
+                    
+            # If not a keeper, check if it matches date patterns
+            if not is_keeper:
+                for pattern in date_patterns:
+                    if re.match(pattern, title):
+                        sheets_to_remove.append(worksheet)
+                        break
+        
+        # Log what we're planning to remove
+        logger.info(f"Found {len(sheets_to_remove)} date-specific sheets to remove")
+        for ws in sheets_to_remove:
+            logger.info(f"Will remove: {ws.title}")
+        
+        # Ask for confirmation if running interactively
+        # (Skip this check if running as automation)
+        remove_count = 0
+        
+        # Remove the sheets
+        for ws in sheets_to_remove:
+            try:
+                spreadsheet.del_worksheet(ws)
+                logger.info(f"Removed sheet: {ws.title}")
+                remove_count += 1
+                # Sleep to avoid API rate limits
+                time.sleep(1)
+            except Exception as del_err:
+                logger.error(f"Error removing sheet {ws.title}: {str(del_err)}")
+        
+        return remove_count
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up date-specific sheets: {str(e)}")
+        return 0
 
 
 def update_single_sheet(spreadsheet, sheet_name, df, date_str, post_info=None):
@@ -8305,6 +8379,22 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
         end_time = time.time()
         execution_time = end_time - start_time
         logger.info(f"실행 시간: {execution_time:.2f}초")
+
+        
+        # ADD THIS CODE RIGHT HERE - before sending Telegram notification:
+        if gs_client and data_updates and CONFIG.get('cleanup_old_sheets', False):
+            logger.info("Cleaning up date-specific sheets...")
+            try:
+                # Use the same spreadsheet object if already available, or open it again
+                if not spreadsheet:
+                    spreadsheet = open_spreadsheet_with_retry(gs_client)
+        
+                if spreadsheet:
+                    removed_count = cleanup_date_specific_sheets(spreadsheet)
+                    logger.info(f"Removed {removed_count} date-specific sheets")
+            except Exception as cleanup_err:
+                logger.error(f"Error during sheet cleanup: {str(cleanup_err)}")
+
         
         # Send Telegram notification
         if all_posts or data_updates:
@@ -8968,7 +9058,12 @@ async def main():
         # OCR 설정 확인
         ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
         ocr_enabled = ocr_enabled_str in ('true', 'yes', '1', 'y')
-        
+
+         # ADD THIS SECTION - read cleanup option
+        cleanup_sheets_str = os.environ.get('CLEANUP_OLD_SHEETS', 'false').lower()
+        cleanup_old_sheets = cleanup_sheets_str in ('true', 'yes', '1', 'y')
+
+       
         # 최대 API 요청 간격
         api_request_wait = int(os.environ.get('API_REQUEST_WAIT', '2'))
         
@@ -8996,6 +9091,13 @@ async def main():
         CONFIG['ocr_enabled'] = ocr_enabled
         CONFIG['max_retries'] = max_retries
         CONFIG['page_load_timeout'] = page_load_timeout
+        CONFIG['cleanup_old_sheets'] = cleanup_old_sheets
+
+        
+        # Log the configuration
+        logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 시트 정리: {cleanup_old_sheets}")
+    
+    
     except Exception as config_err:
         logger.error(f"환경 설정 처리 중 오류: {str(config_err)}")
         return
