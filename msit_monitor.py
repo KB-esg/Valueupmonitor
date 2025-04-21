@@ -8283,35 +8283,115 @@ async def main():
     if is_github_actions:
         logger.info("GitHub Actions 환경에서 실행 중")
     
-    # 환경 변수 가져오기 (향상된 버전)
+    # 1. 검토 기간 설정 (필수 파라미터)
     try:
-        days_range = int(os.environ.get('DAYS_RANGE', '4'))
-    except ValueError:
-        logger.warning("잘못된 DAYS_RANGE 형식. 기본값 4일 사용")
-        days_range = 4
+        # 시작 날짜와 종료 날짜 (YYYY-MM-DD 형식)
+        start_date_str = os.environ.get('START_DATE', '')
+        end_date_str = os.environ.get('END_DATE', '')
         
-    check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
-    check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
+        if not start_date_str or not end_date_str:
+            logger.error("검토 시작 날짜와 종료 날짜는 필수 입력값입니다.")
+            return
+            
+        # 날짜 형식 검증
+        try:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+            
+            # 날짜 범위 확인
+            if start_date > end_date:
+                logger.error(f"시작 날짜({start_date_str})가 종료 날짜({end_date_str})보다 나중입니다.")
+                return
+                
+            # 현재 날짜와의 차이로 days_range 계산
+            today = datetime.now().date()
+            days_range = (today - start_date).days
+            
+            logger.info(f"검토 기간 설정: {start_date_str} ~ {end_date_str} (days_range: {days_range}일)")
+        except ValueError as date_err:
+            logger.error(f"날짜 형식 오류: {str(date_err)}")
+            return
+    except Exception as e:
+        logger.error(f"검토 기간 설정 중 오류: {str(e)}")
+        return
     
-    spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
+    # 2. 페이지 범위 설정 (필수 파라미터)
+    try:
+        start_page_str = os.environ.get('START_PAGE', '')
+        end_page_str = os.environ.get('END_PAGE', '')
+        
+        if not start_page_str or not end_page_str:
+            logger.error("시작 페이지와 종료 페이지는 필수 입력값입니다.")
+            return
+            
+        # 페이지 번호 검증
+        try:
+            start_page = int(start_page_str)
+            end_page = int(end_page_str)
+            
+            # 페이지 범위 확인
+            if start_page <= 0 or end_page <= 0:
+                logger.error("페이지 번호는 1 이상이어야 합니다.")
+                return
+                
+            if start_page > end_page:
+                logger.error(f"시작 페이지({start_page})가 종료 페이지({end_page})보다 큽니다.")
+                return
+                
+            logger.info(f"페이지 범위 설정: {start_page} ~ {end_page}")
+        except ValueError:
+            logger.error("페이지 번호는 정수여야 합니다.")
+            return
+    except Exception as e:
+        logger.error(f"페이지 범위 설정 중 오류: {str(e)}")
+        return
     
-    # OCR 설정 확인
-    ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
-    CONFIG['ocr_enabled'] = ocr_enabled_str in ('true', 'yes', '1', 'y')
+    # 3. 기타 환경 변수
+    try:
+        # Google Sheets 업데이트 여부
+        check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
+        check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
+        
+        # 통합 시트 업데이트 설정
+        update_consolidation_str = os.environ.get('UPDATE_CONSOLIDATION', 'true').lower()
+        update_consolidation = update_consolidation_str in ('true', 'yes', '1', 'y')
+        logger.info(f"통합 시트 업데이트: {update_consolidation}")
+        
+        # 스프레드시트 이름
+        spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
+        
+        # OCR 설정 확인
+        ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
+        ocr_enabled = ocr_enabled_str in ('true', 'yes', '1', 'y')
+        
+        # 최대 API 요청 간격
+        api_request_wait = int(os.environ.get('API_REQUEST_WAIT', '2'))
+        
+        # 재시도 설정
+        max_retries = int(os.environ.get('MAX_RETRIES', '3'))
+        page_load_timeout = int(os.environ.get('PAGE_LOAD_TIMEOUT', '30'))
+        
+        # 역순 탐색 (기본 활성화)
+        reverse_order_str = os.environ.get('REVERSE_ORDER', 'true').lower()
+        reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
+        
+        # 환경 설정 로그
+        logger.info(f"MSIT 모니터 시작 - 검토 기간: {start_date_str}~{end_date_str}, 페이지: {start_page}~{end_page}")
+        logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 역순 탐색: {reverse_order}")
+        logger.info(f"스프레드시트 이름: {spreadsheet_name}")
+        
+        # 전역 설정 업데이트
+        CONFIG['spreadsheet_name'] = spreadsheet_name
+        CONFIG['update_consolidation'] = update_consolidation
+        CONFIG['api_request_wait'] = api_request_wait
+        CONFIG['ocr_enabled'] = ocr_enabled
+        CONFIG['max_retries'] = max_retries
+        CONFIG['page_load_timeout'] = page_load_timeout
+    except Exception as config_err:
+        logger.error(f"환경 설정 처리 중 오류: {str(config_err)}")
+        return
     
-    # 재시도 설정
-    CONFIG['max_retries'] = int(os.environ.get('MAX_RETRIES', '3'))
-    CONFIG['page_load_timeout'] = int(os.environ.get('PAGE_LOAD_TIMEOUT', '30'))
-    
-    # 환경 설정 로그
-    logger.info(f"MSIT 모니터 시작 - days_range={days_range}, check_sheets={check_sheets}, ocr_enabled={CONFIG['ocr_enabled']}")
-    logger.info(f"스프레드시트 이름: {spreadsheet_name}")
-    logger.info(f"재시도 설정: max_retries={CONFIG['max_retries']}, page_load_timeout={CONFIG['page_load_timeout']}")
-    
-    # 전역 설정 업데이트
-    CONFIG['spreadsheet_name'] = spreadsheet_name
-    
-    # OCR 라이브러리 확인
+    # OCR 라이브러리 확인 (기존 코드)
     if CONFIG['ocr_enabled']:
         try:
             import pytesseract
@@ -8350,17 +8430,17 @@ async def main():
             logger.warning(f"OCR 라이브러리 가져오기 실패: {str(import_err)}")
             CONFIG['ocr_enabled'] = False
     
-    # GC 구성 최적화 (메모리 관리)
-    try:
-        import gc
-        gc.enable()
-        logger.info("가비지 컬렉션 최적화 설정 완료")
-    except:
-        pass
-    
     # 모니터링 실행
     try:
-        await run_monitor(days_range=days_range, check_sheets=check_sheets)
+        await run_monitor(
+            days_range=days_range,
+            check_sheets=check_sheets,
+            start_page=start_page,
+            end_page=end_page,
+            start_date=start_date_str,
+            end_date=end_date_str,
+            reverse_order=reverse_order
+        )
     except Exception as e:
         logging.error(f"메인 함수 오류: {str(e)}", exc_info=True)
         
