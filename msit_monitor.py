@@ -602,7 +602,7 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                         logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
                         in_range = False
                         # 시작 날짜보다 이전이면 더 이상 검색할 필요 없음
-                        continue_search = False
+                        
                     
                     if end_date_obj and post_date > end_date_obj:
                         logger.debug(f"종료 날짜 이후 게시물: {post_date} > {end_date_obj}")
@@ -8709,47 +8709,57 @@ async def main():
     if is_github_actions:
         logger.info("GitHub Actions 환경에서 실행 중")
     
-    # 1. 검토 기간 설정 (필수 파라미터)
+    # 1. 검토 기간 설정
     try:
         # 시작 날짜와 종료 날짜 (YYYY-MM-DD 형식)
         start_date_str = os.environ.get('START_DATE', '')
         end_date_str = os.environ.get('END_DATE', '')
         
-        if not start_date_str or not end_date_str:
-            logger.error("검토 시작 날짜와 종료 날짜는 필수 입력값입니다.")
-            return
-            
-        # 날짜 형식 검증
-        try:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-            
-            # 날짜 범위 확인
-            if start_date > end_date:
-                logger.error(f"시작 날짜({start_date_str})가 종료 날짜({end_date_str})보다 나중입니다.")
-                return
+        if start_date_str and end_date_str:
+            # 날짜 형식 검증
+            try:
+                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
                 
-            # 현재 날짜와의 차이로 days_range 계산
-            today = datetime.now().date()
-            days_range = (today - start_date).days
-            
-            logger.info(f"검토 기간 설정: {start_date_str} ~ {end_date_str} (days_range: {days_range}일)")
-        except ValueError as date_err:
-            logger.error(f"날짜 형식 오류: {str(date_err)}")
-            return
+                # 날짜 범위 확인
+                if start_date > end_date:
+                    logger.error(f"시작 날짜({start_date_str})가 종료 날짜({end_date_str})보다 나중입니다.")
+                    logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
+                    # 기본값 사용
+                    days_range = int(os.environ.get('DAYS_RANGE', '4'))
+                    start_date_str = None
+                    end_date_str = None
+                else:
+                    # 현재 날짜와의 차이로 days_range 계산
+                    today = datetime.now().date()
+                    days_range = (today - start_date).days
+                    
+                    logger.info(f"검토 기간 설정: {start_date_str} ~ {end_date_str} (days_range: {days_range}일)")
+            except ValueError as date_err:
+                logger.error(f"날짜 형식 오류: {str(date_err)}")
+                logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
+                # 기본값 사용
+                days_range = int(os.environ.get('DAYS_RANGE', '4'))
+                start_date_str = None
+                end_date_str = None
+        else:
+            # 날짜가 입력되지 않은 경우 days_range 사용
+            days_range = int(os.environ.get('DAYS_RANGE', '4'))
+            logger.info(f"검토 기간 미설정, 기본값 사용: days_range={days_range}일")
+            start_date_str = None
+            end_date_str = None
     except Exception as e:
         logger.error(f"검토 기간 설정 중 오류: {str(e)}")
-        return
+        logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
+        days_range = int(os.environ.get('DAYS_RANGE', '4'))
+        start_date_str = None
+        end_date_str = None
     
-    # 2. 페이지 범위 설정 (필수 파라미터)
+    # 2. 페이지 범위 설정
     try:
-        start_page_str = os.environ.get('START_PAGE', '')
-        end_page_str = os.environ.get('END_PAGE', '')
+        start_page_str = os.environ.get('START_PAGE', '1')
+        end_page_str = os.environ.get('END_PAGE', '5')
         
-        if not start_page_str or not end_page_str:
-            logger.error("시작 페이지와 종료 페이지는 필수 입력값입니다.")
-            return
-            
         # 페이지 번호 검증
         try:
             start_page = int(start_page_str)
@@ -8758,19 +8768,26 @@ async def main():
             # 페이지 범위 확인
             if start_page <= 0 or end_page <= 0:
                 logger.error("페이지 번호는 1 이상이어야 합니다.")
-                return
-                
-            if start_page > end_page:
+                logger.info("기본 페이지 범위(1~5)를 사용합니다.")
+                start_page = 1
+                end_page = 5
+            elif start_page > end_page:
                 logger.error(f"시작 페이지({start_page})가 종료 페이지({end_page})보다 큽니다.")
-                return
-                
-            logger.info(f"페이지 범위 설정: {start_page} ~ {end_page}")
+                logger.info("기본 페이지 범위(1~5)를 사용합니다.")
+                start_page = 1
+                end_page = 5
+            else:
+                logger.info(f"페이지 범위 설정: {start_page} ~ {end_page}")
         except ValueError:
             logger.error("페이지 번호는 정수여야 합니다.")
-            return
+            logger.info("기본 페이지 범위(1~5)를 사용합니다.")
+            start_page = 1
+            end_page = 5
     except Exception as e:
         logger.error(f"페이지 범위 설정 중 오류: {str(e)}")
-        return
+        logger.info("기본 페이지 범위(1~5)를 사용합니다.")
+        start_page = 1
+        end_page = 5
     
     # 3. 기타 환경 변수
     try:
@@ -8802,7 +8819,11 @@ async def main():
         reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
         
         # 환경 설정 로그
-        logger.info(f"MSIT 모니터 시작 - 검토 기간: {start_date_str}~{end_date_str}, 페이지: {start_page}~{end_page}")
+        if start_date_str and end_date_str:
+            logger.info(f"MSIT 모니터 시작 - 검토 기간: {start_date_str}~{end_date_str}, 페이지: {start_page}~{end_page}")
+        else:
+            logger.info(f"MSIT 모니터 시작 - 최근 {days_range}일 검토, 페이지: {start_page}~{end_page}")
+            
         logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 역순 탐색: {reverse_order}")
         logger.info(f"스프레드시트 이름: {spreadsheet_name}")
         
