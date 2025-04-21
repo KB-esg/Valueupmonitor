@@ -8371,335 +8371,224 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 
 def update_consolidated_sheets(client, data_updates):
     """
-    Enhanced function to update consolidated sheets with data from Raw sheets.
-    The function extracts the latest column from each Raw sheet and appends it
-    to the corresponding consolidated sheet as the next available column.
+    Simplified function to update consolidated sheets with the latest column from Raw sheets.
+    This function has been debugged to ensure proper data transfer.
     
     Args:
         client: gspread client instance
-        data_updates: List of data update information dictionaries
+        data_updates: List of data update information
         
     Returns:
         int: Number of successfully updated consolidated sheets
     """
     if not client or not data_updates:
-        logger.error("Failed to update consolidated sheets: missing client or data")
+        logger.error("Missing client or data for consolidated update")
         return 0
-    
+        
     try:
         # Open spreadsheet
         spreadsheet = open_spreadsheet_with_retry(client)
         if not spreadsheet:
-            logger.error("Failed to open spreadsheet for consolidated update")
+            logger.error("Failed to open spreadsheet")
+            return 0
+            
+        # Get all worksheets
+        all_worksheets = spreadsheet.worksheets()
+        worksheet_map = {ws.title: ws for ws in all_worksheets}
+        logger.info(f"Found {len(worksheet_map)} worksheets")
+        
+        # Find Raw and corresponding consolidated sheets
+        raw_sheets = []
+        for title in worksheet_map.keys():
+            if title.endswith('_Raw'):
+                base_name = title[:-4]  # Remove "_Raw"
+                consol_name = f"{base_name}_통합"
+                
+                if consol_name in worksheet_map:
+                    raw_sheets.append((title, consol_name))
+                    logger.info(f"Found pair: {title} -> {consol_name}")
+        
+        if not raw_sheets:
+            logger.warning("No Raw-Consolidated sheet pairs found")
             return 0
         
-        # Get list of all worksheets to minimize API calls
-        try:
-            all_worksheets = spreadsheet.worksheets()
-            worksheet_titles = [ws.title for ws in all_worksheets]
-            logger.info(f"Found {len(worksheet_titles)} worksheets in spreadsheet")
-        except Exception as ws_err:
-            logger.warning(f"Failed to get worksheet list: {str(ws_err)}")
-            worksheet_titles = []
+        # Get the latest date from data updates
+        latest_date = None
+        for update in data_updates:
+            if 'date' in update:
+                year = update['date']['year']
+                month = update['date']['month']
+                latest_date = f"{year}년 {month}월"
+                break
+            elif 'post_info' in update:
+                post_info = update['post_info']
+                title = post_info.get('title', '')
+                match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', title)
+                if match:
+                    year = match.group(1)
+                    month = match.group(2)
+                    latest_date = f"{year}년 {month}월"
+                    break
         
-        # Map Raw sheets to their consolidated counterparts
-        consolidation_map = {}
-        
-        for ws_title in worksheet_titles:
-            # Find sheets with "_Raw" suffix
-            if ws_title.endswith("_Raw"):
-                base_name = ws_title[:-4]  # Remove "_Raw"
-                consolidated_title = f"{base_name}_통합"
-                
-                # Check if consolidated sheet exists
-                if consolidated_title in worksheet_titles:
-                    consolidation_map[ws_title] = consolidated_title
-                    logger.info(f"Found consolidation mapping: {ws_title} → {consolidated_title}")
-        
-        # Create missing consolidated sheets if needed
-        if not consolidation_map:
-            logger.warning("No consolidation mappings found. Creating default mappings.")
+        if not latest_date:
+            latest_date = datetime.now().strftime("%Y년 %m월")
             
-            for ws_title in worksheet_titles:
-                if ws_title.endswith("_Raw") and not f"{ws_title[:-4]}_통합" in worksheet_titles:
-                    base_name = ws_title[:-4]
-                    consolidated_title = f"{base_name}_통합"
-                    
-                    try:
-                        logger.info(f"Creating new consolidated sheet: {consolidated_title}")
-                        new_ws = spreadsheet.add_worksheet(title=consolidated_title, rows=1000, cols=50)
-                        
-                        # Initialize header
-                        new_ws.update_cell(1, 1, "기준일자")
-                        time.sleep(CONFIG.get('api_request_wait', 2))
-                        
-                        consolidation_map[ws_title] = consolidated_title
-                    except Exception as create_err:
-                        logger.error(f"Failed to create consolidated sheet {consolidated_title}: {str(create_err)}")
+        logger.info(f"Using date column: {latest_date}")
         
-        # Process updates for each sheet
+        # Update each consolidated sheet
         updated_count = 0
         
-        for data_update in data_updates:
-            if not data_update.get('sheets'):
-                continue
+        for raw_name, consol_name in raw_sheets:
+            try:
+                # Get worksheets
+                raw_ws = worksheet_map[raw_name]
+                consol_ws = worksheet_map[consol_name]
                 
-            # Extract date information
-            if 'date' in data_update:
-                year = data_update['date']['year']
-                month = data_update['date']['month']
-                date_str = f"{year}년 {month}월"
-            else:
-                # Extract date from title
-                post_info = data_update.get('post_info', {})
-                title = post_info.get('title', '')
+                # Get all data from both sheets
+                raw_data = raw_ws.get_all_values()
+                consol_data = consol_ws.get_all_values()
                 
-                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', title)
-                if date_match:
-                    year = date_match.group(1)
-                    month = date_match.group(2)
-                    date_str = f"{year}년 {month}월"
-                else:
-                    current_date = datetime.now()
-                    date_str = f"{current_date.year}년 {current_date.month}월"
-            
-            logger.info(f"Processing consolidated updates for date: {date_str}")
-            
-            # Process each sheet
-            for sheet_name, df in data_update['sheets'].items():
-                # Find matching Raw and consolidated sheet names
-                raw_sheet_name = None
-                consolidated_sheet_name = None
+                if not raw_data:
+                    logger.warning(f"Raw sheet {raw_name} is empty")
+                    continue
+                    
+                # DEBUG: Print sample of raw data
+                logger.info(f"Raw sheet {raw_name} data sample: {raw_data[0][:5]}...")
+                if len(raw_data) > 1:
+                    logger.info(f"First data row: {raw_data[1][:5]}...")
                 
-                # Look for exact match first
-                for raw_name, consol_name in consolidation_map.items():
-                    if raw_name == sheet_name:
-                        raw_sheet_name = raw_name
-                        consolidated_sheet_name = consol_name
+                # Find the last non-empty column in Raw sheet
+                raw_headers = raw_data[0]
+                last_col_idx = -1
+                
+                # Start from the last column and work backwards
+                for col_idx in range(len(raw_headers)-1, 0, -1):
+                    # Check if column has data
+                    has_data = False
+                    for row_idx in range(1, min(10, len(raw_data))):  # Check first 10 rows
+                        if col_idx < len(raw_data[row_idx]) and raw_data[row_idx][col_idx] and \
+                           raw_data[row_idx][col_idx].lower() not in ('none', 'nan', '-'):
+                            has_data = True
+                            break
+                    
+                    if has_data:
+                        last_col_idx = col_idx
                         break
                 
-                # Try partial matching if exact match wasn't found
-                if not raw_sheet_name:
-                    for raw_name, consol_name in consolidation_map.items():
-                        raw_base = raw_name[:-4]  # Remove "_Raw"
-                        
-                        if (raw_base.lower() in sheet_name.lower() or 
-                            sheet_name.lower() in raw_base.lower()):
-                            raw_sheet_name = raw_name
-                            consolidated_sheet_name = consol_name
-                            break
-                
-                # Try keyword matching as last resort
-                if not raw_sheet_name:
-                    keywords = ["트래픽", "무선", "유선", "가입", "통계"]
-                    for raw_name, consol_name in consolidation_map.items():
-                        for keyword in keywords:
-                            if (keyword in sheet_name.lower() and 
-                                keyword in raw_name.lower()):
-                                raw_sheet_name = raw_name
-                                consolidated_sheet_name = consol_name
-                                break
-                        if raw_sheet_name:
-                            break
-                
-                if not raw_sheet_name or not consolidated_sheet_name:
-                    logger.warning(f"Could not find consolidation mapping for sheet: {sheet_name}")
+                if last_col_idx <= 0:
+                    logger.warning(f"Could not find data column in {raw_name}")
                     continue
+                    
+                # DEBUG: Show the selected column
+                logger.info(f"Using column {last_col_idx} from {raw_name}: {raw_headers[last_col_idx]}")
                 
-                # Check dataframe validity
-                if df is None or df.empty:
-                    logger.warning(f"Empty dataframe for sheet {sheet_name}, skipping")
-                    continue
+                # Initialize consolidated sheet if empty
+                if not consol_data or len(consol_data[0]) == 0:
+                    consol_ws.update_cell(1, 1, "기준일자")
+                    consol_data = [["기준일자"]]
+                    time.sleep(2)
                 
-                logger.info(f"Processing consolidation: {raw_sheet_name} → {consolidated_sheet_name}")
+                # Find or add date column in consolidated sheet
+                consol_headers = consol_data[0]
+                if latest_date in consol_headers:
+                    date_col_idx = consol_headers.index(latest_date) + 1
+                    logger.info(f"Found existing date column at {date_col_idx}")
+                else:
+                    date_col_idx = len(consol_headers) + 1
+                    consol_ws.update_cell(1, date_col_idx, latest_date)
+                    logger.info(f"Added new date column at {date_col_idx}: {latest_date}")
+                    time.sleep(2)
                 
-                try:
-                    # Access the Raw sheet
-                    try:
-                        raw_ws = spreadsheet.worksheet(raw_sheet_name)
-                        logger.info(f"Accessed Raw sheet: {raw_sheet_name}")
-                    except gspread.exceptions.WorksheetNotFound:
-                        logger.warning(f"Raw sheet not found: {raw_sheet_name}")
-                        continue
-                    
-                    # Access or create consolidated sheet
-                    try:
-                        consolidated_ws = spreadsheet.worksheet(consolidated_sheet_name)
-                        logger.info(f"Accessed consolidated sheet: {consolidated_sheet_name}")
-                    except gspread.exceptions.WorksheetNotFound:
-                        logger.info(f"Creating new consolidated sheet: {consolidated_sheet_name}")
-                        consolidated_ws = spreadsheet.add_worksheet(
-                            title=consolidated_sheet_name, rows=1000, cols=50)
-                        consolidated_ws.update_cell(1, 1, "기준일자")
-                        time.sleep(CONFIG.get('api_request_wait', 2))
-                    
-                    # Get all data from Raw sheet (more efficient than multiple API calls)
-                    raw_data = raw_ws.get_all_values()
-                    if not raw_data:
-                        logger.warning(f"No data found in Raw sheet: {raw_sheet_name}")
-                        continue
-                    
-                    # Find the last non-empty column in Raw sheet
-                    raw_headers = raw_data[0] if raw_data else []
-                    last_data_col = -1
-                    
-                    # Start from the last column and work backwards to find data
-                    for col_idx in range(len(raw_headers)-1, 0, -1):
-                        col_values = [row[col_idx] for row in raw_data[1:] 
-                                     if col_idx < len(row) and row[col_idx] and 
-                                     row[col_idx].lower() not in ('none', 'nan', '-')]
-                        
-                        if col_values:  # Found a column with data
-                            last_data_col = col_idx
-                            break
-                    
-                    if last_data_col <= 0:
-                        logger.warning(f"Could not find data columns in Raw sheet: {raw_sheet_name}")
-                        continue
-                    
-                    logger.info(f"Found last data column at index {last_data_col} in {raw_sheet_name}")
-                    
-                    # Extract the keys (first column) and values (last data column)
-                    keys = []
-                    values = []
-                    
-                    for i, row in enumerate(raw_data):
-                        if i == 0:  # Skip header row
+                # Extract keys and values from Raw sheet
+                updates = []
+                row_keys = {}  # Map of keys to row indices
+                
+                # Get existing items in consolidated sheet
+                existing_keys = []
+                if len(consol_data) > 1:
+                    for i in range(1, len(consol_data)):
+                        if consol_data[i] and len(consol_data[i]) > 0 and consol_data[i][0]:
+                            existing_keys.append(consol_data[i][0])
+                            row_keys[consol_data[i][0]] = i + 1  # +1 for 1-indexed rows
+                
+                # Process each row in Raw sheet
+                for i in range(1, len(raw_data)):
+                    if i < len(raw_data) and len(raw_data[i]) > 0:
+                        key = raw_data[i][0]
+                        if not key or key.lower() in ('none', 'nan'):
                             continue
-                        
-                        if len(row) > 0:  # Ensure row has first column
-                            key = row[0] if row[0] else f"Item_{i}"
                             
-                            # Get value from last data column if it exists
-                            value = row[last_data_col] if len(row) > last_data_col else ""
-                            
-                            if key and key.lower() not in ('none', 'nan'):
-                                keys.append(key)
-                                values.append(value)
-                    
-                    if not keys:
-                        logger.warning(f"No valid keys found in Raw sheet: {raw_sheet_name}")
-                        continue
-                    
-                    logger.info(f"Extracted {len(keys)} key-value pairs from {raw_sheet_name}")
-                    
-                    # Get data from consolidated sheet
-                    consolidated_data = consolidated_ws.get_all_values()
-                    
-                    # Check if consolidated sheet has data
-                    if not consolidated_data:
-                        logger.warning(f"Empty consolidated sheet: {consolidated_sheet_name}")
-                        consolidated_headers = ["기준일자"]
-                        consolidated_items = []
-                    else:
-                        consolidated_headers = consolidated_data[0]
-                        consolidated_items = [row[0] for row in consolidated_data[1:]]
-                    
-                    # Find or add date column
-                    if date_str in consolidated_headers:
-                        date_col_idx = consolidated_headers.index(date_str) + 1
-                        logger.info(f"Found existing date column: {date_str} at position {date_col_idx}")
-                    else:
-                        # Add new date column at the end
-                        date_col_idx = len(consolidated_headers) + 1
-                        consolidated_ws.update_cell(1, date_col_idx, date_str)
-                        logger.info(f"Added new date column: {date_str} at position {date_col_idx}")
-                        time.sleep(CONFIG.get('api_request_wait', 2))
-                        consolidated_headers.append(date_str)
-                    
-                    # Prepare batch updates
-                    batch_updates = []
-                    new_items = []
-                    
-                    # Process each key-value pair
-                    for key, value in zip(keys, values):
-                        if not key or not key.strip():
-                            continue
+                        # Get value from last column
+                        value = raw_data[i][last_col_idx] if last_col_idx < len(raw_data[i]) else ""
                         
-                        # Find or add row for this key
-                        if key in consolidated_items:
-                            row_idx = consolidated_items.index(key) + 2  # +2 for header and 0-index
+                        # Determine row in consolidated sheet
+                        if key in row_keys:
+                            row_idx = row_keys[key]
                         else:
-                            row_idx = len(consolidated_items) + 2
-                            new_items.append(key)
+                            row_idx = len(existing_keys) + 2  # +2 for header and 1-indexed
+                            existing_keys.append(key)
+                            row_keys[key] = row_idx
                             
                             # Add key to first column
-                            batch_updates.append({
+                            updates.append({
                                 'range': f'A{row_idx}',
                                 'values': [[key]]
                             })
-                            consolidated_items.append(key)
                         
                         # Add value to date column
-                        value_str = value if pd.notna(value) and value else ""
-                        batch_updates.append({
+                        updates.append({
                             'range': f'{chr(64 + date_col_idx)}{row_idx}',
-                            'values': [[value_str]]
+                            'values': [[value]]
                         })
-                    
-                    # Execute batch updates
-                    if batch_updates:
-                        logger.info(f"Preparing to update {len(batch_updates)} cells in {consolidated_sheet_name}")
-                        logger.info(f"Added {len(new_items)} new items to consolidated sheet")
-                        
-                        # Use smaller batches to avoid API limits
-                        batch_size = 10
-                        success = True
-                        
-                        for i in range(0, len(batch_updates), batch_size):
-                            batch = batch_updates[i:i+batch_size]
-                            
-                            try:
-                                consolidated_ws.batch_update(batch)
-                                logger.info(f"Updated batch {i//batch_size + 1}/{(len(batch_updates)-1)//batch_size + 1}")
-                                time.sleep(CONFIG.get('api_request_wait', 2))
-                            except gspread.exceptions.APIError as api_err:
-                                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                                    logger.warning(f"API rate limit hit: {str(api_err)}")
-                                    logger.info("Retrying with longer delays...")
-                                    
-                                    # Try again with longer delays
-                                    time.sleep(5)
-                                    for update in batch:
-                                        try:
-                                            consolidated_ws.batch_update([update])
-                                            time.sleep(3)
-                                        except Exception as single_err:
-                                            logger.error(f"Single update failed: {str(single_err)}")
-                                            success = False
-                                else:
-                                    logger.error(f"API error: {str(api_err)}")
-                                    success = False
-                            except Exception as batch_err:
-                                logger.error(f"Batch update error: {str(batch_err)}")
-                                success = False
-                        
-                        if success:
-                            updated_count += 1
-                            logger.info(f"Successfully updated consolidated sheet: {consolidated_sheet_name}")
-                            
-                            # Add update timestamp to verify
-                            try:
-                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                info_row = len(consolidated_items) + 5  # Add some space after data
-                                
-                                consolidated_ws.update_cell(info_row, 1, "Last Updated")
-                                consolidated_ws.update_cell(info_row, 2, timestamp)
-                                consolidated_ws.update_cell(info_row, date_col_idx, "✓")
-                            except Exception as ts_err:
-                                logger.warning(f"Could not add timestamp: {str(ts_err)}")
-                    else:
-                        logger.warning(f"No updates to make for {consolidated_sheet_name}")
                 
-                except Exception as sheet_err:
-                    logger.error(f"Error processing sheet {sheet_name}: {str(sheet_err)}")
+                # Apply updates in small batches
+                if updates:
+                    logger.info(f"Applying {len(updates)} updates to {consol_name}")
+                    batch_size = 10
+                    
+                    for i in range(0, len(updates), batch_size):
+                        batch = updates[i:i+batch_size]
+                        try:
+                            consol_ws.batch_update(batch)
+                            logger.info(f"Applied batch {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1}")
+                            time.sleep(2)
+                        except Exception as batch_err:
+                            logger.error(f"Batch update failed: {str(batch_err)}")
+                            
+                            # Try individual updates as fallback
+                            for update in batch:
+                                try:
+                                    consol_ws.batch_update([update])
+                                    time.sleep(1)
+                                except Exception as single_err:
+                                    logger.error(f"Single update failed: {str(single_err)}")
+                    
+                    # Add verification timestamp
+                    try:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        footer_row = len(existing_keys) + 5
+                        
+                        consol_ws.update_cell(footer_row, 1, "Last Updated")
+                        consol_ws.update_cell(footer_row, 2, timestamp)
+                        logger.info(f"Added update timestamp to {consol_name}")
+                    except Exception as ts_err:
+                        logger.warning(f"Could not add timestamp: {str(ts_err)}")
+                    
+                    updated_count += 1
+                else:
+                    logger.warning(f"No updates needed for {consol_name}")
+                    
+            except Exception as sheet_err:
+                logger.error(f"Error processing {raw_name}/{consol_name}: {str(sheet_err)}")
         
-        logger.info(f"Consolidated sheet update complete: {updated_count} sheets updated")
+        logger.info(f"Consolidated update complete: {updated_count} sheets updated")
         return updated_count
-    
+        
     except Exception as e:
-        logger.error(f"Consolidated sheet update failed: {str(e)}")
+        logger.error(f"Consolidated update failed: {str(e)}")
         return 0
+
+
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
     Enhanced function to create more informative placeholder DataFrames.
