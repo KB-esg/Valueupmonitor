@@ -34,7 +34,7 @@ REMOVE_STRINGS = [
     "☞무료수신거부 0808886611",
 ]
 
-SHEET_NAME = "Archive_arg"
+SHEET_NAME = "Archives_arg"
 SECONDS_IN_DAY = 86_400
 
 
@@ -163,7 +163,7 @@ class TelcoNewsForwarder:
     async def send_article_digest(self) -> None:
         articles = await self.fetch_recent_articles()
         if not articles:
-            logger.info("최근 24h 신규 기사가 없습니다.")
+            logger.info("Atlas Review에 최근 24h 신규 기사가 없습니다.")
             return
 
         lines = [
