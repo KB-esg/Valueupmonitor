@@ -2,51 +2,53 @@ name: Telco News Forwarder
 
 on:
   schedule:
-    - cron: '30 23 * * *'  # UTC 23:30 = KST 08:30
+    # 매일 KST 08:30 == UTC 23:30
+    - cron: "30 23 * * *"
   workflow_dispatch:
 
 jobs:
   forward:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: "3.11"
 
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install python-telegram-bot --upgrade
+        pip install \
+          python-telegram-bot[gigaparse]==20.* \
+          gspread==5.* \
+          google-auth==2.*
 
-    - name: Check environment variables
+    - name: Verify required secrets
       run: |
-        if [ -z "${{ secrets.TELCO_NEWS_TOKEN }}" ]; then
-          echo "Error: TELCO_NEWS_TOKEN is not set"
-          exit 1
-        fi
-        if [ -z "${{ secrets.TELCO_NEWS_RECEIVE }}" ]; then
-          echo "Error: TELCO_NEWS_RECEIVE is not set"
-          exit 1
-        fi
-        if [ -z "${{ secrets.TELCO_NEWS_BROADCAST_1 }}" ]; then
-          echo "Error: TELCO_NEWS_BROADCAST_1 is not set"
-          exit 1
-        fi
-        if [ -z "${{ secrets.TELCO_NEWS_BROADCAST_2 }}" ]; then
-          echo "Error: TELCO_NEWS_BROADCAST_2 is not set"
-          exit 1
-        fi
+        for v in TELCO_NEWS_TOKEN TELCO_NEWS_RECEIVE TELCO_NEWS_BROADCAST_1 TELCO_NEWS_BROADCAST_2 TELCO_ARTICLE_ID MSIT_GSPREAD_REF; do
+          if [ -z "${!v}" ]; then
+            echo "ERROR: $v is not set" && exit 1
+          fi
+        done
+      env:
+        TELCO_NEWS_TOKEN:       ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_RECEIVE:     ${{ secrets.TELCO_NEWS_RECEIVE }}
+        TELCO_NEWS_BROADCAST_1: ${{ secrets.TELCO_NEWS_BROADCAST_1 }}
+        TELCO_NEWS_BROADCAST_2: ${{ secrets.TELCO_NEWS_BROADCAST_2 }}
+        TELCO_ARTICLE_ID:       ${{ secrets.TELCO_ARTICLE_ID }}
+        MSIT_GSPREAD_REF:       ${{ secrets.MSIT_GSPREAD_REF }}
 
     - name: Run forwarder script
       env:
-        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
-        TELCO_NEWS_RECEIVE: ${{ secrets.TELCO_NEWS_RECEIVE }}
+        TELCO_NEWS_TOKEN:       ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_RECEIVE:     ${{ secrets.TELCO_NEWS_RECEIVE }}
         TELCO_NEWS_BROADCAST_1: ${{ secrets.TELCO_NEWS_BROADCAST_1 }}
         TELCO_NEWS_BROADCAST_2: ${{ secrets.TELCO_NEWS_BROADCAST_2 }}
+        TELCO_ARTICLE_ID:       ${{ secrets.TELCO_ARTICLE_ID }}
+        MSIT_GSPREAD_REF:       ${{ secrets.MSIT_GSPREAD_REF }}
       run: |
         python telco_news_forwarder.py
