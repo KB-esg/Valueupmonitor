@@ -302,22 +302,34 @@ def is_in_date_range(date_str, days=4):
         logger.error(f"날짜 파싱 에러: {str(e)}")
         return True  # 오류 발생 시 기본적으로 포함
 
-def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=None):
+def parse_page_content(driver, page_num=1, days_range=None, start_date=None, end_date=None, reverse_order=False):
     """
-    지정된 날짜 범위 내의 게시물만 파싱하는 함수
+    페이지 내용을 파싱하는 통합 함수. 날짜 범위 또는 days_range를 기반으로 게시물 필터링
     
     Args:
         driver: Selenium WebDriver 인스턴스
         page_num: 현재 페이지 번호
+        days_range: 특정 일수 이내 게시물 필터링 (start_date, end_date가 없을 때 사용)
         start_date: 시작 날짜 문자열 (YYYY-MM-DD)
         end_date: 종료 날짜 문자열 (YYYY-MM-DD)
+        reverse_order: 역순 탐색 여부 (True: 5→1 페이지 순서로 탐색)
         
     Returns:
-        Tuple[List, List, bool]: 모든 게시물, 통신 통계 게시물, 검색 계속 여부
+        Tuple[List, List, Dict]: 모든 게시물, 통신 통계 게시물, 파싱 결과 정보
     """
     all_posts = []
     telecom_stats_posts = []
-    continue_search = True
+    # 결과 정보를 담을 딕셔너리 (단순 불리언 값 대신 상세 정보 제공)
+    result_info = {
+        'current_page_complete': True,        # 현재 페이지 파싱 완료 여부
+        'skip_remaining_in_page': False,      # 현재 페이지의 나머지 게시물 건너뛰기 여부
+        'continue_to_next_page': True,        # 다음 페이지로 계속 진행 여부
+        'oldest_date_found': None,            # 발견된 가장 오래된 날짜
+        'newest_date_found': None,            # 발견된 가장 최근 날짜
+        'total_posts': 0,                     # 현재 페이지에서 발견된 총 게시물 수
+        'filtered_posts': 0,                  # 필터 조건에 맞는 게시물 수
+        'messages': []                        # 상세 메시지 목록
+    }
     
     try:
         # 날짜 객체로 변환
@@ -329,12 +341,22 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                 start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
             except ValueError:
                 logger.warning(f"잘못된 시작 날짜 형식: {start_date}, 날짜 필터링 무시됨")
+                result_info['messages'].append(f"잘못된 시작 날짜 형식: {start_date}")
                 
         if end_date:
             try:
                 end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
             except ValueError:
                 logger.warning(f"잘못된 종료 날짜 형식: {end_date}, 날짜 필터링 무시됨")
+                result_info['messages'].append(f"잘못된 종료 날짜 형식: {end_date}")
+        
+        # days_range를 사용하는 경우 start_date_obj 계산
+        if days_range and not start_date_obj:
+            # 한국 시간대 고려 (UTC+9)
+            korea_tz = datetime.now() + timedelta(hours=9)
+            start_date_obj = (korea_tz - timedelta(days=days_range)).date()
+            logger.info(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
+            result_info['messages'].append(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
         
         # 다양한 로딩 지표로 페이지 로드 대기
         selectors = [
@@ -357,7 +379,10 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
         
         if not loaded:
             logger.error("페이지 로드 시간 초과")
-            return [], [], False
+            result_info['current_page_complete'] = False
+            result_info['continue_to_next_page'] = True
+            result_info['messages'].append("페이지 로드 시간 초과")
+            return [], [], result_info
         
         # 페이지가 로드되면 약간의 지연 시간 추가
         time.sleep(3)  # 더 긴 지연 시간
@@ -413,6 +438,7 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
             posts = soup.select(selector)
             if posts:
                 logger.info(f"{len(posts)}개 게시물 항목 발견 (선택자: {selector})")
+                result_info['total_posts'] = len(posts)
                 break
         
         if not posts:
@@ -424,6 +450,7 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                     direct_posts = driver.find_elements(By.CSS_SELECTOR, selector)
                     if direct_posts:
                         logger.info(f"Selenium으로 {len(direct_posts)}개 게시물 항목 발견 (선택자: {selector})")
+                        result_info['total_posts'] = len(direct_posts)
                         break
                         
                 if direct_posts:
@@ -460,23 +487,44 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                                 logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
                                 continue
                             
-                            # 날짜 범위 확인
-                            in_range = True
+                            # 날짜 범위 확인하여 게시물 필터링 여부 결정
+                            include_post = True
                             
+                            # 날짜 정보 업데이트
+                            if result_info['oldest_date_found'] is None or post_date < result_info['oldest_date_found']:
+                                result_info['oldest_date_found'] = post_date
+                                
+                            if result_info['newest_date_found'] is None or post_date > result_info['newest_date_found']:
+                                result_info['newest_date_found'] = post_date
+                                
+                            # 시작 날짜보다 이전인지 확인
                             if start_date_obj and post_date < start_date_obj:
+                                include_post = False
                                 logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
-                                in_range = False
-                                # 종료 날짜보다 이전 게시물이면 검색 중단
-                                if not end_date_obj or post_date < end_date_obj:
-                                    continue_search = False
-                            
+                                
+                                # 역순 탐색 시에는 현재 페이지의 나머지 게시물만 건너뛰고 다음 페이지로 계속 진행
+                                if reverse_order:
+                                    result_info['skip_remaining_in_page'] = True
+                                    logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                                    result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                                    break  # 현재 페이지 루프 종료
+                                # 정순 탐색 시에는 모든 페이지 탐색 중단
+                                else:
+                                    result_info['continue_to_next_page'] = False
+                                    logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                                    result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                                
+                            # 종료 날짜 이후인지 확인
                             if end_date_obj and post_date > end_date_obj:
+                                include_post = False
                                 logger.debug(f"종료 날짜 이후 게시물: {post_date} > {end_date_obj}")
-                                in_range = False
                             
-                            if not in_range:
-                                logger.debug(f"날짜 범위 밖 게시물 건너뜀: {date_str} ({post_date})")
+                            # 필터링 조건에 맞지 않으면 다음 게시물로
+                            if not include_post:
                                 continue
+                                
+                            # 필터링 조건을 통과한 게시물 처리
+                            result_info['filtered_posts'] += 1
                             
                             # 제목 추출
                             title_sel = ["p.title", ".title", "td.title", ".subject a", "a.nttInfoBtn"]
@@ -556,10 +604,13 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                             continue
                 else:
                     logger.warning("게시물을 찾을 수 없음")
-                    return [], [], False
+                    result_info['messages'].append("게시물을 찾을 수 없음")
+                    return [], [], result_info
+                    
             except Exception as direct_attempt_err:
                 logger.error(f"직접 파싱 시도 중 오류: {str(direct_attempt_err)}")
-                return [], [], False
+                result_info['messages'].append(f"직접 파싱 시도 중 오류: {str(direct_attempt_err)}")
+                return [], [], result_info
         else:
             # BeautifulSoup으로 찾은 게시물 처리
             for item in posts:
@@ -591,7 +642,7 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                     if not date_str or date_str == '등록일':
                         continue
                     
-                    logger.debug(f"날짜 문자열 발견: {date_str}")
+                    logger.info(f"날짜 문자열 발견: {date_str}")
                     
                     # 게시물 날짜 파싱
                     post_date = parse_post_date(date_str)
@@ -599,22 +650,44 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                         logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
                         continue
                     
-                    # 날짜 범위 확인
-                    in_range = True
+                    # 날짜 범위 확인하여 게시물 필터링 여부 결정
+                    include_post = True
                     
-                    if start_date_obj and post_date < start_date_obj:
-                        logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
-                        in_range = False
-                        # 시작 날짜보다 이전이면 더 이상 검색할 필요 없음
+                    # 날짜 정보 업데이트
+                    if result_info['oldest_date_found'] is None or post_date < result_info['oldest_date_found']:
+                        result_info['oldest_date_found'] = post_date
                         
+                    if result_info['newest_date_found'] is None or post_date > result_info['newest_date_found']:
+                        result_info['newest_date_found'] = post_date
                     
+                    # 시작 날짜보다 이전인지 확인
+                    if start_date_obj and post_date < start_date_obj:
+                        include_post = False
+                        logger.debug(f"시작 날짜 이전 게시물: {post_date} < {start_date_obj}")
+                        
+                        # 역순 탐색 시에는 현재 페이지의 나머지 게시물만 건너뛰고 다음 페이지로 계속 진행
+                        if reverse_order:
+                            result_info['skip_remaining_in_page'] = True
+                            logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                            result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                            break  # 현재 페이지 루프 종료
+                        # 정순 탐색 시에는 모든 페이지 탐색 중단
+                        else:
+                            result_info['continue_to_next_page'] = False
+                            logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                            result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                    
+                    # 종료 날짜 이후인지 확인
                     if end_date_obj and post_date > end_date_obj:
+                        include_post = False
                         logger.debug(f"종료 날짜 이후 게시물: {post_date} > {end_date_obj}")
-                        in_range = False
                     
-                    if not in_range:
-                        logger.debug(f"날짜 범위 밖 게시물 건너뜀: {date_str}")
+                    # 필터링 조건에 맞지 않으면 다음 게시물로
+                    if not include_post:
                         continue
+                        
+                    # 필터링 조건을 통과한 게시물 처리
+                    result_info['filtered_posts'] += 1
                     
                     # 제목 및 게시물 ID 추출
                     title_selectors = [
@@ -677,11 +750,13 @@ def parse_page_with_date_range(driver, page_num=1, start_date=None, end_date=Non
                     logger.error(f"게시물 파싱 중 에러: {str(e)}")
                     continue
         
-        return all_posts, telecom_stats_posts, continue_search
+        return all_posts, telecom_stats_posts, result_info
         
     except Exception as e:
         logger.error(f"페이지 파싱 중 에러: {str(e)}")
-        return [], [], False
+        result_info['current_page_complete'] = False
+        result_info['messages'].append(f"페이지 파싱 중 에러: {str(e)}")
+        return [], [], result_info
 
 def parse_post_date(date_str):
     """
@@ -2167,322 +2242,7 @@ def reset_browser_context(driver, delete_cookies=True, navigate_to_blank=True):
         logger.error(f"브라우저 컨텍스트 초기화 실패: {str(e)}")
         return False
 
-def parse_page(driver, page_num=1, days_range=4):
-    """현재 페이지에서 관련 게시물 파싱 (개선된 버전)"""
-    all_posts = []
-    telecom_stats_posts = []
-    continue_search = True
-    
-    try:
-        # 다양한 로딩 지표로 페이지 로드 대기
-        selectors = [
-            (By.CLASS_NAME, "board_list"),
-            (By.CSS_SELECTOR, ".board_list .toggle"),
-            (By.CSS_SELECTOR, "table.board_list tr")
-        ]
-        
-        loaded = False
-        for by_type, selector in selectors:
-            try:
-                WebDriverWait(driver, 15).until(  # 대기 시간 증가
-                    EC.presence_of_element_located((by_type, selector))
-                )
-                loaded = True
-                logger.info(f"페이지 로드 감지됨: {selector}")
-                break
-            except TimeoutException:
-                continue
-        
-        if not loaded:
-            logger.error("페이지 로드 시간 초과")
-            return [], [], False
-        
-        # 페이지가 로드되면 약간의 지연 시간 추가
-        time.sleep(3)  # 더 긴 지연 시간
-        
-        # 스크롤을 천천히 내려 모든 요소 로드
-        try:
-            # 스크롤을 부드럽게 내리기
-            execute_javascript(driver, """
-                function smoothScroll() {
-                    const height = document.body.scrollHeight;
-                    const step = Math.floor(height / 10);
-                    let i = 0;
-                    const timer = setInterval(function() {
-                        window.scrollBy(0, step);
-                        i++;
-                        if (i >= 10) clearInterval(timer);
-                    }, 100);
-                }
-                smoothScroll();
-            """, description="페이지 스크롤")
-            time.sleep(2)  # 스크롤 완료 대기
-            
-            # 페이지 맨 위로 돌아가기
-            driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(1)
-        except Exception as scroll_err:
-            logger.warning(f"스크롤 중 오류: {str(scroll_err)}")
-        
-        # 페이지 소스 저장 (디버깅용)
-        try:
-            with open(f'page_{page_num}_source.html', 'w', encoding='utf-8') as f:
-                f.write(driver.page_source)
-            logger.info(f"현재 페이지 소스 저장 완료: page_{page_num}_source.html")
-        except Exception as save_err:
-            logger.warning(f"페이지 소스 저장 중 오류: {str(save_err)}")
-        
-        # 스크린샷 저장
-        take_screenshot(driver, f"parsed_page_{page_num}")
-        
-        # BeautifulSoup으로 파싱
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        
-        # 게시물 선택자 (다양한 사이트 레이아웃 지원)
-        post_selectors = [
-            "div.toggle:not(.thead)",
-            "table.board_list tr:not(.thead)",
-            ".board_list li",
-            ".board_list .post-item"
-        ]
-        
-        posts = []
-        for selector in post_selectors:
-            posts = soup.select(selector)
-            if posts:
-                logger.info(f"{len(posts)}개 게시물 항목 발견 (선택자: {selector})")
-                break
-        
-        if not posts:
-            # DOM에서 직접 시도
-            try:
-                logger.warning("BeautifulSoup으로 게시물을 찾을 수 없음, Selenium으로 직접 시도")
-                direct_posts = []
-                for selector in post_selectors:
-                    direct_posts = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if direct_posts:
-                        logger.info(f"Selenium으로 {len(direct_posts)}개 게시물 항목 발견 (선택자: {selector})")
-                        break
-                        
-                if direct_posts:
-                    # Selenium 요소를 사용하여 정보 추출
-                    for item in direct_posts:
-                        try:
-                            # 헤더 행 건너뛰기
-                            if 'thead' in item.get_attribute('class') or item.tag_name == 'th':
-                                continue
-                                
-                            # 날짜 추출
-                            date_sel = [".date", "div.date", "td.date", ".post-date"]
-                            date_elem = None
-                            for sel in date_sel:
-                                try:
-                                    date_elem = item.find_element(By.CSS_SELECTOR, sel)
-                                    if date_elem:
-                                        break
-                                except:
-                                    continue
-                                    
-                            if not date_elem:
-                                continue
-                                
-                            date_str = date_elem.text.strip()
-                            if not date_str or date_str == '등록일':
-                                continue
-                                
-                            logger.info(f"날짜 문자열 발견: {date_str}")
-                            
-                            # 게시물이 날짜 범위 내에 있는지 확인
-                            if not is_in_date_range(date_str, days=days_range):
-                                logger.info(f"날짜 범위 밖의 게시물: {date_str}, 이후 게시물 검색 중단")
-                                continue_search = False
-                                break
-                                
-                            # 제목 추출
-                            title_sel = ["p.title", ".title", "td.title", ".subject a", "a.nttInfoBtn"]
-                            title_elem = None
-                            for sel in title_sel:
-                                try:
-                                    title_elem = item.find_element(By.CSS_SELECTOR, sel)
-                                    if title_elem:
-                                        break
-                                except:
-                                    continue
-                                    
-                            if not title_elem:
-                                continue
-                                
-                            title = title_elem.text.strip()
-                            
-                            # 제목 요소의 href 또는 클릭 속성에서 ID 추출
-                            post_id = None
-                            onclick = title_elem.get_attribute('onclick')
-                            if onclick:
-                                match = re.search(r"fn_detail\((\d+)\)", onclick)
-                                if match:
-                                    post_id = match.group(1)
-                                    
-                            if not post_id:
-                                # 부모 요소 또는 조상 요소에서 ID 추출 시도
-                                parent = item
-                                for _ in range(3):  # 최대 3단계 상위까지 확인
-                                    parent_onclick = parent.get_attribute('onclick')
-                                    if parent_onclick and 'fn_detail' in parent_onclick:
-                                        match = re.search(r"fn_detail\((\d+)\)", parent_onclick)
-                                        if match:
-                                            post_id = match.group(1)
-                                            break
-                                    try:
-                                        parent = parent.find_element(By.XPATH, "..")
-                                    except:
-                                        break
-                                        
-                            # 게시물 URL 생성
-                            post_url = get_post_url(post_id) if post_id else None
-                            
-                            # 부서 정보 추출
-                            dept_sel = ["dd[id*='td_CHRG_DEPT_NM']", ".dept", "td.dept", ".department"]
-                            dept_elem = None
-                            for sel in dept_sel:
-                                try:
-                                    dept_elem = item.find_element(By.CSS_SELECTOR, sel)
-                                    if dept_elem:
-                                        break
-                                except:
-                                    continue
-                                    
-                            dept_text = dept_elem.text.strip() if dept_elem else "부서 정보 없음"
-                            
-                            # 게시물 정보 딕셔너리 생성
-                            post_info = {
-                                'title': title,
-                                'date': date_str,
-                                'department': dept_text,
-                                'url': post_url,
-                                'post_id': post_id
-                            }
-                            
-                            # 모든 게시물 리스트에 추가
-                            all_posts.append(post_info)
-                            
-                            # 통신 통계 게시물인지 확인
-                            if is_telecom_stats_post(title):
-                                logger.info(f"통신 통계 게시물 발견: {title}")
-                                telecom_stats_posts.append(post_info)
-                                
-                        except Exception as direct_err:
-                            logger.error(f"직접 추출 중 오류: {str(direct_err)}")
-                            continue
-                else:
-                    logger.warning("게시물을 찾을 수 없음")
-                    return [], [], False
-            except Exception as direct_attempt_err:
-                logger.error(f"직접 파싱 시도 중 오류: {str(direct_attempt_err)}")
-                return [], [], False
-        else:
-            # BeautifulSoup으로 찾은 게시물 처리
-            for item in posts:
-                try:
-                    # 헤더 행 건너뛰기
-                    if 'thead' in item.get('class', []) or item.name == 'th':
-                        continue
-                    
-                    # 날짜 정보 추출 (여러 선택자 시도)
-                    date_selectors = [
-                        "div.date[aria-label='등록일']",
-                        "div.date",
-                        ".date",
-                        "td.date",
-                        ".post-date"
-                    ]
-                    
-                    date_elem = None
-                    for selector in date_selectors:
-                        date_elem = item.select_one(selector)
-                        if date_elem:
-                            break
-                            
-                    if not date_elem:
-                        logger.debug("날짜 요소를 찾을 수 없음, 건너뜀")
-                        continue
-                        
-                    date_str = date_elem.text.strip()
-                    if not date_str or date_str == '등록일':
-                        continue
-                    
-                    logger.info(f"날짜 문자열 발견: {date_str}")
-                    
-                    # 게시물이 날짜 범위 내에 있는지 확인
-                    if not is_in_date_range(date_str, days=days_range):
-                        logger.info(f"날짜 범위 밖의 게시물: {date_str}, 이후 게시물 검색 중단")
-                        continue_search = False
-                        break
-                    
-                    # 제목 및 게시물 ID 추출
-                    title_selectors = [
-                        "p.title",
-                        ".title",
-                        "td.title",
-                        ".subject a",
-                        "a.nttInfoBtn"
-                    ]
-                    
-                    title_elem = None
-                    for selector in title_selectors:
-                        title_elem = item.select_one(selector)
-                        if title_elem:
-                            break
-                            
-                    if not title_elem:
-                        logger.debug("제목 요소를 찾을 수 없음, 건너뜀")
-                        continue
-                        
-                    title = title_elem.text.strip()
-                    post_id = extract_post_id(item)
-                    post_url = get_post_url(post_id)
-                    
-                    # 부서 정보 추출 (여러 선택자 시도)
-                    dept_selectors = [
-                        "dd[id*='td_CHRG_DEPT_NM']",
-                        ".dept",
-                        "td.dept",
-                        ".department"
-                    ]
-                    
-                    dept_elem = None
-                    for selector in dept_selectors:
-                        dept_elem = item.select_one(selector)
-                        if dept_elem:
-                            break
-                            
-                    dept_text = dept_elem.text.strip() if dept_elem else "부서 정보 없음"
-                    
-                    # 게시물 정보 딕셔너리 생성
-                    post_info = {
-                        'title': title,
-                        'date': date_str,
-                        'department': dept_text,
-                        'url': post_url,
-                        'post_id': post_id
-                    }
-                    
-                    # 모든 게시물 리스트에 추가
-                    all_posts.append(post_info)
-                    
-                    # 통신 통계 게시물인지 확인
-                    if is_telecom_stats_post(title):
-                        logger.info(f"통신 통계 게시물 발견: {title}")
-                        telecom_stats_posts.append(post_info)
-                        
-                except Exception as e:
-                    logger.error(f"게시물 파싱 중 에러: {str(e)}")
-                    continue
-        
-        return all_posts, telecom_stats_posts, continue_search
-        
-    except Exception as e:
-        logger.error(f"페이지 파싱 중 에러: {str(e)}")
-        return [], [], False
+
 
 def find_view_link_params(driver, post):
     """게시물에서 바로보기 링크 파라미터 찾기 (클릭 방식 우선)"""
@@ -8426,12 +8186,12 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
         # Track all posts and telecom statistics posts
         all_posts = []
         telecom_stats_posts = []
-        continue_search = True
+        continue_to_next_page = True  # 다음 페이지로 계속 진행할지 여부
         
         # 각 페이지 탐색
         for page_num in page_sequence:
-            if not continue_search:
-                logger.info(f"날짜 범위 조건으로 인해 검색 중단")
+            if not continue_to_next_page:
+                logger.info(f"이전 페이지에서 날짜 범위 조건으로 검색 중단 설정됨")
                 break
                 
             logger.info(f"페이지 {page_num} 탐색 시도...")
@@ -8445,23 +8205,34 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
             
             logger.info(f"페이지 {page_num} 파싱 중...")
             
-            # 날짜 기반 필터링을 위한 조건 수정
-            if start_date and end_date:
-                page_posts, stats_posts, should_continue = parse_page_with_date_range(
-                    driver, page_num, start_date=start_date, end_date=end_date
-                )
-            else:
-                page_posts, stats_posts, should_continue = parse_page(
-                    driver, page_num, days_range=days_range
-                )
-                
+            # 새로운 통합 파싱 함수 사용
+            page_posts, stats_posts, result_info = parse_page_content(
+                driver, 
+                page_num=page_num, 
+                days_range=days_range,
+                start_date=start_date, 
+                end_date=end_date,
+                reverse_order=reverse_order
+            )
+            
+            # 파싱 결과 로깅
+            logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
+            if result_info['messages']:
+                for msg in result_info['messages']:
+                    logger.info(f"페이지 {page_num} 메시지: {msg}")
+            
+            # 다음 페이지 진행 여부 결정
+            continue_to_next_page = result_info['continue_to_next_page']
+            
+            # 날짜 정보 로깅
+            if result_info['oldest_date_found']:
+                logger.info(f"페이지 {page_num} 가장 오래된 날짜: {result_info['oldest_date_found']}")
+            if result_info['newest_date_found']:
+                logger.info(f"페이지 {page_num} 가장 최근 날짜: {result_info['newest_date_found']}")
+            
+            # 전체 결과에 추가
             all_posts.extend(page_posts)
             telecom_stats_posts.extend(stats_posts)
-            
-            logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
-            
-            # 날짜 범위 밖의 게시물 발견 시 검색 중단 여부 설정
-            continue_search = should_continue
             
             # 페이지 사이 대기
             time.sleep(2)
@@ -8691,22 +8462,19 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
         end_time = time.time()
         execution_time = end_time - start_time
         logger.info(f"실행 시간: {execution_time:.2f}초")
-
         
         # ADD THIS CODE RIGHT HERE - before sending Telegram notification:
         if gs_client and data_updates and CONFIG.get('cleanup_old_sheets', False):
             logger.info("Cleaning up date-specific sheets...")
             try:
                 # Use the same spreadsheet object if already available, or open it again
-                if not spreadsheet:
-                    spreadsheet = open_spreadsheet_with_retry(gs_client)
-        
+                spreadsheet = open_spreadsheet_with_retry(gs_client)
+                
                 if spreadsheet:
                     removed_count = cleanup_date_specific_sheets(spreadsheet)
                     logger.info(f"Removed {removed_count} date-specific sheets")
             except Exception as cleanup_err:
                 logger.error(f"Error during sheet cleanup: {str(cleanup_err)}")
-
         
         # Send Telegram notification
         if all_posts or data_updates:
