@@ -1,176 +1,260 @@
-import os
-from telegram import Bot
+"""Telco News Forwarder
+
+- 광고 문구 제거 후 원본 메시지를 수정하고 브로드캐스트 채널로 전달
+- Google Sheets(Archive_arg 시트)에서 최근 24시간 기사 다이제스트를 추출해 함께 전송
+- Google 서비스 계정 키는
+  1) GitHub Action Secret `MSIT_GSPREAD_REF` (JSON 문자열)
+  2) 환경 변수 `GOOGLE_APPLICATION_CREDENTIALS` (로컬 개발 시 파일 경로)
+  둘 중 하나에서 로드한다.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
-from datetime import datetime, timedelta
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Tuple
+
+import gspread
+from google.oauth2.service_account import Credentials
+from telegram import Bot
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
+# -------- 설정 상수 --------
 REMOVE_STRINGS = [
     "☞ KB증권 통신 텔레그램 채널 바로가기 < https://bit.ly/BaseStation >",
-    "☞무료수신거부 0808886611"
+    "☞무료수신거부 0808886611",
 ]
 
+SHEET_NAME = "Archive_arg"
+SECONDS_IN_DAY = 86_400
+
+
 class TelcoNewsForwarder:
-    def __init__(self):
-        self.token = os.getenv('TELCO_NEWS_TOKEN')
-        self.receive_chat_id = os.getenv('TELCO_NEWS_RECEIVE')
-        self.broadcast_chat_ids = [
-            os.getenv('TELCO_NEWS_BROADCAST_1'),
-            os.getenv('TELCO_NEWS_BROADCAST_2')
+    def __init__(self) -> None:
+        # --- Telegram 관련 환경 변수 ---
+        self.token: str | None = os.getenv("TELCO_NEWS_TOKEN")
+        self.receive_chat_id: str | None = os.getenv("TELCO_NEWS_RECEIVE")
+        self.broadcast_chat_ids: List[int] = [
+            int(os.getenv("TELCO_NEWS_BROADCAST_1", "0")),
+            int(os.getenv("TELCO_NEWS_BROADCAST_2", "0")),
         ]
-        
-        logger.info(f"Token 존재 여부: {bool(self.token)}")
-        logger.info(f"수신 채널 ID: {self.receive_chat_id}")
-        logger.info(f"브로드캐스트 채널 IDs: {self.broadcast_chat_ids}")
-        
+
+        # --- Google Sheet 환경 변수 ---
+        self.spreadsheet_id: str | None = os.getenv("TELCO_ARTICLE_ID")
+
+        self._validate_env()
+
+        # Telegram Bot 초기화
+        self.bot = Bot(token=self.token)
+
+        # gspread 초기화
+        self.gc = self._init_gspread_client()
+
+    # ------------------------------------------------------------------
+    # ENV 검사
+    # ------------------------------------------------------------------
+    def _validate_env(self) -> None:
         if not self.token:
             raise ValueError("TELCO_NEWS_TOKEN이 설정되지 않았습니다.")
         if not self.receive_chat_id:
             raise ValueError("TELCO_NEWS_RECEIVE가 설정되지 않았습니다.")
         if not all(self.broadcast_chat_ids):
-            raise ValueError("TELCO_NEWS_BROADCAST_1 또는 TELCO_NEWS_BROADCAST_2가 설정되지 않았습니다.")
-            
-        self.bot = Bot(token=self.token)
+            raise ValueError("TELCO_NEWS_BROADCAST_[1|2]가 설정되지 않았습니다.")
+        if not self.spreadsheet_id:
+            raise ValueError("TELCO_ARTICLE_ID가 설정되지 않았습니다.")
 
-    def clean_message(self, message: str) -> str:
-        """지정된 문자열을 제거하는 함수"""
+    # ------------------------------------------------------------------
+    # gspread 클라이언트 초기화
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _init_gspread_client():
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
+
+        raw_json = os.getenv("MSIT_GSPREAD_REF")
+        if raw_json:
+            logger.info("Google creds loaded from MSIT_GSPREAD_REF secret")
+            creds_dict = json.loads(raw_json)
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        else:
+            path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if not path or not Path(path).is_file():
+                raise ValueError(
+                    "MSIT_GSPREAD_REF 또는 GOOGLE_APPLICATION_CREDENTIALS 중 하나가 필요합니다."
+                )
+            logger.info(f"Google creds loaded from file: {path}")
+            creds = Credentials.from_service_account_file(path, scopes=scopes)
+
+        return gspread.authorize(creds)
+
+    # ------------------------------------------------------------------
+    # 메시지 정제
+    # ------------------------------------------------------------------
+    @staticmethod
+    def clean_message(message: str | None) -> str:
         if not message:
             return ""
-        
         cleaned = message
-        for remove_str in REMOVE_STRINGS:
-            cleaned = cleaned.replace(remove_str, '').strip()
+        for s in REMOVE_STRINGS:
+            cleaned = cleaned.replace(s, "").strip()
         return cleaned
 
-    async def check_bot_permissions(self, chat_id):
-        """봇의 채널 권한을 확인하는 함수"""
-        try:
-            chat = await self.bot.get_chat(chat_id)
-            bot = await self.bot.get_me()
-            member = await self.bot.get_chat_member(chat_id, bot.id)
-            
-            logger.info(f"채널 정보: {chat.title} (type: {chat.type})")
-            logger.info(f"봇 권한: {member.status}")
-            logger.info(f"can_edit_messages: {getattr(member, 'can_edit_messages', False)}")
-            logger.info(f"can_post_messages: {getattr(member, 'can_post_messages', False)}")
-            
-            return member
-        except Exception as e:
-            logger.error(f"권한 확인 중 에러: {str(e)}")
-            return None
+    # ------------------------------------------------------------------
+    # gspread → 최근 24h 기사
+    # ------------------------------------------------------------------
+    async def fetch_recent_articles(self) -> List[Tuple[str, str]]:
+        """(title, url) 리스트 반환"""
 
+        def _blocking_io():
+            sh = self.gc.open_by_key(self.spreadsheet_id)  # Spreadsheet load
+            ws = sh.worksheet(SHEET_NAME)
+            rows = ws.get_all_records()  # List[Dict[str, Any]]
+            now_utc = datetime.now(tz=timezone.utc)
+            recent: List[Tuple[str, str]] = []
+
+            for row in rows:
+                # 헤더 정규화: 소문자 + 공백→언더스코어
+                norm = {k.strip().lower().replace(" ", "_"): v for k, v in row.items()}
+                ts_raw = str(norm.get("timestamp", "")).strip()
+                title = str(norm.get("title", "")).strip()
+                url = str(norm.get("url", "")).strip()
+
+                if not (ts_raw and title and url):
+                    continue
+
+                # Timestamp 파싱 (시트는 "YYYY-MM-DD HH:MM" 형식, KST)
+                try:
+                    ts_kst = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M")
+                    ts_utc = ts_kst.replace(tzinfo=timezone.utc) - timedelta(hours=9)
+                except ValueError:
+                    logger.debug(f"Timestamp parse 실패: {ts_raw}")
+                    continue
+
+                if (now_utc - ts_utc).total_seconds() <= SECONDS_IN_DAY:
+                    recent.append((title, url))
+
+            # 최신순 정렬 (시트 자체가 오래된 행 위에 있을 수 있으므로)
+            return recent[::-1]
+
+        return await asyncio.to_thread(_blocking_io)
+
+    # ------------------------------------------------------------------
+    # 기사 다이제스트 전송
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    async def send_article_digest(self) -> None:
+        articles = await self.fetch_recent_articles()
+        if not articles:
+            logger.info("최근 24h 신규 기사가 없습니다.")
+            return
+
+        lines = [
+            f"📑 <a href=\"{url}\">{self._escape_html(title)}</a>"
+            for title, url in articles
+        ]
+        message = "📰 <b>지난 24시간 Telecom Articles</b>\n" + "\n".join(lines)
+
+        for chat_id in self.broadcast_chat_ids:
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                logger.info(f"Digest 전송 성공 → {chat_id}")
+            except Exception as e:
+                logger.error(f"Digest 전송 실패({chat_id}): {e}")
+
+    # ------------------------------------------------------------------
+    # Telegram 업데이트 처리 (광고 제거 & 포워드)
+    # ------------------------------------------------------------------
     async def process_updates(self):
-        """메시지 업데이트를 처리하는 함수"""
         try:
             updates = await self.bot.get_updates(limit=100)
-            logger.info(f"총 {len(updates)}개의 업데이트를 받았습니다.")
-            
-            relevant_messages = []
+            logger.info(f"총 {len(updates)}개의 업데이트 수신")
+
+            relevant = []
             for update in updates:
-                # 메시지 추출 (channel_post 또는 일반 message)
                 message = update.channel_post or update.message
-                if not message or not message.text:
+                if not (message and message.text):
+                    continue
+                if str(message.chat.id) != str(self.receive_chat_id):
                     continue
 
-                logger.info(f"메시지 검사 중: chat_id={message.chat.id}, message_id={message.message_id}")
-                logger.info(f"메시지 내용: {message.text[:100]}...")  # 처음 100자만 로깅
-
-                # 24시간 이내 메시지인지 확인
-                message_time = message.date.replace(tzinfo=None)
-                time_diff = datetime.utcnow() - message_time
-                logger.info(f"메시지 시간: {message_time}, 경과 시간: {time_diff}")
-                
-                if time_diff > timedelta(hours=24):
-                    logger.info("24시간이 지난 메시지입니다.")
+                # 24h 필터
+                if (datetime.now(tz=timezone.utc) - message.date).total_seconds() > SECONDS_IN_DAY:
                     continue
 
-                # 제거할 문자열이 있는지 확인
-                original_text = message.text
-                cleaned_text = self.clean_message(original_text)
-                
-                if original_text != cleaned_text:
-                    # 채널 메시지가 아니더라도 내용이 맞으면 처리
-                    relevant_messages.append((message, cleaned_text))
-                    logger.info(f"처리 대상 메시지 발견: {message.message_id}")
-                    logger.info(f"원본 텍스트: {original_text[:100]}...")
-                    logger.info(f"정제된 텍스트: {cleaned_text[:100]}...")
-            
-            if not relevant_messages:
-                logger.info("처리할 메시지를 찾지 못했습니다.")
-                return None, None
+                cleaned = self.clean_message(message.text)
+                if cleaned != message.text:
+                    relevant.append((message, cleaned))
 
-            # 가장 최근 메시지 선택
-            latest_message = max(relevant_messages, key=lambda x: x[0].date)
-            logger.info(f"가장 최근 메시지 선택: {latest_message[0].message_id}")
-            
-            return latest_message
-
+            if not relevant:
+                return None
+            # 최신 메시지 1건만
+            return max(relevant, key=lambda mc: mc[0].date)
         except Exception as e:
-            logger.error(f"업데이트 처리 중 에러: {str(e)}")
-            return None, None
+            logger.error(f"process_updates 오류: {e}")
+            return None
 
+    # ------------------------------------------------------------------
+    # 메시지 수정 + 전달 + 기사 다이제스트
+    # ------------------------------------------------------------------
     async def forward_messages(self):
-        """메시지를 수신하고 수정하여 다른 채널에 전달"""
-        try:
-            logger.info("메시지 업데이트 확인 중...")
-            result = await self.process_updates()
-            
-            if not result:
-                logger.info("처리할 메시지가 없습니다.")
-                return
-                
-            original_message, cleaned_text = result
-            
-            # 권한 확인
-            logger.info("채널 권한 확인 중...")
-            member = await self.check_bot_permissions(original_message.chat.id)
-            if not member or not getattr(member, 'can_edit_messages', False):
-                logger.warning("봇이 메시지를 수정할 권한이 없습니다!")
-            
-            # 원본 메시지 수정 먼저 시도
+        result = await self.process_updates()
+        if result:
+            original, cleaned = result
+            # 원본 메시지 수정
             try:
-                logger.info(f"메시지 수정 시도: chat_id={original_message.chat.id}, message_id={original_message.message_id}")
-                edited_msg = await self.bot.edit_message_text(
-                    chat_id=original_message.chat.id,
-                    message_id=original_message.message_id,
-                    text=cleaned_text,
-                    parse_mode=None  # 포맷팅 오류 방지
+                await self.bot.edit_message_text(
+                    chat_id=original.chat.id,
+                    message_id=original.message_id,
+                    text=cleaned,
+                    parse_mode=None,
                 )
-                logger.info(f"원본 메시지 {original_message.message_id} 수정 완료")
-                logger.info(f"수정된 메시지 내용: {edited_msg.text[:100]}...")
+                logger.info(f"메시지 수정 완료: {original.message_id}")
             except Exception as e:
-                logger.error(f"메시지 수정 중 에러: {str(e)}")
-                logger.error(f"채팅 타입: {original_message.chat.type}")
-                logger.error(f"메시지 ID: {original_message.message_id}")
-            
-            # 브로드캐스트 채널로 전달
+                logger.warning(f"메시지 수정 실패: {e}")
+
+            # 브로드캐스트 채널로 전송
             for chat_id in self.broadcast_chat_ids:
                 try:
-                    sent_msg = await self.bot.send_message(
-                        chat_id=int(chat_id),
-                        text=cleaned_text,
-                        parse_mode=None  # 포맷팅 오류 방지
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=cleaned,
+                        parse_mode=None,
                     )
-                    logger.info(f"채널 {chat_id}로 메시지 전달 완료: {sent_msg.message_id}")
+                    logger.info(f"포워드 성공 → {chat_id}")
                 except Exception as e:
-                    logger.error(f"채널 {chat_id}로 메시지 전달 중 에러: {str(e)}")
-                    
-        except Exception as e:
-            logger.error(f"전체 프로세스 중 에러 발생: {str(e)}")
-            raise
+                    logger.error(f"포워드 실패({chat_id}): {e}")
+
+        # ---- 기사 다이제스트 전송 ----
+        await self.send_article_digest()
+
 
 async def main():
-    try:
-        forwarder = TelcoNewsForwarder()
-        await forwarder.forward_messages()
-    except Exception as e:
-        logger.error(f"메인 함수 실행 중 에러: {str(e)}")
-        raise
+    forwarder = TelcoNewsForwarder()
+    await forwarder.forward_messages()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
