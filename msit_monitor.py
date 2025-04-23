@@ -2504,7 +2504,300 @@ def find_view_link_params(driver, post):
         time.sleep(2)  # 추가 대기
     except Exception as e:
         logger.error(f"게시물 목록 페이지 접근 실패: {str(e)}")
-        return direct_access_view_link_params(driver, post)
+        return None
+    
+    # 최대 재시도 횟수
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            # 제목으로 게시물 링크 찾기
+            xpath_selectors = [
+                f"//p[contains(@class, 'title') and contains(text(), '{post['title'][:20]}')]",
+                f"//a[contains(text(), '{post['title'][:20]}')]",
+                f"//div[contains(@class, 'toggle') and contains(., '{post['title'][:20]}')]"
+            ]
+            
+            post_link = None
+            for selector in xpath_selectors:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        post_link = elements[0]
+                        logger.info(f"게시물 링크 발견 (선택자: {selector})")
+                        break
+                except Exception as find_err:
+                    logger.warning(f"선택자로 게시물 찾기 실패: {selector}")
+                    continue
+            
+            if not post_link:
+                logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # 모든 재시도 실패 시 처리
+                    logger.warning("게시물 링크 찾기 최대 재시도 횟수 초과")
+                    return None
+            
+            # 스크린샷 저장 (클릭 전)
+            take_screenshot(driver, f"before_click_{post['post_id']}")
+            
+            # 링크 클릭하여 상세 페이지로 이동
+            logger.info(f"게시물 링크 클릭 시도: {post['title']}")
+            
+            # JavaScript로 클릭 시도 (더 신뢰성 있는 방법)
+            try:
+                driver.execute_script("arguments[0].click();", post_link)
+                logger.info("JavaScript를 통한 클릭 실행")
+            except Exception as js_click_err:
+                logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
+                # 일반 클릭 시도
+                post_link.click()
+                logger.info("일반 클릭 실행")
+            
+            # 페이지 로드 대기
+            try:
+                WebDriverWait(driver, 15).until(
+                    lambda d: d.current_url != CONFIG['stats_url']
+                )
+                logger.info(f"페이지 URL 변경 감지됨: {driver.current_url}")
+                time.sleep(3)  # 추가 대기
+            except TimeoutException:
+                logger.warning("URL 변경 감지 실패")
+            
+            # 상세 페이지 대기
+            wait_elements = [
+                (By.CLASS_NAME, "view_head"),
+                (By.CLASS_NAME, "view_cont"),
+                (By.CSS_SELECTOR, ".bbs_wrap .view"),
+                (By.XPATH, "//div[contains(@class, 'view')]")
+            ]
+            
+            element_found = False
+            for by_type, selector in wait_elements:
+                try:
+                    WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((by_type, selector))
+                    )
+                    logger.info(f"상세 페이지 로드 완료: {selector} 요소 발견")
+                    element_found = True
+                    break
+                except TimeoutException:
+                    continue
+            
+            if not element_found:
+                logger.warning("상세 페이지 로드 실패")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    # AJAX 방식 시도
+                    logger.info("AJAX 방식으로 접근 시도")
+                    ajax_result = try_ajax_access(driver, post)
+                    if ajax_result:
+                        return ajax_result
+                    
+                    # 모든 방법 실패
+                    logger.error("모든 접근 방식 실패")
+                    return None
+            
+            # 스크린샷 저장
+            take_screenshot(driver, f"post_view_clicked_{post['post_id']}")
+            
+            # 바로보기 링크 찾기 (확장된 선택자)
+            try:
+                # 여러 선택자로 바로보기 링크 찾기
+                view_links = []
+                
+                # 1. 일반적인 '바로보기' 링크
+                view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
+                
+                # 2. onclick 속성으로 찾기
+                if not view_links:
+                    all_links = driver.find_elements(By.TAG_NAME, "a")
+                    view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
+                
+                # 3. 텍스트로 찾기
+                if not view_links:
+                    all_links = driver.find_elements(By.TAG_NAME, "a")
+                    view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+                
+                # 4. class 속성으로 찾기
+                if not view_links:
+                    view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
+                
+                # 5. 제목에 포함된 키워드로 관련 링크 찾기
+                if not view_links and '통계' in post['title']:
+                    all_links = driver.find_elements(By.TAG_NAME, "a")
+                    view_links = [link for link in all_links if 
+                                any(ext in (link.get_attribute('href') or '')  
+                                   for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
+                
+                if view_links:
+                    view_link = view_links[0]
+                    onclick_attr = view_link.get_attribute('onclick')
+                    href_attr = view_link.get_attribute('href')
+                    
+                    logger.info(f"바로보기 링크 발견, onclick: {onclick_attr}, href: {href_attr}")
+                    
+                    # getExtension_path('49234', '1') 형식에서 매개변수 추출
+                    if onclick_attr and 'getExtension_path' in onclick_attr:
+                        match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick_attr)
+                        if match:
+                            atch_file_no = match.group(1)
+                            file_ord = match.group(2)
+                            
+                            # 날짜 정보 추출
+                            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                            if date_match:
+                                year = int(date_match.group(1))
+                                month = int(date_match.group(2))
+                                
+                                return {
+                                    'atch_file_no': atch_file_no,
+                                    'file_ord': file_ord,
+                                    'date': {'year': year, 'month': month},
+                                    'post_info': post
+                                }
+                            
+                            return {
+                                'atch_file_no': atch_file_no,
+                                'file_ord': file_ord,
+                                'post_info': post
+                            }
+                    # 직접 다운로드 URL인 경우 처리
+                    elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
+                        logger.info(f"직접 다운로드 링크 발견: {href_attr}")
+                        
+                        # 날짜 정보 추출
+                        date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                        if date_match:
+                            year = int(date_match.group(1))
+                            month = int(date_match.group(2))
+                            
+                            return {
+                                'download_url': href_attr,
+                                'date': {'year': year, 'month': month},
+                                'post_info': post
+                            }
+                
+                # 바로보기 링크를 찾을 수 없는 경우
+                logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+                
+                # 게시물 내용 추출 시도
+                try:
+                    # 다양한 선택자로 내용 찾기
+                    content_selectors = [
+                        "div.view_cont", 
+                        ".view_content", 
+                        ".bbs_content",
+                        ".bbs_detail_content",
+                        "div[class*='view'] div[class*='cont']"
+                    ]
+                    
+                    content = ""
+                    for selector in content_selectors:
+                        try:
+                            content_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                            content = content_elem.text if content_elem else ""
+                            if content.strip():
+                                logger.info(f"게시물 내용 추출 성공 (길이: {len(content)})")
+                                break
+                        except:
+                            continue
+                    
+                    # 날짜 정보 추출
+                    date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                    if date_match:
+                        year = int(date_match.group(1))
+                        month = int(date_match.group(2))
+                        
+                        return {
+                            'content': content if content else "내용 없음",
+                            'date': {'year': year, 'month': month},
+                            'post_info': post
+                        }
+                    
+                except Exception as content_err:
+                    logger.warning(f"게시물 내용 추출 중 오류: {str(content_err)}")
+                
+                # 날짜 정보 추출
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'content': "내용 없음",
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+                
+                return None
+                
+            except Exception as e:
+                logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
+                
+                # 오류 발생 시에도 날짜 정보 추출 시도
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'content': f"오류 발생: {str(e)}",
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+                    
+                return None
+                
+        except TimeoutException:
+            if attempt < max_retries - 1:
+                logger.warning(f"페이지 로드 타임아웃, 재시도 {attempt+1}/{max_retries}")
+                time.sleep(retry_delay * 2)  # 대기 시간 증가
+            else:
+                logger.error(f"{max_retries}번 시도 후 페이지 로드 실패")
+                
+                # AJAX 방식 시도
+                ajax_result = try_ajax_access(driver, post)
+                if ajax_result:
+                    return ajax_result
+                    
+                # 날짜 정보 추출 시도
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+                if date_match:
+                    year = int(date_match.group(1))
+                    month = int(date_match.group(2))
+                    
+                    return {
+                        'content': "페이지 로드 타임아웃",
+                        'date': {'year': year, 'month': month},
+                        'post_info': post
+                    }
+                
+                return None
+        except Exception as e:
+            logger.error(f"게시물 상세 정보 접근 중 오류: {str(e)}")
+            
+            # 오류 발생 시에도 날짜 정보 추출 시도
+            date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
+            if date_match:
+                year = int(date_match.group(1))
+                month = int(date_match.group(2))
+                
+                return {
+                    'content': f"접근 오류: {str(e)}",
+                    'date': {'year': year, 'month': month},
+                    'post_info': post
+                }
+            
+            return None
+    
+    return None
 
 
 def direct_access_view_link_params(driver, post):
@@ -6767,394 +7060,13 @@ def cleanup_date_specific_sheets(spreadsheet):
 
 
 def update_single_sheet(spreadsheet, sheet_name, df, date_str, post_info=None):
-    """
-    단일 시트 업데이트 개선 함수
-    
-    Args:
-        spreadsheet: gspread Spreadsheet 객체
-        sheet_name: 업데이트할 시트 이름
-        df: pandas DataFrame - 업데이트할 데이터
-        date_str: 날짜 문자열 (열 헤더로 사용)
-        post_info: 게시물 정보 (선택 사항)
-        
-    Returns:
-        bool: 업데이트 성공 여부
-    """
-    try:
-        # 시트 이름 정리 (특수문자 제거 등)
-        sheet_name = clean_sheet_name_for_gsheets(sheet_name)
-        logger.info(f"시트 업데이트 시작: '{sheet_name}', 날짜: {date_str}")
-        
-        # API 속도 제한 방지를 위한 지연 시간
-        time.sleep(1)
-        
-        # 워크시트 찾기 또는 생성
-        try:
-            worksheet = spreadsheet.worksheet(sheet_name)
-            logger.info(f"기존 워크시트 찾음: {sheet_name}")
-        except gspread.exceptions.WorksheetNotFound:
-            # 새 워크시트 생성
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
-            logger.info(f"새 워크시트 생성: {sheet_name}")
-            
-            # 헤더 행 설정
-            worksheet.update_cell(1, 1, "항목")
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 데이터 검증 및 전처리
-        if df is None or df.empty:
-            logger.warning(f"빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        # 데이터프레임 준비
-        df = validate_and_clean_dataframe(df)
-        if df.empty:
-            logger.warning(f"데이터 정제 후 빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        # 첫 열을 항목으로 사용
-        key_col = df.columns[0]
-        items = df[key_col].astype(str).tolist()
-        
-        # 두 번째 열을 값으로 사용 (없으면 첫 번째 열과 동일)
-        value_col = df.columns[1] if df.shape[1] >= 2 else key_col
-        values = df[value_col].astype(str).tolist()
-        
-        # 현재 워크시트 열 헤더 및 항목 가져오기
-        try:
-            headers = worksheet.row_values(1)
-            existing_items = worksheet.col_values(1)[1:]  # 헤더 제외
-        except Exception as e:
-            logger.warning(f"워크시트 데이터 읽기 실패: {str(e)}")
-            headers = []
-            existing_items = []
-        
-        # 빈 헤더 채우기
-        if not headers or len(headers) == 0:
-            worksheet.update_cell(1, 1, "항목")
-            headers = ["항목"]
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 날짜 열 확인 (이미 존재하는지)
-        if date_str in headers:
-            col_idx = headers.index(date_str) + 1
-            logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
-        else:
-            # 새 날짜 열 추가
-            col_idx = len(headers) + 1
-            worksheet.update_cell(1, col_idx, date_str)
-            logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
-            time.sleep(1)  # API 속도 제한 방지
-        
-        # 배치 업데이트 준비
-        cell_updates = []
-        new_rows = []
-        
-        # 각 항목에 대해 업데이트 준비
-        for i, (item, value) in enumerate(zip(items, values)):
-            if not item or not item.strip():
-                continue  # 빈 항목 건너뛰기
-                
-            # 항목이 이미 존재하는지 확인
-            if item in existing_items:
-                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
-            else:
-                # 새 항목은 끝에 추가
-                row_idx = len(existing_items) + 2
-                new_rows.append(item)  # 새 행 추적
-                
-                # 항목 업데이트
-                cell_updates.append({
-                    'range': f'A{row_idx}',
-                    'values': [[item]]
-                })
-                existing_items.append(item)
-            
-            # 값 업데이트
-            value_str = value if pd.notna(value) else ""
-            cell_updates.append({
-                'range': f'{chr(64 + col_idx)}{row_idx}',
-                'values': [[value_str]]
-            })
-        
-        # 모든 열 데이터 추가 (2열 이상인 경우)
-        if df.shape[1] > 2:
-            logger.info(f"데이터프레임에 추가 열이 있습니다 ({df.shape[1]}개). 모든 열을 새 시트에 복사합니다.")
-            
-            # 추가 시트에 전체 데이터 저장
-            full_sheet_name = f"{sheet_name}_전체데이터_{date_str}"
-            try:
-                # 기존 워크시트가 있으면 삭제
-                try:
-                    spreadsheet.del_worksheet(spreadsheet.worksheet(full_sheet_name))
-                    logger.info(f"기존 전체 데이터 시트 삭제: {full_sheet_name}")
-                except gspread.exceptions.WorksheetNotFound:
-                    pass
-                
-                # 새 워크시트 생성
-                full_worksheet = spreadsheet.add_worksheet(title=full_sheet_name, rows=df.shape[0]+5, cols=df.shape[1]+2)
-                logger.info(f"전체 데이터용 새 워크시트 생성: {full_sheet_name}")
-                
-                # 전체 데이터 업로드
-                # 헤더 추가
-                cells = []
-                for i, col in enumerate(df.columns):
-                    cells.append(gspread.Cell(1, i+1, str(col)))
-                
-                # 데이터 추가
-                for i, row in enumerate(df.values, start=2):
-                    for j, value in enumerate(row, start=1):
-                        cells.append(gspread.Cell(i, j, str(value) if pd.notna(value) else ""))
-                
-                # 링크 정보 추가 (있는 경우)
-                url = post_info.get('url', '') if post_info else ''
-                if url:
-                    cells.append(gspread.Cell(1, df.shape[1]+1, "원본 링크"))
-                    cells.append(gspread.Cell(2, df.shape[1]+1, url))
-                
-                # 배치 업데이트
-                if cells:
-                    # 한 번에 너무 많은 셀 업데이트는 제한이 있으므로 분할
-                    batch_size = 500
-                    for i in range(0, len(cells), batch_size):
-                        batch = cells[i:i+batch_size]
-                        try:
-                            full_worksheet.update_cells(batch, value_input_option='RAW')
-                            logger.info(f"전체 데이터 {i+1}~{min(i+batch_size, len(cells))} 업데이트 완료")
-                            time.sleep(1)  # API 제한 방지
-                        except Exception as batch_err:
-                            logger.warning(f"전체 데이터 배치 업데이트 실패: {str(batch_err)}")
-                
-                logger.info(f"전체 데이터가 별도 시트에 저장됨: {full_sheet_name}")
-            except Exception as full_sheet_err:
-                logger.warning(f"전체 데이터 시트 생성 실패: {str(full_sheet_err)}")
-        
-        # 기본 시트 업데이트 실행
-        if cell_updates:
-            logger.info(f"총 {len(cell_updates)}개 셀 업데이트 준비 완료 (새 항목: {len(new_rows)}개)")
-            # 배치 크기 조정
-            batch_size = min(10, len(cell_updates))  # 최대 10개씩 처리
-            
-            for i in range(0, len(cell_updates), batch_size):
-                batch = cell_updates[i:i+batch_size]
-                try:
-                    worksheet.batch_update(batch)
-                    logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(cell_updates))} 완료")
-                    time.sleep(1)  # API 속도 제한 방지
-                except gspread.exceptions.APIError as api_err:
-                    # API 오류 처리
-                    if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                        logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                        time.sleep(5)  # 더 긴 대기
-                        
-                        # 더 작은 배치로 재시도
-                        for update in batch:
-                            try:
-                                worksheet.batch_update([update])
-                                time.sleep(2)  # 각 업데이트 사이 더 긴 대기
-                            except Exception as single_err:
-                                logger.error(f"단일 업데이트 실패: {str(single_err)}")
-                    else:
-                        logger.error(f"일괄 업데이트 실패: {str(api_err)}")
-                        return False
-                except Exception as batch_err:
-                    logger.error(f"일괄 업데이트 중 오류: {str(batch_err)}")
-                    return False
-            
-            logger.info(f"워크시트 '{sheet_name}' 업데이트 완료")
-            return True
-        else:
-            logger.warning(f"워크시트 '{sheet_name}'에 업데이트할 셀이 없습니다")
-            return True  # 업데이트할 게 없어도 성공으로 처리
-        
-    except gspread.exceptions.APIError as api_err:
-        if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-            logger.warning(f"Google Sheets API 속도 제한 발생: {str(api_err)}")
-            logger.info("대기 후 최소 데이터 업데이트 시도...")
-            time.sleep(5)  # 더 긴 대기 시간
-            
-            # 간소화된 방식으로 재시도
-            try:
-                # 워크시트 찾기 또는 생성
-                try:
-                    worksheet = spreadsheet.worksheet(sheet_name)
-                except gspread.exceptions.WorksheetNotFound:
-                    worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
-                    worksheet.update_cell(1, 1, "항목")
-                
-                # 날짜 열 위치 결정 (단순화)
-                headers = worksheet.row_values(1)
-                if date_str in headers:
-                    col_idx = headers.index(date_str) + 1
-                else:
-                    col_idx = len(headers) + 1
-                    worksheet.update_cell(1, col_idx, date_str)
-                
-                # 최소한의 데이터만 업데이트
-                if df.shape[0] > 0:
-                    first_col_name = df.columns[0]
-                    items = df[first_col_name].astype(str).tolist()[:5]  # 처음 5개 항목
-                    values = ["업데이트 성공"] * len(items)
-                    
-                    for i, (item, value) in enumerate(zip(items, values)):
-                        row_idx = i + 2  # 헤더 행 이후
-                        try:
-                            worksheet.update_cell(row_idx, 1, item)
-                            time.sleep(1)
-                            worksheet.update_cell(row_idx, col_idx, value)
-                            time.sleep(1)
-                        except Exception as cell_err:
-                            logger.warning(f"최소 데이터 셀 업데이트 실패: {str(cell_err)}")
-                
-                logger.info(f"제한된 데이터로 워크시트 '{sheet_name}' 업데이트 완료")
-                return True
-                
-            except Exception as retry_err:
-                logger.error(f"재시도 중 오류: {str(retry_err)}")
-                return False
-        else:
-            logger.error(f"Google Sheets API 오류: {str(api_err)}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
-        return False
+    """이전 함수와의 호환성을 위한 래퍼"""
+    return update_sheet(spreadsheet, sheet_name, df, date_str, post_info, {'mode': 'append'})
 
 # 새로운 함수: Raw 업데이트를 위한 시트 처리 함수
 def update_single_sheet_raw(spreadsheet, sheet_name, df, date_str, post_info=None):
-    """
-    단일 시트를 Raw 모드로 업데이트 (기존 내용 삭제 후 새로 업데이트)
-    
-    Args:
-        spreadsheet: gspread Spreadsheet 객체
-        sheet_name: 업데이트할 시트 이름
-        df: pandas DataFrame - 업데이트할 데이터
-        date_str: 날짜 문자열
-        post_info: 게시물 정보 (선택 사항)
-        
-    Returns:
-        bool: 업데이트 성공 여부
-    """
-    try:
-        logger.info(f"Raw 모드로 시트 업데이트 시작: '{sheet_name}', 날짜: {date_str}")
-        
-        # API 속도 제한 방지를 위한 지연 시간
-        time.sleep(1)
-        
-        # 워크시트 찾기 또는 생성
-        try:
-            # 기존 워크시트가 있으면 삭제하고 새로 생성
-            try:
-                existing_sheet = spreadsheet.worksheet(sheet_name)
-                spreadsheet.del_worksheet(existing_sheet)
-                logger.info(f"기존 워크시트 삭제: {sheet_name}")
-                time.sleep(2)  # 삭제 후 대기
-            except gspread.exceptions.WorksheetNotFound:
-                logger.info(f"기존 워크시트 없음: {sheet_name}")
-            
-            # 새 워크시트 생성
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=df.shape[0]+10, cols=df.shape[1]+5)
-            logger.info(f"새 워크시트 생성: {sheet_name} (행: {df.shape[0]+10}, 열: {df.shape[1]+5})")
-            
-        except Exception as ws_err:
-            logger.error(f"워크시트 생성 중 오류: {str(ws_err)}")
-            return False
-        
-        # 데이터 검증 및 전처리
-        if df is None or df.empty:
-            logger.warning(f"빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        # 데이터프레임 준비
-        df = validate_and_clean_dataframe(df)
-        if df.empty:
-            logger.warning(f"데이터 정제 후 빈 DataFrame, 워크시트 '{sheet_name}' 업데이트 중단")
-            return False
-        
-        try:
-            # 전체 데이터를 한 번에 업로드
-            # 헤더 준비
-            header_values = [df.columns.tolist()]
-            
-            # 데이터 행 준비
-            data_values = df.values.tolist()
-            
-            # 모든 값을 합침
-            all_values = header_values + data_values
-            
-            # 배치 업데이트
-            worksheet.update(f'A1:{chr(64 + df.shape[1])}{df.shape[0] + 1}', all_values)
-            logger.info(f"워크시트 '{sheet_name}'에 전체 데이터 업데이트 완료: {df.shape[0]}행 {df.shape[1]}열")
-            
-            # 메타 정보 추가
-            meta_row = df.shape[0] + 3  # 데이터 이후 빈 행 두 개 건너뛰기
-            
-            meta_data = [
-                ["업데이트 정보"],
-                ["날짜", date_str],
-                ["업데이트 시간", datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-            ]
-            
-            # 게시물 정보가 있으면 추가
-            if post_info:
-                meta_data.append(["게시물 제목", post_info.get('title', '')])
-                meta_data.append(["게시물 URL", post_info.get('url', '')])
-            
-            # 메타 정보 업데이트
-            worksheet.update(f'A{meta_row}:B{meta_row + len(meta_data)}', meta_data)
-            logger.info(f"워크시트 '{sheet_name}'에 메타 정보 추가 완료")
-            
-            # 서식 설정 (선택 사항)
-            try:
-                # 헤더 행 강조
-                worksheet.format(f'A1:{chr(64 + df.shape[1])}1', {
-                    "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
-                    "textFormat": {"bold": True}
-                })
-                logger.info(f"워크시트 '{sheet_name}'의 헤더 행 서식 설정 완료")
-            except Exception as format_err:
-                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
-            
-            return True
-        
-        except gspread.exceptions.APIError as api_err:
-            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                logger.warning(f"API 속도 제한 발생: {str(api_err)}")
-                logger.info("분할 업데이트로 재시도...")
-                
-                # 작은 배치로 분할 업데이트
-                batch_size = 100  # 한 번에 100행씩 업데이트
-                
-                # 먼저 헤더 업데이트
-                worksheet.update('A1:1', [df.columns.tolist()])
-                time.sleep(2)  # API 제한 방지
-                
-                # 데이터 행 배치 업데이트
-                for i in range(0, df.shape[0], batch_size):
-                    end_idx = min(i + batch_size, df.shape[0])
-                    batch_range = f'A{i+2}:{chr(64 + df.shape[1])}{end_idx+1}'
-                    batch_data = df.iloc[i:end_idx].values.tolist()
-                    
-                    try:
-                        worksheet.update(batch_range, batch_data)
-                        logger.info(f"배치 {i+1}~{end_idx} 업데이트 완료")
-                        time.sleep(2)  # API 제한 방지
-                    except Exception as batch_err:
-                        logger.error(f"배치 {i+1}~{end_idx} 업데이트 중 오류: {str(batch_err)}")
-                
-                logger.info(f"워크시트 '{sheet_name}' 분할 업데이트 완료")
-                return True
-            else:
-                logger.error(f"API 오류: {str(api_err)}")
-                return False
-                
-        except Exception as update_err:
-            logger.error(f"데이터 업데이트 중 오류: {str(update_err)}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"시트 '{sheet_name}' 업데이트 중 오류: {str(e)}")
-        return False
+    """이전 함수와의 호환성을 위한 래퍼"""
+    return update_sheet(spreadsheet, sheet_name, df, date_str, post_info, {'mode': 'replace'})
 
 def ensure_metadata_sheet(spreadsheet):
     """
@@ -7341,6 +7253,297 @@ def open_spreadsheet_with_retry(client, max_retries=3, retry_delay=2):
     
     return None
 
+def update_sheet(spreadsheet, sheet_name, data, date_str=None, post_info=None, options=None):
+    """
+    통합된 시트 업데이트 함수 - 다양한 모드와 재시도 로직 포함
+    
+    Args:
+        spreadsheet: gspread Spreadsheet 객체
+        sheet_name: 업데이트할 시트 이름
+        data: DataFrame 또는 다른 데이터 구조
+        date_str: 날짜 문자열 (열 헤더로 사용)
+        post_info: 게시물 정보 (선택 사항)
+        options: 업데이트 옵션 딕셔너리
+            - mode: 'append'(기존 시트에 추가), 'replace'(시트 대체), 'update'(특정 셀 업데이트)
+            - max_retries: 최대 재시도 횟수
+            - batch_size: 배치 크기
+            - add_metadata: 메타데이터 추가 여부
+            - format_header: 헤더 서식 설정 여부
+        
+    Returns:
+        bool: 업데이트 성공 여부
+    """
+    # 기본 옵션 설정
+    if options is None:
+        options = {}
+    
+    mode = options.get('mode', 'append')
+    max_retries = options.get('max_retries', 3)
+    batch_size = options.get('batch_size', 100)
+    add_metadata_flag = options.get('add_metadata', True)
+    format_header = options.get('format_header', True)
+    
+    logger.info(f"시트 업데이트 시작: '{sheet_name}', 모드: {mode}, 최대 재시도: {max_retries}")
+    
+    # DataFrame 확인 및 정제
+    if isinstance(data, pd.DataFrame):
+        df = validate_and_clean_dataframe(data.copy())
+        if df.empty:
+            logger.warning(f"데이터 정제 후 빈 DataFrame, 업데이트 중단")
+            return False
+    else:
+        logger.error(f"지원되지 않는 데이터 타입: {type(data)}")
+        return False
+    
+    # 재시도 로직
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # 모드별 처리
+            if mode == 'replace':
+                success = _replace_sheet(spreadsheet, sheet_name, df, date_str, post_info, 
+                                       batch_size, add_metadata_flag, format_header)
+            elif mode == 'append':
+                success = _append_to_sheet(spreadsheet, sheet_name, df, date_str, post_info,
+                                         batch_size)
+            elif mode == 'update':
+                success = _update_sheet_cells(spreadsheet, sheet_name, df, date_str, post_info,
+                                            batch_size)
+            else:
+                logger.error(f"지원되지 않는 업데이트 모드: {mode}")
+                return False
+            
+            if success:
+                logger.info(f"시트 '{sheet_name}' 업데이트 성공 (모드: {mode})")
+                return True
+            else:
+                # 부분 실패 - 재시도
+                retry_count += 1
+                logger.warning(f"시트 업데이트 부분 실패, 재시도 중... ({retry_count}/{max_retries})")
+                time.sleep(2 * retry_count)  # 지수 백오프
+        except gspread.exceptions.APIError as api_err:
+            retry_count += 1
+            last_error = api_err
+            
+            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                # API 제한 - 더 오래 대기 후 재시도
+                wait_time = 5 + (3 * retry_count)
+                logger.warning(f"API 속도 제한, {wait_time}초 대기 후 재시도 ({retry_count}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"API 오류: {str(api_err)}, 재시도 ({retry_count}/{max_retries})")
+                time.sleep(2 * retry_count)
+        except Exception as e:
+            retry_count += 1
+            last_error = e
+            logger.error(f"시트 업데이트 중 오류: {str(e)}, 재시도 ({retry_count}/{max_retries})")
+            time.sleep(2 * retry_count)
+    
+    # 모든 재시도 실패
+    logger.error(f"시트 '{sheet_name}' 업데이트 실패 (최대 재시도 횟수 초과): {str(last_error)}")
+    return False
+
+# 모드별 처리 함수들 (private helper 함수들)
+def _replace_sheet(spreadsheet, sheet_name, df, date_str, post_info, batch_size, add_metadata, format_header):
+    """시트를 완전히 대체하는 모드 처리"""
+    try:
+        # 기존 시트 삭제
+        try:
+            existing_sheet = spreadsheet.worksheet(sheet_name)
+            spreadsheet.del_worksheet(existing_sheet)
+            logger.info(f"기존 워크시트 삭제: {sheet_name}")
+            time.sleep(2)
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info(f"기존 워크시트 없음: {sheet_name}")
+        
+        # 새 시트 생성
+        rows = max(df.shape[0] + 20, 100)  # 여유 공간 추가
+        cols = max(df.shape[1] + 10, 26)  # 최소 A-Z까지
+        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
+        logger.info(f"새 워크시트 생성: {sheet_name} (행: {rows}, 열: {cols})")
+        
+        # 전체 데이터 업데이트
+        if df.shape[0] > batch_size:
+            # 대용량 데이터는 배치 처리
+            _update_in_batches(worksheet, df, batch_size)
+        else:
+            # 작은 데이터는 한 번에 업데이트
+            header_values = [df.columns.tolist()]
+            data_values = df.values.tolist()
+            all_values = header_values + data_values
+            
+            update_range = f'A1:{chr(64 + df.shape[1])}{df.shape[0] + 1}'
+            worksheet.update(update_range, all_values)
+            logger.info(f"전체 데이터 업데이트 완료: {df.shape[0]}행 {df.shape[1]}열")
+        
+        # 메타데이터 추가
+        if add_metadata:
+            _add_metadata_to_sheet(worksheet, df, date_str, post_info)
+        
+        # 헤더 서식 설정
+        if format_header:
+            try:
+                worksheet.format(f'A1:{chr(64 + df.shape[1])}1', {
+                    "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                    "textFormat": {"bold": True}
+                })
+                logger.info(f"헤더 행 서식 설정 완료")
+            except Exception as format_err:
+                logger.warning(f"서식 설정 중 오류: {str(format_err)}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"시트 대체 중 오류: {str(e)}")
+        return False
+
+def _append_to_sheet(spreadsheet, sheet_name, df, date_str, post_info, batch_size):
+    """기존 시트에 열 추가하는 모드 처리"""
+    try:
+        # 워크시트 찾기 또는 생성
+        try:
+            worksheet = spreadsheet.worksheet(sheet_name)
+            logger.info(f"기존 워크시트 찾음: {sheet_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            # 새 워크시트 생성
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="1000", cols="50")
+            logger.info(f"새 워크시트 생성: {sheet_name}")
+            
+            # 헤더 행 설정
+            worksheet.update_cell(1, 1, "항목")
+            time.sleep(1)
+        
+        # 현재 워크시트 열 헤더 및 항목 가져오기
+        headers = worksheet.row_values(1) or ["항목"]
+        if not headers or len(headers) == 0:
+            worksheet.update_cell(1, 1, "항목")
+            headers = ["항목"]
+            time.sleep(1)
+        
+        existing_items = worksheet.col_values(1)[1:] or []  # 헤더 제외
+        
+        # 날짜 열 확인 (이미 존재하는지)
+        if date_str in headers:
+            col_idx = headers.index(date_str) + 1
+            logger.info(f"'{date_str}' 열이 이미 위치 {col_idx}에 존재합니다")
+        else:
+            # 새 날짜 열 추가
+            col_idx = len(headers) + 1
+            worksheet.update_cell(1, col_idx, date_str)
+            logger.info(f"위치 {col_idx}에 새 열 '{date_str}' 추가")
+            time.sleep(1)
+        
+        # 항목-값 업데이트 준비
+        key_col = df.columns[0]
+        items = df[key_col].astype(str).tolist()
+        
+        value_col = df.columns[1] if df.shape[1] >= 2 else key_col
+        values = df[value_col].astype(str).tolist()
+        
+        # 배치 업데이트 준비
+        cell_updates = []
+        new_items_count = 0
+        
+        for item, value in zip(items, values):
+            if not item or not item.strip():
+                continue
+            
+            # 항목이 이미 존재하는지 확인
+            if item in existing_items:
+                row_idx = existing_items.index(item) + 2  # 헤더와 0-인덱스 보정
+            else:
+                # 새 항목은 끝에 추가
+                row_idx = len(existing_items) + 2
+                
+                # 항목 업데이트
+                cell_updates.append({
+                    'range': f'A{row_idx}',
+                    'values': [[item]]
+                })
+                existing_items.append(item)
+                new_items_count += 1
+            
+            # 값 업데이트
+            value_str = value if pd.notna(value) else ""
+            cell_updates.append({
+                'range': f'{chr(64 + col_idx)}{row_idx}',
+                'values': [[value_str]]
+            })
+        
+        # 업데이트 실행
+        if cell_updates:
+            _process_batch_updates(worksheet, cell_updates, batch_size)
+            logger.info(f"{len(cell_updates)}개 셀 업데이트 완료 (새 항목: {new_items_count}개)")
+            return True
+        else:
+            logger.warning(f"업데이트할 셀이 없습니다")
+            return True  # 업데이트할 것이 없는 것도 성공으로 간주
+    except Exception as e:
+        logger.error(f"시트 추가 모드 처리 중 오류: {str(e)}")
+        return False
+
+def _update_sheet_cells(spreadsheet, sheet_name, df, date_str, post_info, batch_size):
+    """특정 셀만 업데이트하는 모드 처리"""
+    # 이 함수는 필요에 따라 구현
+    # 기존 _append_to_sheet와 유사하지만 특정 셀만 대상으로 함
+    pass
+
+def _update_in_batches(worksheet, df, batch_size=100):
+    """대용량 DataFrame 분할 업데이트"""
+    try:
+        # 헤더 먼저 업데이트
+        worksheet.update('A1:1', [df.columns.tolist()])
+        time.sleep(2)
+        
+        # 데이터 행 배치 업데이트
+        for i in range(0, df.shape[0], batch_size):
+            end_idx = min(i + batch_size, df.shape[0])
+            batch_range = f'A{i+2}:{chr(64 + df.shape[1])}{end_idx+1}'
+            batch_data = df.iloc[i:end_idx].values.tolist()
+            
+            worksheet.update(batch_range, batch_data)
+            logger.info(f"배치 {i+1}~{end_idx} 업데이트 완료")
+            time.sleep(2)
+        
+        return True
+    except Exception as e:
+        logger.error(f"배치 업데이트 중 오류: {str(e)}")
+        raise  # 상위 함수에서 재시도 처리
+
+def _process_batch_updates(worksheet, updates, batch_size=10):
+    """셀 업데이트 배치 처리"""
+    for i in range(0, len(updates), batch_size):
+        batch = updates[i:i+batch_size]
+        worksheet.batch_update(batch)
+        logger.info(f"일괄 업데이트 {i+1}~{min(i+batch_size, len(updates))} 완료")
+        time.sleep(1)
+    return True
+
+def _add_metadata_to_sheet(worksheet, df, date_str, post_info):
+    """시트에 메타데이터 추가"""
+    try:
+        meta_row = df.shape[0] + 3  # 데이터 이후 빈 행 두 개 건너뛰기
+        
+        meta_data = [
+            ["업데이트 정보"],
+            ["날짜", date_str or datetime.now().strftime('%Y-%m-%d')],
+            ["업데이트 시간", datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+        ]
+        
+        # 게시물 정보가 있으면 추가
+        if post_info:
+            meta_data.append(["게시물 제목", post_info.get('title', '')])
+            meta_data.append(["게시물 URL", post_info.get('url', '')])
+        
+        # 메타 정보 업데이트
+        worksheet.update(f'A{meta_row}:B{meta_row + len(meta_data)}', meta_data)
+        logger.info(f"메타 정보 추가 완료")
+        return True
+    except Exception as e:
+        logger.warning(f"메타데이터 추가 중 오류: {str(e)}")
+        return False
+
 def update_sheet_from_dataframe(worksheet, df, col_idx):
     """데이터프레임으로 워크시트 업데이트 (배치 처리)"""
     try:
@@ -7419,89 +7622,8 @@ def update_sheet_from_dataframe(worksheet, df, col_idx):
 
 
 def update_single_sheet_with_retry(spreadsheet, sheet_name, df, date_str, max_retries=3):
-    """
-    Update a single sheet with retry logic.
-    
-    Args:
-        spreadsheet: gspread Spreadsheet object
-        sheet_name: Name of the sheet to update
-        df: pandas DataFrame with data
-        date_str: Date string for the column header
-        max_retries: Maximum number of retry attempts
-        
-    Returns:
-        bool: True if update was successful, False otherwise
-    """
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            # Get or create worksheet
-            try:
-                worksheet = spreadsheet.worksheet(sheet_name)
-                logger.info(f"Found existing worksheet: {sheet_name}")
-            except gspread.exceptions.WorksheetNotFound:
-                # Create new worksheet
-                worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=50)
-                logger.info(f"Created new worksheet: {sheet_name}")
-                
-                # Set header for new worksheet
-                worksheet.update_cell(1, 1, "항목")
-                time.sleep(1)  # Avoid rate limiting
-            
-            # Get existing headers
-            headers = worksheet.row_values(1)
-            
-            # Ensure we have at least one header
-            if not headers or len(headers) == 0:
-                worksheet.update_cell(1, 1, "항목")
-                headers = ["항목"]
-                time.sleep(1)
-            
-            # Find or add date column
-            if date_str in headers:
-                col_idx = headers.index(date_str) + 1
-                logger.info(f"Found existing column for {date_str} at position {col_idx}")
-            else:
-                # Add new date column
-                col_idx = len(headers) + 1
-                worksheet.update_cell(1, col_idx, date_str)
-                logger.info(f"Added new column for {date_str} at position {col_idx}")
-                time.sleep(1)
-            
-            # Update data using optimized batched updates
-            success = update_sheet_data_batched(worksheet, df, col_idx)
-            
-            if success:
-                return True
-            else:
-                retry_count += 1
-                logger.warning(f"Failed to update sheet data, retrying ({retry_count}/{max_retries})")
-                time.sleep(2 ** retry_count)  # Exponential backoff
-                
-        except gspread.exceptions.APIError as api_err:
-            retry_count += 1
-            
-            if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
-                wait_time = 5 + (2 ** retry_count)  # Exponential backoff with base delay
-                logger.warning(f"API rate limit hit, waiting {wait_time} seconds")
-                time.sleep(wait_time)
-            else:
-                logger.error(f"Google Sheets API error: {str(api_err)}")
-                if retry_count < max_retries:
-                    time.sleep(2)
-                else:
-                    return False
-        
-        except Exception as e:
-            logger.error(f"Error updating sheet {sheet_name}: {str(e)}")
-            retry_count += 1
-            if retry_count < max_retries:
-                time.sleep(2)
-            else:
-                return False
-    
-    return False
+    """이전 함수와의 호환성을 위한 래퍼"""
+    return update_sheet(spreadsheet, sheet_name, df, date_str, None, {'mode': 'append', 'max_retries': max_retries})
 
 
 
