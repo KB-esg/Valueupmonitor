@@ -8541,8 +8541,8 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 
 def update_consolidated_sheets(client, data_updates):
     """
-    Simplified function to update consolidated sheets with the latest column from Raw sheets.
-    This function has been debugged to ensure proper data transfer.
+    개선된 통합 시트 업데이트 함수.
+    Raw 시트의 데이터를 통합 시트로 복사하는 작업을 수행합니다.
     
     Args:
         client: gspread client instance
@@ -8552,37 +8552,57 @@ def update_consolidated_sheets(client, data_updates):
         int: Number of successfully updated consolidated sheets
     """
     if not client or not data_updates:
-        logger.error("Missing client or data for consolidated update")
+        logger.error("통합 시트 업데이트 실패: 클라이언트 또는 데이터 없음")
         return 0
         
     try:
-        # Open spreadsheet
+        # 스프레드시트 열기
         spreadsheet = open_spreadsheet_with_retry(client)
         if not spreadsheet:
-            logger.error("Failed to open spreadsheet")
+            logger.error("스프레드시트 열기 실패")
             return 0
             
-        # Get all worksheets
+        # 모든 워크시트 가져오기
         all_worksheets = spreadsheet.worksheets()
         worksheet_map = {ws.title: ws for ws in all_worksheets}
-        logger.info(f"Found {len(worksheet_map)} worksheets")
+        logger.info(f"스프레드시트에서 {len(worksheet_map)}개 워크시트 발견")
         
-        # Find Raw and corresponding consolidated sheets
+        # Raw 시트와 대응하는 통합 시트 찾기
+        # 기존 로직은 정확히 "_Raw"로 끝나는 시트만 찾았습니다.
+        # 이제 모든 Raw 시트를 찾고, 통합 시트가 없다면 생성합니다.
         raw_sheets = []
         for title in worksheet_map.keys():
+            # Raw 시트 찾기
             if title.endswith('_Raw'):
                 base_name = title[:-4]  # Remove "_Raw"
                 consol_name = f"{base_name}_통합"
                 
+                # 통합 시트가 있는지 확인
                 if consol_name in worksheet_map:
                     raw_sheets.append((title, consol_name))
-                    logger.info(f"Found pair: {title} -> {consol_name}")
+                    logger.info(f"Raw-통합 시트 쌍 발견: {title} -> {consol_name}")
+                else:
+                    # 통합 시트 생성 필요
+                    logger.info(f"통합 시트 없음, '{consol_name}' 생성 예정")
+                    raw_sheets.append((title, consol_name))
         
         if not raw_sheets:
-            logger.warning("No Raw-Consolidated sheet pairs found")
+            # 기존 로직으로 찾지 못했다면 모든 Raw 시트에 대해 통합 시트 생성 필요
+            logger.warning("Raw-통합 시트 쌍을 찾지 못함, Raw 시트 기반으로 새 통합 시트 생성 시도")
+            
+            # 모든 Raw 시트 찾기
+            for title in worksheet_map.keys():
+                if '_Raw' in title:
+                    base_name = title.split('_Raw')[0]
+                    consol_name = f"{base_name}_통합"
+                    raw_sheets.append((title, consol_name))
+                    logger.info(f"Raw 시트 발견, 통합 시트 생성 예정: {title} -> {consol_name}")
+        
+        if not raw_sheets:
+            logger.warning("통합할 Raw 시트를 찾을 수 없음")
             return 0
         
-        # Get the latest date from data updates
+        # 최신 날짜 가져오기
         latest_date = None
         for update in data_updates:
             if 'date' in update:
@@ -8603,39 +8623,57 @@ def update_consolidated_sheets(client, data_updates):
         if not latest_date:
             latest_date = datetime.now().strftime("%Y년 %m월")
             
-        logger.info(f"Using date column: {latest_date}")
+        logger.info(f"통합 시트 날짜 컬럼: {latest_date}")
         
-        # Update each consolidated sheet
+        # 각 통합 시트 업데이트
         updated_count = 0
         
         for raw_name, consol_name in raw_sheets:
             try:
-                # Get worksheets
-                raw_ws = worksheet_map[raw_name]
-                consol_ws = worksheet_map[consol_name]
+                # Raw 시트 가져오기
+                raw_ws = worksheet_map.get(raw_name)
+                if not raw_ws:
+                    logger.warning(f"Raw 시트를 찾을 수 없음: {raw_name}")
+                    continue
                 
-                # Get all data from both sheets
+                # 통합 시트 찾기 또는 생성
+                if consol_name in worksheet_map:
+                    consol_ws = worksheet_map[consol_name]
+                    logger.info(f"기존 통합 시트 사용: {consol_name}")
+                else:
+                    # 새 통합 시트 생성
+                    try:
+                        consol_ws = spreadsheet.add_worksheet(title=consol_name, rows=1000, cols=100)
+                        logger.info(f"새 통합 시트 생성됨: {consol_name}")
+                        # 통합 시트에 초기 헤더 추가
+                        consol_ws.update_cell(1, 1, "기준일자")
+                        time.sleep(1)  # API 제한 방지
+                    except Exception as create_err:
+                        logger.error(f"통합 시트 생성 실패 {consol_name}: {str(create_err)}")
+                        continue
+                
+                # Raw 시트와 통합 시트의 모든 데이터 가져오기
                 raw_data = raw_ws.get_all_values()
                 consol_data = consol_ws.get_all_values()
                 
                 if not raw_data:
-                    logger.warning(f"Raw sheet {raw_name} is empty")
+                    logger.warning(f"Raw 시트 {raw_name}가 비어 있음")
                     continue
-                    
-                # DEBUG: Print sample of raw data
-                logger.info(f"Raw sheet {raw_name} data sample: {raw_data[0][:5]}...")
-                if len(raw_data) > 1:
-                    logger.info(f"First data row: {raw_data[1][:5]}...")
                 
-                # Find the last non-empty column in Raw sheet
+                # 디버깅: Raw 데이터 샘플 출력
+                logger.info(f"Raw 시트 {raw_name} 데이터 샘플: {raw_data[0][:5]}...")
+                if len(raw_data) > 1:
+                    logger.info(f"첫 번째 데이터 행: {raw_data[1][:5]}...")
+                
+                # 마지막 컬럼 찾기
                 raw_headers = raw_data[0]
                 last_col_idx = -1
                 
-                # Start from the last column and work backwards
+                # 마지막 컬럼부터 역순으로 데이터가 있는 컬럼 찾기
                 for col_idx in range(len(raw_headers)-1, 0, -1):
-                    # Check if column has data
+                    # 컬럼에 데이터가 있는지 확인
                     has_data = False
-                    for row_idx in range(1, min(10, len(raw_data))):  # Check first 10 rows
+                    for row_idx in range(1, min(10, len(raw_data))):  # 처음 10개 행 확인
                         if col_idx < len(raw_data[row_idx]) and raw_data[row_idx][col_idx] and \
                            raw_data[row_idx][col_idx].lower() not in ('none', 'nan', '-'):
                             has_data = True
@@ -8646,34 +8684,34 @@ def update_consolidated_sheets(client, data_updates):
                         break
                 
                 if last_col_idx <= 0:
-                    logger.warning(f"Could not find data column in {raw_name}")
+                    logger.warning(f"{raw_name}에서 데이터 컬럼을 찾을 수 없음")
                     continue
-                    
-                # DEBUG: Show the selected column
-                logger.info(f"Using column {last_col_idx} from {raw_name}: {raw_headers[last_col_idx]}")
                 
-                # Initialize consolidated sheet if empty
+                # 선택된 컬럼 디버깅 정보
+                logger.info(f"{raw_name}에서 컬럼 {last_col_idx} 사용: {raw_headers[last_col_idx]}")
+                
+                # 통합 시트 초기화 (비어있는 경우)
                 if not consol_data or len(consol_data[0]) == 0:
                     consol_ws.update_cell(1, 1, "기준일자")
                     consol_data = [["기준일자"]]
-                    time.sleep(2)
+                    time.sleep(1)
                 
-                # Find or add date column in consolidated sheet
+                # 통합 시트에 날짜 컬럼 찾기 또는 추가
                 consol_headers = consol_data[0]
                 if latest_date in consol_headers:
                     date_col_idx = consol_headers.index(latest_date) + 1
-                    logger.info(f"Found existing date column at {date_col_idx}")
+                    logger.info(f"기존 날짜 컬럼 위치: {date_col_idx}")
                 else:
                     date_col_idx = len(consol_headers) + 1
                     consol_ws.update_cell(1, date_col_idx, latest_date)
-                    logger.info(f"Added new date column at {date_col_idx}: {latest_date}")
-                    time.sleep(2)
+                    logger.info(f"새 날짜 컬럼 추가: {date_col_idx}: {latest_date}")
+                    time.sleep(1)
                 
-                # Extract keys and values from Raw sheet
+                # Raw 시트에서 키-값 추출
                 updates = []
-                row_keys = {}  # Map of keys to row indices
+                row_keys = {}  # 키 텍스트 -> 행 인덱스 매핑
                 
-                # Get existing items in consolidated sheet
+                # 통합 시트의 기존 항목 가져오기
                 existing_keys = []
                 if len(consol_data) > 1:
                     for i in range(1, len(consol_data)):
@@ -8681,17 +8719,17 @@ def update_consolidated_sheets(client, data_updates):
                             existing_keys.append(consol_data[i][0])
                             row_keys[consol_data[i][0]] = i + 1  # +1 for 1-indexed rows
                 
-                # Process each row in Raw sheet
+                # Raw 시트의 각 행 처리
                 for i in range(1, len(raw_data)):
                     if i < len(raw_data) and len(raw_data[i]) > 0:
                         key = raw_data[i][0]
                         if not key or key.lower() in ('none', 'nan'):
                             continue
-                            
-                        # Get value from last column
+                        
+                        # 마지막 컬럼의 값 가져오기
                         value = raw_data[i][last_col_idx] if last_col_idx < len(raw_data[i]) else ""
                         
-                        # Determine row in consolidated sheet
+                        # 통합 시트의 행 결정
                         if key in row_keys:
                             row_idx = row_keys[key]
                         else:
@@ -8699,63 +8737,65 @@ def update_consolidated_sheets(client, data_updates):
                             existing_keys.append(key)
                             row_keys[key] = row_idx
                             
-                            # Add key to first column
+                            # 첫 번째 컬럼에 키 추가
                             updates.append({
                                 'range': f'A{row_idx}',
                                 'values': [[key]]
                             })
                         
-                        # Add value to date column
+                        # 날짜 컬럼에 값 추가
                         updates.append({
                             'range': f'{chr(64 + date_col_idx)}{row_idx}',
                             'values': [[value]]
                         })
                 
-                # Apply updates in small batches
+                # 업데이트 수행
                 if updates:
-                    logger.info(f"Applying {len(updates)} updates to {consol_name}")
+                    logger.info(f"{consol_name}에 {len(updates)}개 업데이트 적용")
                     batch_size = 10
                     
                     for i in range(0, len(updates), batch_size):
                         batch = updates[i:i+batch_size]
                         try:
                             consol_ws.batch_update(batch)
-                            logger.info(f"Applied batch {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1}")
-                            time.sleep(2)
+                            logger.info(f"배치 {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1} 성공")
+                            time.sleep(1)
                         except Exception as batch_err:
-                            logger.error(f"Batch update failed: {str(batch_err)}")
+                            logger.error(f"배치 업데이트 실패: {str(batch_err)}")
                             
-                            # Try individual updates as fallback
+                            # 개별 업데이트로 폴백
                             for update in batch:
                                 try:
                                     consol_ws.batch_update([update])
                                     time.sleep(1)
                                 except Exception as single_err:
-                                    logger.error(f"Single update failed: {str(single_err)}")
+                                    logger.error(f"단일 업데이트 실패: {str(single_err)}")
                     
-                    # Add verification timestamp
+                    # 타임스탬프 업데이트
                     try:
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         footer_row = len(existing_keys) + 5
                         
                         consol_ws.update_cell(footer_row, 1, "Last Updated")
                         consol_ws.update_cell(footer_row, 2, timestamp)
-                        logger.info(f"Added update timestamp to {consol_name}")
+                        logger.info(f"{consol_name}에 타임스탬프 추가")
                     except Exception as ts_err:
-                        logger.warning(f"Could not add timestamp: {str(ts_err)}")
+                        logger.warning(f"타임스탬프 추가 실패: {str(ts_err)}")
                     
                     updated_count += 1
                 else:
-                    logger.warning(f"No updates needed for {consol_name}")
+                    logger.warning(f"{consol_name}에 필요한 업데이트가 없음")
                     
             except Exception as sheet_err:
-                logger.error(f"Error processing {raw_name}/{consol_name}: {str(sheet_err)}")
+                logger.error(f"{raw_name}/{consol_name} 처리 중 오류: {str(sheet_err)}")
         
-        logger.info(f"Consolidated update complete: {updated_count} sheets updated")
+        logger.info(f"통합 시트 업데이트 완료: {updated_count}개 시트 업데이트됨")
         return updated_count
         
     except Exception as e:
-        logger.error(f"Consolidated update failed: {str(e)}")
+        logger.error(f"통합 시트 업데이트 실패: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return 0
 
 
