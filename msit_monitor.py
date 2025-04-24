@@ -3166,61 +3166,62 @@ def try_ajax_access(driver, post):
 
 def access_iframe_with_ocr_fallback(driver, file_params):
     """
-    iframe 직접 접근 시도 후 실패시 OCR 추출 사용
-    향상된 접근 방식과 다양한 추출 전략 포함
+    Enhanced function to extract data from document viewer with multiple fallback mechanisms.
+    This function first tries direct iframe access, then falls back to structured HTML extraction,
+    JavaScript-based extraction, and finally OCR if needed.
     
     Args:
-        driver: Selenium WebDriver 인스턴스
-        file_params: 파일 파라미터를 포함한 딕셔너리
+        driver: Selenium WebDriver instance
+        file_params: Dictionary with file parameters
         
     Returns:
-        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리 또는 None
+        dict: Dictionary mapping sheet names to DataFrames, or None if extraction fails
     """
-    # 1. 기존 iframe 접근 방식 시도
+    # 1. First, try direct iframe access method
     sheets_data = access_iframe_direct(driver, file_params)
     
-    # 정상적으로 데이터 추출에 성공한 경우
+    # Check if data was successfully extracted
     if sheets_data and any(not df.empty for df in sheets_data.values()):
-        logger.info(f"iframe 직접 접근으로 데이터 추출 성공: {len(sheets_data)}개 시트 추출")
+        logger.info(f"Direct iframe access successful: extracted {len(sheets_data)} sheets")
         
-        # 데이터 품질 검증
+        # Validate data quality
         valid_sheets = {}
         for sheet_name, df in sheets_data.items():
             if df is not None and not df.empty:
-                # 기본 품질 체크: 합리적인 데이터가 있는지 확인
+                # Basic quality check: ensure reasonable data exists
                 if df.shape[0] >= 2 and df.shape[1] >= 2:
                     valid_sheets[sheet_name] = df
-                    logger.info(f"시트 {sheet_name} 검증 완료: {df.shape[0]}행 {df.shape[1]}열")
+                    logger.info(f"Sheet '{sheet_name}' validated: {df.shape[0]} rows, {df.shape[1]} columns")
                 else:
-                    logger.warning(f"시트 {sheet_name}의 데이터가 불충분합니다: {df.shape}")
+                    logger.warning(f"Sheet '{sheet_name}' has insufficient data: {df.shape}")
         
-        # 유효한 시트가 있으면 반환
+        # Return validated sheets if any exist
         if valid_sheets:
             return valid_sheets
         else:
-            logger.warning("iframe 직접 접근 결과에서 유효한 시트를 찾을 수 없습니다")
+            logger.warning("No valid sheets found in direct iframe results")
     else:
-        logger.warning("iframe 직접 접근 실패 또는 빈 데이터 반환")
+        logger.warning("Direct iframe access failed or returned empty data")
     
-    # 2. 전체 문서 전용 모드 활성화
     try:
-        logger.info("전체 문서 보기 모드 활성화 시도")
+        # 2. Try to activate document full view mode
+        logger.info("Activating document full view mode")
         
-        # 문서 뷰어 스케일 설정 (더 많은 콘텐츠 표시)
+        # Adjust document viewer scale (show more content)
         scale_script = """
         try {
-            // Synap 뷰어일 경우
+            // For Synap viewer
             if (typeof localSynap !== 'undefined') {
-                // 축소하여 전체 문서가 보이도록 함
+                // Zoom out to show entire document
                 localSynap.setZoom(0.5);
                 return "Synap viewer zoom adjusted";
             }
             
-            // 일반 문서인 경우 CSS transform 사용
+            // For regular documents, use CSS transform
             document.body.style.transform = 'scale(0.5)';
             document.body.style.transformOrigin = 'top left';
             
-            // 문서의 모든 스크롤 컨테이너 확장
+            // Expand all scroll containers
             var containers = document.querySelectorAll('.scroll-container, [style*="overflow"]');
             for (var i = 0; i < containers.length; i++) {
                 containers[i].style.height = 'auto';
@@ -3234,369 +3235,311 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         }
         """
         result = driver.execute_script(scale_script)
-        logger.info(f"스케일 조정 결과: {result}")
+        logger.info(f"Scale adjustment result: {result}")
         
-        # 잠시 대기하여 조정 적용
+        # Wait for adjustments to apply
         time.sleep(1)
-    except Exception as scale_err:
-        logger.warning(f"문서 스케일 조정 실패: {str(scale_err)}")
-    
-    # 3. 전체 HTML 내용을 JavaScript로 추출 시도
-    try:
-        logger.info("전체 HTML 내용을 JavaScript로 추출 시도")
-        entire_html = driver.execute_script("return document.documentElement.innerHTML;")
-        if entire_html:
-            # 디버깅용 HTML 저장
-            with open(f"entire_html_{int(time.time())}.html", 'w', encoding='utf-8') as f:
-                f.write(entire_html)
-            
-            # HTML에서 데이터 추출
-            js_extracted_data = extract_data_from_html(entire_html)
-            if js_extracted_data and any(not df.empty for df in js_extracted_data.values()):
-                logger.info(f"전체 HTML에서 {len(js_extracted_data)}개 시트 추출 성공")
-                return js_extracted_data
-    except Exception as js_err:
-        logger.warning(f"JavaScript HTML 추출 시도 실패: {str(js_err)}")
-    
-    # 4. JavaScript로 직접 표 데이터 추출
-    try:
-        logger.info("JavaScript로 표 데이터 직접 추출 시도")
-        js_data = extract_with_javascript(driver)
-        if js_data and any(not df.empty for df in js_data.values()):
-            logger.info(f"JavaScript로 {len(js_data)}개 시트 추출 성공")
-            return js_data
-    except Exception as js_err:
-        logger.warning(f"JavaScript 표 데이터 추출 시도 실패: {str(js_err)}")
-    
-    # 5. 대체 방식: SynapDocViewServer 내부 데이터구조 접근 시도
-    try:
-        logger.info("Synap 문서 뷰어 내부 데이터 접근 시도")
-        synap_data_script = """
-        try {
-            if (typeof localSynap !== 'undefined') {
-                // Synap 문서 뷰어 내부 데이터 접근
-                var sheetIndex = window.sheetIndex || 0;
-                var tableData = {};
-                
-                // 시트 데이터 직접 접근 시도
-                if (typeof WM !== 'undefined' && WM.getSheets) {
-                    var sheets = WM.getSheets();
-                    if (sheets && sheets.length > 0) {
-                        return {
-                            success: true,
-                            sheets: sheets.map(function(sheet) {
-                                return {
-                                    name: sheet.getName() || 'Sheet',
-                                    data: sheet.getData ? sheet.getData() : null
-                                };
-                            })
-                        };
-                    }
-                }
-                
-                // mainTable 요소에서 데이터 추출
-                var mainTable = document.getElementById('mainTable');
-                if (mainTable) {
-                    var rows = mainTable.querySelectorAll('div[class*="tr"]');
-                    if (!rows || rows.length === 0) {
-                        rows = mainTable.children;
-                    }
+        
+        # 3. Try alternative extraction methods
+        
+        # Method A: Extract from JavaScript data structures
+        try:
+            logger.info("Attempting extraction from JavaScript data structures")
+            js_data = extract_with_javascript(driver)
+            if js_data and any(not df.empty for df in js_data.values()):
+                logger.info(f"JavaScript extraction successful: {len(js_data)} sheets")
+                return js_data
+        except Exception as js_err:
+            logger.warning(f"JavaScript extraction failed: {str(js_err)}")
+        
+        # Method B: Extract from HTML structure
+        try:
+            logger.info("Attempting HTML structure extraction")
+            entire_html = driver.execute_script("return document.documentElement.innerHTML;")
+            html_data = extract_data_from_html(entire_html)
+            if html_data and any(not df.empty for df in html_data.values()):
+                logger.info(f"HTML extraction successful: {len(html_data)} sheets")
+                return html_data
+        except Exception as html_err:
+            logger.warning(f"HTML extraction failed: {str(html_err)}")
+        
+        # Method C: Try to access Synap document viewer internal data
+        try:
+            logger.info("Attempting to access Synap viewer internal data")
+            synap_data_script = """
+            try {
+                if (typeof localSynap !== 'undefined') {
+                    // Try to access Synap document viewer internal data
+                    var sheetIndex = window.sheetIndex || 0;
+                    var tableData = {};
                     
-                    var tableData = [];
-                    for (var i = 0; i < rows.length; i++) {
-                        var cells = rows[i].querySelectorAll('div[class*="td"]');
-                        if (!cells || cells.length === 0) {
-                            cells = rows[i].children;
-                        }
-                        
-                        var rowData = [];
-                        for (var j = 0; j < cells.length; j++) {
-                            rowData.push(cells[j].textContent.trim());
-                        }
-                        
-                        if (rowData.length > 0) {
-                            tableData.push(rowData);
+                    // Try to access sheet data directly
+                    if (typeof WM !== 'undefined' && WM.getSheets) {
+                        var sheets = WM.getSheets();
+                        if (sheets && sheets.length > 0) {
+                            return {
+                                success: true,
+                                sheets: sheets.map(function(sheet) {
+                                    return {
+                                        name: sheet.getName() || 'Sheet',
+                                        data: sheet.getData ? sheet.getData() : null
+                                    };
+                                })
+                            };
                         }
                     }
                     
-                    if (tableData.length > 0) {
-                        return {
-                            success: true,
-                            currentSheet: {
-                                name: 'MainTable',
-                                data: tableData
+                    // Try extracting from mainTable element
+                    var mainTable = document.getElementById('mainTable');
+                    if (mainTable) {
+                        var rows = mainTable.querySelectorAll('div[class*="tr"]');
+                        if (!rows || rows.length === 0) {
+                            rows = mainTable.children;
+                        }
+                        
+                        var tableData = [];
+                        for (var i = 0; i < rows.length; i++) {
+                            var cells = rows[i].querySelectorAll('div[class*="td"]');
+                            if (!cells || cells.length === 0) {
+                                cells = rows[i].children;
                             }
-                        };
+                            
+                            var rowData = [];
+                            for (var j = 0; j < cells.length; j++) {
+                                rowData.push(cells[j].textContent.trim());
+                            }
+                            
+                            if (rowData.length > 0) {
+                                tableData.push(rowData);
+                            }
+                        }
+                        
+                        if (tableData.length > 0) {
+                            return {
+                                success: true,
+                                currentSheet: {
+                                    name: 'MainTable',
+                                    data: tableData
+                                }
+                            };
+                        }
                     }
+                    
+                    return {
+                        success: false,
+                        error: 'Could not find data in Synap viewer'
+                    };
                 }
                 
                 return {
                     success: false,
-                    error: 'Could not find data in Synap viewer'
+                    error: 'Not a Synap viewer'
+                };
+            } catch (e) {
+                return {
+                    success: false,
+                    error: e.message
                 };
             }
+            """
             
-            return {
-                success: false,
-                error: 'Not a Synap viewer'
-            };
-        } catch (e) {
-            return {
-                success: false,
-                error: e.message
-            };
-        }
-        """
-        
-        synap_result = driver.execute_script(synap_data_script)
-        if synap_result and synap_result.get('success', False):
-            # 시트 데이터 처리
-            sheets_data = {}
-            
-            if 'sheets' in synap_result:
-                for sheet_info in synap_result['sheets']:
-                    sheet_name = sheet_info.get('name', 'Unknown_Sheet')
+            synap_result = driver.execute_script(synap_data_script)
+            if synap_result and synap_result.get('success', False):
+                # Process sheet data
+                sheets_data = {}
+                
+                if 'sheets' in synap_result:
+                    for sheet_info in synap_result['sheets']:
+                        sheet_name = sheet_info.get('name', 'Unknown_Sheet')
+                        sheet_data = sheet_info.get('data', [])
+                        
+                        if sheet_data and len(sheet_data) > 0:
+                            # First row is header, rest is data
+                            headers = sheet_data[0]
+                            data = sheet_data[1:]
+                            
+                            # Create auto-headers if needed
+                            if not headers or len(headers) == 0:
+                                max_cols = max(len(row) for row in data) if data else 0
+                                headers = [f"Column_{i}" for i in range(max_cols)]
+                            
+                            # Create DataFrame
+                            df = pd.DataFrame(data, columns=headers)
+                            sheets_data[sheet_name] = df
+                            logger.info(f"Extracted sheet '{sheet_name}' from Synap internal data: {df.shape[0]} rows, {df.shape[1]} columns")
+                
+                elif 'currentSheet' in synap_result:
+                    sheet_info = synap_result['currentSheet']
+                    sheet_name = sheet_info.get('name', 'Current_Sheet')
                     sheet_data = sheet_info.get('data', [])
                     
                     if sheet_data and len(sheet_data) > 0:
-                        # 첫 번째 행이 헤더, 나머지는 데이터로 처리
                         headers = sheet_data[0]
                         data = sheet_data[1:]
                         
-                        # 헤더가 없으면 자동 생성
                         if not headers or len(headers) == 0:
                             max_cols = max(len(row) for row in data) if data else 0
                             headers = [f"Column_{i}" for i in range(max_cols)]
                         
-                        # DataFrame 생성
                         df = pd.DataFrame(data, columns=headers)
                         sheets_data[sheet_name] = df
-                        logger.info(f"Synap 내부 데이터에서 시트 '{sheet_name}' 추출: {df.shape[0]}행 {df.shape[1]}열")
-            
-            elif 'currentSheet' in synap_result:
-                sheet_info = synap_result['currentSheet']
-                sheet_name = sheet_info.get('name', 'Current_Sheet')
-                sheet_data = sheet_info.get('data', [])
+                        logger.info(f"Extracted current sheet data: {df.shape[0]} rows, {df.shape[1]} columns")
                 
-                if sheet_data and len(sheet_data) > 0:
-                    # 첫 번째 행이 헤더, 나머지는 데이터로 처리
-                    headers = sheet_data[0]
-                    data = sheet_data[1:]
-                    
-                    # 헤더가 없으면 자동 생성
-                    if not headers or len(headers) == 0:
-                        max_cols = max(len(row) for row in data) if data else 0
-                        headers = [f"Column_{i}" for i in range(max_cols)]
-                    
-                    # DataFrame 생성
-                    df = pd.DataFrame(data, columns=headers)
-                    sheets_data[sheet_name] = df
-                    logger.info(f"Synap 현재 시트 데이터 추출: {df.shape[0]}행 {df.shape[1]}열")
+                if sheets_data:
+                    logger.info(f"Synap internal data extraction successful: {len(sheets_data)} sheets")
+                    return sheets_data
+        except Exception as synap_err:
+            logger.warning(f"Synap internal data access failed: {str(synap_err)}")
+        
+        # 4. If OCR is disabled, create a minimal fallback
+        if not CONFIG['ocr_enabled']:
+            logger.info("OCR is disabled, skipping OCR fallback")
             
-            if sheets_data:
-                logger.info(f"Synap 내부 데이터 접근으로 {len(sheets_data)}개 시트 추출 성공")
-                return sheets_data
-    except Exception as synap_err:
-        logger.warning(f"Synap 내부 데이터 접근 실패: {str(synap_err)}")
-    
-    # 6. 창 크기 조정 (더 많은 내용이 보이도록)
-    try:
-        original_size = driver.get_window_size()
-        logger.info(f"원래 창 크기: {original_size}")
-        
-        # 더 큰 창 크기로 조정
-        driver.set_window_size(1920, 1080)
-        time.sleep(1)  # 창 크기 조정 적용 대기
-        
-        # 전체 스크린샷 캡처
-        full_page_path = f"full_page_{int(time.time())}.png"
-        driver.save_screenshot(full_page_path)
-        logger.info(f"확대된 창에서 전체 페이지 스크린샷 캡처: {full_page_path}")
-        
-        # 원래 HTML 컨텐츠를 다시 추출 시도
-        try:
-            entire_html = driver.execute_script("return document.documentElement.innerHTML;")
-            js_extracted_data = extract_data_from_html(entire_html)
-            if js_extracted_data and any(not df.empty for df in js_extracted_data.values()):
-                logger.info(f"확대된 창에서 HTML 추출 성공: {len(js_extracted_data)}개 시트")
-                return js_extracted_data
-        except:
-            pass
-        
-        # JavaScript 추출 다시 시도
-        try:
-            js_data = extract_with_javascript(driver)
-            if js_data and any(not df.empty for df in js_data.values()):
-                logger.info(f"확대된 창에서 JavaScript 추출 성공: {len(js_data)}개 시트")
-                return js_data
-        except:
-            pass
-        
-    except Exception as window_err:
-        logger.warning(f"창 크기 조정 중 오류: {str(window_err)}")
-    
-    # OCR 기능이 비활성화된 경우 건너뛰기
-    if not CONFIG['ocr_enabled']:
-        logger.info("OCR 기능이 비활성화되어 건너뜀")
-        
-        # 다른 모든 방법 실패 시, 특별한 fallback: 스크린샷을 저장하고 추후 분석을 위한 메타데이터 저장
-        try:
-            timestamp = int(time.time())
-            fallback_path = f"document_fallback_{timestamp}.png"
-            driver.save_screenshot(fallback_path)
-            logger.info(f"모든 추출 방법 실패, 문서 스크린샷 저장: {fallback_path}")
-            
-            # 메타데이터 저장
-            meta = {
-                'timestamp': timestamp,
-                'url': driver.current_url,
-                'title': driver.title,
-                'params': {k: v for k, v in file_params.items() if k != 'post_info'}
-            }
-            with open(f"document_fallback_{timestamp}_meta.json", 'w', encoding='utf-8') as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            
-            # 최소한의 데이터를 담은 DataFrame 생성
-            df = pd.DataFrame({
-                '추출실패': ['데이터 추출 실패'],
-                '파일정보': [str(file_params.get('atch_file_no', '')) + '_' + str(file_params.get('file_ord', ''))],
-                'URL': [driver.current_url],
-                '저장된스크린샷': [fallback_path]
-            })
-            return {"추출실패": df}
-        except Exception as fallback_err:
-            logger.error(f"Fallback 생성 중 오류: {str(fallback_err)}")
-        
-        return None
-    
-    # OCR 관련 라이브러리 임포트 확인
-    try:
-        from PIL import Image, ImageEnhance, ImageFilter
-        import cv2
-        import pytesseract
-        OCR_IMPORTS_AVAILABLE = True
-    except ImportError:
-        logger.warning("OCR 관련 라이브러리가 설치되지 않아 OCR 기능을 사용할 수 없습니다")
-        return None
-    
-    # OCR 폴백
-    logger.info("OCR 기반 추출로 폴백")
-    
-    try:
-        # 디버깅용 HTML 저장
-        if file_params.get('atch_file_no') and file_params.get('file_ord'):
-            prefix = f"before_ocr_{file_params['atch_file_no']}_{file_params['file_ord']}"
-        else:
-            prefix = f"before_ocr_{int(time.time())}"
-            
-        save_html_for_debugging(driver, prefix)
-        
-        # 창 크기 최대화 (이미 설정했을 수 있지만 확실히 하기 위해)
-        driver.maximize_window()
-        time.sleep(1)
-        
-        # 전체 페이지 스크린샷 (기본)
-        full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
-        driver.save_screenshot(full_page_screenshot)
-        logger.info(f"전체 페이지 스크린샷 캡처: {full_page_screenshot}")
-        
-        # 7. 고급 OCR 전략: 문서를 분할하여 스크린샷 캡처
-        # 전체 페이지 높이 구하기
-        try:
-            page_height = int(driver.execute_script("return document.documentElement.scrollHeight"))
-            page_width = int(driver.execute_script("return document.documentElement.scrollWidth"))
-            view_height = int(driver.execute_script("return window.innerHeight"))
-            view_width = int(driver.execute_script("return window.innerWidth"))
-            
-            logger.info(f"페이지 크기: {page_width}x{page_height}, 뷰포트 크기: {view_width}x{view_height}")
-            
-            # 매우 큰 테이블인 경우 문서 스케일 축소
-            if page_height > 3 * view_height or page_width > 1.5 * view_width:
-                logger.info("큰 문서 감지됨, 스케일 추가 축소")
-                driver.execute_script("""
-                    document.body.style.transform = 'scale(0.4)';
-                    document.body.style.transformOrigin = 'top left';
-                """)
-                time.sleep(1)
-                
-                # 축소된 상태로 다시 스크린샷
-                driver.save_screenshot(f"ocr_scaled_down_{int(time.time())}.png")
-            
-            # 각 시트 탭 클릭하여 모든 시트 캡처
             try:
-                sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
-                if sheet_tabs:
-                    logger.info(f"{len(sheet_tabs)}개 시트 탭 발견, 각 시트 캡처 시도")
-                    all_sheets_data = {}
-                    
-                    # 각 시트에 대해 처리
-                    for i, tab in enumerate(sheet_tabs):
-                        try:
-                            # 시트 이름 추출
-                            sheet_name = tab.text.strip()
-                            if not sheet_name:
-                                sheet_name = f"Sheet_{i+1}"
-                                
-                            logger.info(f"시트 탭 클릭: {sheet_name}")
-                            
-                            # 시트 탭 클릭
-                            driver.execute_script("arguments[0].click();", tab)
-                            time.sleep(2)  # 콘텐츠 로딩 대기
-                            
-                            # 스크린샷 캡처
-                            sheet_screenshot = f"ocr_sheet_{sheet_name}_{int(time.time())}.png"
-                            driver.save_screenshot(sheet_screenshot)
-                            logger.info(f"시트 '{sheet_name}' 스크린샷 캡처: {sheet_screenshot}")
-                            
-                            # OCR 처리
-                            sheet_data = extract_data_from_screenshot(sheet_screenshot)
-                            if sheet_data and len(sheet_data) > 0:
-                                for j, df in enumerate(sheet_data):
-                                    if df is not None and not df.empty:
-                                        all_sheets_data[f"{sheet_name}_Table{j+1}"] = df
-                        except Exception as tab_err:
-                            logger.warning(f"시트 탭 '{sheet_name}' 처리 중 오류: {str(tab_err)}")
-                    
-                    if all_sheets_data:
-                        logger.info(f"모든 시트 탭에서 {len(all_sheets_data)}개 테이블 추출 성공")
-                        return all_sheets_data
-            except Exception as tabs_err:
-                logger.warning(f"시트 탭 처리 중 오류: {str(tabs_err)}")
-            
-            # 한 번에 전체 표가 안 보이는 경우를 위한 분할 스크린샷
-            if page_height > view_height:
-                logger.info("페이지가 뷰포트보다 큼, 분할 스크린샷 시도")
+                # Save screenshot for later analysis
+                timestamp = int(time.time())
+                fallback_path = f"document_fallback_{timestamp}.png"
+                driver.save_screenshot(fallback_path)
+                logger.info(f"Saved document screenshot for fallback: {fallback_path}")
                 
-                # 스크롤 포지션 계산 (50% 오버랩으로 분할)
-                scroll_positions = []
+                # Save metadata
+                meta = {
+                    'timestamp': timestamp,
+                    'url': driver.current_url,
+                    'title': driver.title,
+                    'params': {k: v for k, v in file_params.items() if k != 'post_info'}
+                }
+                with open(f"document_fallback_{timestamp}_meta.json", 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                
+                # Create minimal DataFrame with extraction failure info
+                df = pd.DataFrame({
+                    '추출실패': ['데이터 추출 실패'],
+                    '파일정보': [str(file_params.get('atch_file_no', '')) + '_' + str(file_params.get('file_ord', ''))],
+                    'URL': [driver.current_url],
+                    '저장된스크린샷': [fallback_path]
+                })
+                return {"추출실패": df}
+            except Exception as fallback_err:
+                logger.error(f"Fallback creation error: {str(fallback_err)}")
+            
+            return None
+        
+        # 5. Prepare for OCR as last resort
+        logger.info("Falling back to OCR-based extraction")
+        
+        try:
+            # Ensure OCR libraries are available
+            from PIL import Image, ImageEnhance, ImageFilter
+            import cv2
+            import pytesseract
+            
+            # Save debugging HTML
+            if file_params.get('atch_file_no') and file_params.get('file_ord'):
+                prefix = f"before_ocr_{file_params['atch_file_no']}_{file_params['file_ord']}"
+            else:
+                prefix = f"before_ocr_{int(time.time())}"
+                
+            # Save HTML for debugging
+            with open(f"{prefix}_source.html", 'w', encoding='utf-8') as f:
+                f.write(driver.page_source)
+            
+            # Maximize window
+            driver.maximize_window()
+            time.sleep(1)
+            
+            # Take full page screenshot
+            full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
+            driver.save_screenshot(full_page_screenshot)
+            logger.info(f"Full page screenshot captured: {full_page_screenshot}")
+            
+            # ===== IMPROVED OCR STRATEGY =====
+            
+            # A. First, try to find data in specific content areas
+            all_sheets = {}
+            content_areas = find_content_areas(driver)
+            
+            if content_areas:
+                logger.info(f"Found {len(content_areas)} potential content areas for targeted OCR")
+                
+                for i, area in enumerate(content_areas):
+                    try:
+                        # Take screenshot of specific area
+                        area_screenshot = capture_element_screenshot(driver, area, f"content_area_{i+1}")
+                        
+                        if area_screenshot:
+                            # Extract data with enhanced OCR
+                            ocr_data_list = extract_data_from_screenshot(area_screenshot)
+                            
+                            if ocr_data_list and any(not df.empty for df in ocr_data_list):
+                                logger.info(f"Successfully extracted data from content area {i+1}")
+                                for j, df in enumerate(ocr_data_list):
+                                    if df is not None and not df.empty:
+                                        sheet_name = f"OCR_영역{i+1}_테이블{j+1}"
+                                        all_sheets[sheet_name] = df
+                                        logger.info(f"Added {sheet_name}: {df.shape[0]} rows, {df.shape[1]} columns")
+                                        
+                                        # Save extracted data as CSV for verification
+                                        csv_path = f"{area_screenshot}_table{j+1}.csv"
+                                        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                                        logger.info(f"Saved extracted data to {csv_path}")
+                    except Exception as area_err:
+                        logger.error(f"Error processing content area {i+1}: {str(area_err)}")
+            
+            # B. If no success with content areas, try splitting the page into sections
+            if not all_sheets:
+                logger.info("Trying split-page OCR approach")
+                
+                # Get page dimensions
+                page_height = int(driver.execute_script("return document.documentElement.scrollHeight"))
+                page_width = int(driver.execute_script("return document.documentElement.scrollWidth"))
+                view_height = int(driver.execute_script("return window.innerHeight"))
+                
+                logger.info(f"Page dimensions: {page_width}x{page_height}, viewport height: {view_height}")
+                
+                # If page is very large, adjust scale
+                if page_height > 3 * view_height:
+                    logger.info("Large document detected, scaling down further")
+                    driver.execute_script("""
+                        document.body.style.transform = 'scale(0.4)';
+                        document.body.style.transformOrigin = 'top left';
+                    """)
+                    time.sleep(1)
+                    
+                    # Take another screenshot in scaled-down state
+                    scaled_screenshot = f"ocr_scaled_down_{int(time.time())}.png"
+                    driver.save_screenshot(scaled_screenshot)
+                
+                # Calculate split positions (with 50% overlap)
+                split_positions = []
                 current_pos = 0
                 while current_pos < page_height:
-                    scroll_positions.append(current_pos)
-                    current_pos += int(view_height * 0.5)  # 50% 오버랩
+                    split_positions.append(current_pos)
+                    current_pos += int(view_height * 0.5)  # 50% overlap
                 
-                # 마지막 위치 추가 (페이지 끝)
-                if page_height - current_pos > 100:  # 의미 있는 콘텐츠가 있을 경우만
-                    scroll_positions.append(page_height - view_height)
+                # Add last position if needed
+                if page_height - current_pos > 100:
+                    split_positions.append(page_height - view_height)
                 
-                logger.info(f"{len(scroll_positions)}개 스크롤 위치에서 분할 스크린샷 캡처 예정")
+                logger.info(f"Will capture {len(split_positions)} split screenshots")
                 
-                # 각 위치에서 스크린샷 캡처
+                # Capture split screenshots
                 split_screenshots = []
-                for i, pos in enumerate(scroll_positions):
+                for i, pos in enumerate(split_positions):
                     try:
-                        # 스크롤 이동
+                        # Scroll to position
                         driver.execute_script(f"window.scrollTo(0, {pos});")
-                        time.sleep(0.5)  # 스크롤 후 잠시 대기
+                        time.sleep(0.5)  # Wait for scroll
                         
-                        # 스크린샷 캡처
+                        # Capture screenshot
                         split_path = f"ocr_split_{i+1}_{int(time.time())}.png"
                         driver.save_screenshot(split_path)
                         split_screenshots.append(split_path)
-                        logger.info(f"분할 스크린샷 {i+1}/{len(scroll_positions)} 캡처: {split_path}")
-                    except Exception as e:
-                        logger.warning(f"분할 스크린샷 {i+1} 캡처 중 오류: {str(e)}")
+                        logger.info(f"Captured split screenshot {i+1}/{len(split_positions)}: {split_path}")
+                    except Exception as split_err:
+                        logger.warning(f"Error capturing split {i+1}: {str(split_err)}")
                 
-                # 모든 분할 스크린샷에서 OCR 데이터 추출
+                # Process each split screenshot
                 split_data = {}
                 for i, ss_path in enumerate(split_screenshots):
                     try:
@@ -3605,108 +3548,150 @@ def access_iframe_with_ocr_fallback(driver, file_params):
                             for j, df in enumerate(ocr_results):
                                 if df is not None and not df.empty:
                                     split_data[f"Split_{i+1}_Table_{j+1}"] = df
-                                    logger.info(f"분할 {i+1}, 테이블 {j+1} 추출: {df.shape[0]}행 {df.shape[1]}열")
+                                    logger.info(f"Extracted from split {i+1}, table {j+1}: {df.shape[0]} rows, {df.shape[1]} columns")
+                                    
+                                    # Save extracted data as CSV for verification
+                                    csv_path = f"{ss_path}_table{j+1}.csv"
+                                    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
                     except Exception as ocr_err:
-                        logger.warning(f"분할 {i+1} OCR 처리 중 오류: {str(ocr_err)}")
+                        logger.warning(f"Error processing split {i+1} OCR: {str(ocr_err)}")
                 
+                # Add split results to all sheets
                 if split_data:
-                    logger.info(f"분할 스크린샷에서 {len(split_data)}개 테이블 추출 성공")
-                    return split_data
-        except Exception as scroll_err:
-            logger.warning(f"분할 스크린샷 처리 중 오류: {str(scroll_err)}")
-        
-        # 8. 콘텐츠 영역 기반 OCR
-        all_sheets = {}
-        content_areas = find_content_areas(driver)
-        
-        if content_areas:
-            logger.info(f"타겟 OCR을 위한 {len(content_areas)}개의 잠재적 콘텐츠 영역 발견")
+                    all_sheets.update(split_data)
+                    logger.info(f"Added {len(split_data)} tables from split screenshots")
             
-            for i, area in enumerate(content_areas):
+            # C. Try to extract from sheet tabs if present
+            if not all_sheets:
                 try:
-                    # 특정 영역의 스크린샷 촬영
-                    area_screenshot = capture_element_screenshot(driver, area, f"content_area_{i+1}")
-                    
-                    if area_screenshot:
-                        # 향상된 OCR로 데이터 추출
-                        ocr_data_list = extract_data_from_screenshot(area_screenshot)
+                    sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+                    if sheet_tabs:
+                        logger.info(f"Found {len(sheet_tabs)} sheet tabs, attempting tab-based extraction")
+                        tab_data = {}
                         
-                        if ocr_data_list and any(not df.empty for df in ocr_data_list):
-                            logger.info(f"콘텐츠 영역 {i+1}에서 성공적으로 데이터 추출")
-                            for j, df in enumerate(ocr_data_list):
+                        # Process each tab
+                        for i, tab in enumerate(sheet_tabs):
+                            try:
+                                sheet_name = tab.text.strip() if tab.text.strip() else f"Sheet_{i+1}"
+                                logger.info(f"Clicking sheet tab: {sheet_name}")
+                                
+                                # Click tab
+                                driver.execute_script("arguments[0].click();", tab)
+                                time.sleep(2)  # Wait for content to load
+                                
+                                # Capture screenshot
+                                tab_screenshot = f"ocr_tab_{sheet_name}_{int(time.time())}.png"
+                                driver.save_screenshot(tab_screenshot)
+                                
+                                # Process screenshot
+                                tab_results = extract_data_from_screenshot(tab_screenshot)
+                                if tab_results:
+                                    for j, df in enumerate(tab_results):
+                                        if df is not None and not df.empty:
+                                            tab_data[f"{sheet_name}_Table{j+1}"] = df
+                                            logger.info(f"Extracted from tab '{sheet_name}', table {j+1}: {df.shape[0]} rows, {df.shape[1]} columns")
+                            except Exception as tab_err:
+                                logger.warning(f"Error processing tab {i+1}: {str(tab_err)}")
+                        
+                        # Add tab results to all sheets
+                        if tab_data:
+                            all_sheets.update(tab_data)
+                            logger.info(f"Added {len(tab_data)} tables from sheet tabs")
+                except Exception as tabs_err:
+                    logger.warning(f"Error processing sheet tabs: {str(tabs_err)}")
+            
+            # D. If all else fails, try full-page OCR with different settings
+            if not all_sheets:
+                logger.info("Trying full-page OCR with different settings")
+                
+                # Try different preprocessing techniques
+                ocr_techniques = [
+                    {"name": "standard", "path": full_page_screenshot},
+                    {"name": "enhanced", "path": f"ocr_enhanced_{int(time.time())}.png"}
+                ]
+                
+                # Create enhanced version
+                try:
+                    img = Image.open(full_page_screenshot)
+                    enhancer = ImageEnhance.Contrast(img)
+                    enhanced_img = enhancer.enhance(2.0)
+                    enhanced_img.save(ocr_techniques[1]["path"])
+                except Exception as enhance_err:
+                    logger.warning(f"Error creating enhanced image: {str(enhance_err)}")
+                
+                # Try each technique
+                for technique in ocr_techniques:
+                    try:
+                        ocr_results = extract_data_from_screenshot(technique["path"])
+                        if ocr_results:
+                            for i, df in enumerate(ocr_results):
                                 if df is not None and not df.empty:
-                                    sheet_name = f"OCR_영역{i+1}_테이블{j+1}"
+                                    sheet_name = f"OCR_{technique['name']}_Table{i+1}"
                                     all_sheets[sheet_name] = df
-                                    logger.info(f"{sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
-                except Exception as area_err:
-                    logger.error(f"콘텐츠 영역 {i+1} 처리 중 오류: {str(area_err)}")
-        
-        # 9. 전체 페이지 OCR - 마지막 선택지
-        if not all_sheets:
-            logger.info("다른 방법으로 데이터를 찾지 못함, 전체 페이지 OCR 시도")
+                                    logger.info(f"Extracted with {technique['name']} OCR, table {i+1}: {df.shape[0]} rows, {df.shape[1]} columns")
+                    except Exception as ocr_err:
+                        logger.warning(f"Error with {technique['name']} OCR: {str(ocr_err)}")
             
-            # 추가 스크린샷
-            enhanced_screenshot = f"ocr_enhanced_{int(time.time())}.png"
-            driver.save_screenshot(enhanced_screenshot)
-            
-            # 전체 페이지에서 OCR 추출
-            ocr_data_list = extract_data_from_screenshot(enhanced_screenshot)
-            
-            if ocr_data_list:
-                for i, df in enumerate(ocr_data_list):
-                    if df is not None and not df.empty:
-                        sheet_name = f"OCR_전체페이지_테이블{i+1}"
-                        all_sheets[sheet_name] = df
-                        logger.info(f"전체 페이지 OCR에서 {sheet_name} 추가: {df.shape[0]}행 {df.shape[1]}열")
-        
-        # 시트가 있으면 반환
-        if all_sheets:
-            # 유효한 데이터로 보이는 시트만 필터링
-            valid_sheets = {}
-            for name, df in all_sheets.items():
-                # 시트 품질 검사: 최소 행/열 수, 숫자 데이터 포함 여부
-                if df.shape[0] >= 2 and df.shape[1] >= 2:
-                    # 숫자 데이터 확인 (쉼표가 포함된 숫자 문자열 포함)
-                    has_numeric = False
-                    for col in df.columns:
-                        try:
-                            numeric_ratio = df[col].astype(str).str.replace(',', '').str.replace('.', '').str.isnumeric().mean()
-                            if numeric_ratio > 0.3:  # 30% 이상이 숫자면 유효한 열로 간주
-                                has_numeric = True
-                                break
-                        except:
+            # E. Final data validation and cleanup
+            if all_sheets:
+                # Filter and validate sheets
+                valid_sheets = {}
+                for name, df in all_sheets.items():
+                    try:
+                        if df is None or df.empty:
                             continue
-                    
-                    if has_numeric:
-                        valid_sheets[name] = df
-                    else:
-                        logger.warning(f"시트 {name}에 숫자 데이터가 부족하여 제외합니다")
-                else:
-                    logger.warning(f"시트 {name}의 크기가 너무 작아 제외합니다: {df.shape}")
+                            
+                        # Ensure minimum size
+                        if df.shape[0] >= 2 and df.shape[1] >= 2:
+                            # Check if sheet has numeric data (typical for statistical tables)
+                            has_numeric = False
+                            for col in df.columns:
+                                try:
+                                    numeric_ratio = df[col].astype(str).str.replace(',', '').str.replace('.', '').str.isnumeric().mean()
+                                    if numeric_ratio > 0.3:  # >30% numeric values
+                                        has_numeric = True
+                                        break
+                                except:
+                                    continue
+                            
+                            # Keep sheet if it has numeric data
+                            if has_numeric:
+                                # Clean data
+                                df = clean_dataframe(df)
+                                valid_sheets[name] = df
+                                logger.info(f"Validated sheet '{name}': {df.shape[0]} rows, {df.shape[1]} columns")
+                            else:
+                                logger.warning(f"Sheet '{name}' lacks numeric data, excluding")
+                        else:
+                            logger.warning(f"Sheet '{name}' is too small: {df.shape}")
+                    except Exception as valid_err:
+                        logger.warning(f"Error validating sheet '{name}': {str(valid_err)}")
+                
+                if valid_sheets:
+                    logger.info(f"OCR validation complete: {len(valid_sheets)}/{len(all_sheets)} sheets valid")
+                    return valid_sheets
+                
+                # If validation excluded all sheets, return everything anyway
+                logger.warning("Validation excluded all sheets, returning all extracted data")
+                return all_sheets
             
-            if valid_sheets:
-                logger.info(f"OCR 데이터 검증 완료: {len(valid_sheets)}/{len(all_sheets)} 시트 유효")
-                return valid_sheets
+            # F. Last resort - text only extraction
+            logger.info("No tables detected, attempting text-only extraction")
+            df = extract_text_without_table_structure(full_page_screenshot)
             
-            # 검증에 실패해도 모든 시트 반환 (최소한의 데이터라도 제공)
-            logger.warning("유효성 검증에 실패했지만 모든 OCR 데이터 반환")
-            return all_sheets
-        
-        # 10. 텍스트 전용 OCR 추출 - 최후의 시도
-        logger.info("표 구조 감지 실패, 텍스트 전용 OCR 시도")
-        df = extract_text_without_table_structure(full_page_screenshot)
-        
-        if df is not None and not df.empty:
-            all_sheets["OCR_텍스트전용"] = df
-            logger.info(f"텍스트 전용 OCR 데이터 추가: {df.shape[0]}행 {df.shape[1]}열")
-            return all_sheets
-        
-        logger.warning("모든 OCR 시도 실패")
-        return None
-        
-    except Exception as e:
-        logger.error(f"OCR 폴백 프로세스 중 오류: {str(e)}")
-        return None
+            if df is not None and not df.empty:
+                all_sheets["OCR_텍스트전용"] = df
+                logger.info(f"Added text-only OCR data: {df.shape[0]} rows, {df.shape[1]} columns")
+                return all_sheets
+            
+            logger.warning("All OCR attempts failed")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in OCR fallback process: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
 
 def access_iframe_direct(driver, file_params):
     """
@@ -6764,58 +6749,86 @@ def cleanup_date_specific_sheets(spreadsheet):
     try:
         # Get all worksheets
         all_worksheets = spreadsheet.worksheets()
+        logger.info(f"스프레드시트에 총 {len(all_worksheets)}개의 워크시트가 있습니다")
+        
+        # Identify sheets to remove
         sheets_to_remove = []
         
-        # Find date-specific sheets by pattern matching
+        # Define patterns for date-specific sheets
         date_patterns = [
             r'요약_.*_\d{4}년\s*\d{1,2}월',  # Matches "요약_무선통신서비스 가입 현황_전체데이터_2025년 1월"
             r'.*\d{4}년\s*\d{1,2}월.*'       # Any sheet with year/month in the name
         ]
         
-        # Find sheets to keep - only those ending with _Raw or _통합
-        keep_patterns = [r'.*_Raw$', r'.*_통합$']
+        # Define patterns for sheets to keep
+        keep_patterns = [
+            r'.*_Raw$',    # Raw data sheets
+            r'.*_통합$',    # Consolidated sheets
+            r'.*_요약$',    # Summary sheets
+            r'^__.*__$'     # Special system sheets (like __metadata__)
+        ]
         
+        # Filter sheets based on patterns
         for worksheet in all_worksheets:
             title = worksheet.title
             
             # Check if it's a sheet we want to keep
-            is_keeper = False
+            should_keep = False
             for pattern in keep_patterns:
                 if re.match(pattern, title):
-                    is_keeper = True
+                    should_keep = True
                     break
                     
             # If not a keeper, check if it matches date patterns
-            if not is_keeper:
+            if not should_keep:
                 for pattern in date_patterns:
                     if re.match(pattern, title):
                         sheets_to_remove.append(worksheet)
                         break
         
         # Log what we're planning to remove
-        logger.info(f"Found {len(sheets_to_remove)} date-specific sheets to remove")
+        logger.info(f"날짜별 시트 {len(sheets_to_remove)}개 삭제 예정")
         for ws in sheets_to_remove:
-            logger.info(f"Will remove: {ws.title}")
+            logger.info(f"삭제 예정: {ws.title}")
         
-        # Ask for confirmation if running interactively
-        # (Skip this check if running as automation)
+        # Check if there's anything to remove
+        if not sheets_to_remove:
+            logger.info("삭제할 날짜별 시트가 없습니다")
+            return 0
+        
+        # Remove the sheets one by one
         remove_count = 0
-        
-        # Remove the sheets
         for ws in sheets_to_remove:
             try:
+                sheet_title = ws.title
                 spreadsheet.del_worksheet(ws)
-                logger.info(f"Removed sheet: {ws.title}")
+                logger.info(f"시트 삭제 완료: {sheet_title}")
                 remove_count += 1
-                # Sleep to avoid API rate limits
-                time.sleep(1)
+                
+                # Add delay to avoid API rate limits
+                time.sleep(2)
+            except gspread.exceptions.APIError as api_err:
+                if "RESOURCE_EXHAUSTED" in str(api_err) or "RATE_LIMIT_EXCEEDED" in str(api_err):
+                    logger.warning(f"API 속도 제한 도달, 잠시 대기 후 재시도...")
+                    time.sleep(5)
+                    try:
+                        spreadsheet.del_worksheet(ws)
+                        logger.info(f"재시도 후 시트 삭제 완료: {ws.title}")
+                        remove_count += 1
+                    except Exception as retry_err:
+                        logger.error(f"재시도 후에도 시트 삭제 실패 {ws.title}: {str(retry_err)}")
+                else:
+                    logger.error(f"시트 삭제 중 API 오류 {ws.title}: {str(api_err)}")
             except Exception as del_err:
-                logger.error(f"Error removing sheet {ws.title}: {str(del_err)}")
+                logger.error(f"시트 삭제 중 오류 {ws.title}: {str(del_err)}")
         
+        logger.info(f"총 {remove_count}개 날짜별 시트 삭제 완료")
         return remove_count
         
     except Exception as e:
-        logger.error(f"Error cleaning up date-specific sheets: {str(e)}")
+        logger.error(f"날짜별 시트 정리 중 오류 발생: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return 0
 
 
@@ -8541,8 +8554,9 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 
 def update_consolidated_sheets(client, data_updates):
     """
-    개선된 통합 시트 업데이트 함수.
-    Raw 시트의 데이터를 통합 시트로 복사하는 작업을 수행합니다.
+    Enhanced function to update consolidated sheets from Raw sheets.
+    This function ensures all rows from the Raw sheets are properly transferred
+    to the consolidated sheets, preserving data integrity.
     
     Args:
         client: gspread client instance
@@ -8556,41 +8570,38 @@ def update_consolidated_sheets(client, data_updates):
         return 0
         
     try:
-        # 스프레드시트 열기
+        # Open spreadsheet
         spreadsheet = open_spreadsheet_with_retry(client)
         if not spreadsheet:
             logger.error("스프레드시트 열기 실패")
             return 0
             
-        # 모든 워크시트 가져오기
+        # Get all worksheets
         all_worksheets = spreadsheet.worksheets()
         worksheet_map = {ws.title: ws for ws in all_worksheets}
         logger.info(f"스프레드시트에서 {len(worksheet_map)}개 워크시트 발견")
         
-        # Raw 시트와 대응하는 통합 시트 찾기
-        # 기존 로직은 정확히 "_Raw"로 끝나는 시트만 찾았습니다.
-        # 이제 모든 Raw 시트를 찾고, 통합 시트가 없다면 생성합니다.
+        # Find Raw sheets and their corresponding consolidated sheets
         raw_sheets = []
         for title in worksheet_map.keys():
-            # Raw 시트 찾기
+            # Find Raw sheets
             if title.endswith('_Raw'):
                 base_name = title[:-4]  # Remove "_Raw"
                 consol_name = f"{base_name}_통합"
                 
-                # 통합 시트가 있는지 확인
+                # Check if consolidated sheet exists
                 if consol_name in worksheet_map:
                     raw_sheets.append((title, consol_name))
                     logger.info(f"Raw-통합 시트 쌍 발견: {title} -> {consol_name}")
                 else:
-                    # 통합 시트 생성 필요
+                    # Need to create consolidated sheet
                     logger.info(f"통합 시트 없음, '{consol_name}' 생성 예정")
                     raw_sheets.append((title, consol_name))
         
         if not raw_sheets:
-            # 기존 로직으로 찾지 못했다면 모든 Raw 시트에 대해 통합 시트 생성 필요
+            # If no exact matches found, try more flexible matching
             logger.warning("Raw-통합 시트 쌍을 찾지 못함, Raw 시트 기반으로 새 통합 시트 생성 시도")
             
-            # 모든 Raw 시트 찾기
             for title in worksheet_map.keys():
                 if '_Raw' in title:
                     base_name = title.split('_Raw')[0]
@@ -8602,7 +8613,7 @@ def update_consolidated_sheets(client, data_updates):
             logger.warning("통합할 Raw 시트를 찾을 수 없음")
             return 0
         
-        # 최신 날짜 가져오기
+        # Get latest date from updates
         latest_date = None
         for update in data_updates:
             if 'date' in update:
@@ -8625,57 +8636,63 @@ def update_consolidated_sheets(client, data_updates):
             
         logger.info(f"통합 시트 날짜 컬럼: {latest_date}")
         
-        # 각 통합 시트 업데이트
+        # Update each consolidated sheet
         updated_count = 0
         
         for raw_name, consol_name in raw_sheets:
             try:
-                # Raw 시트 가져오기
+                # Get Raw sheet
                 raw_ws = worksheet_map.get(raw_name)
                 if not raw_ws:
                     logger.warning(f"Raw 시트를 찾을 수 없음: {raw_name}")
                     continue
                 
-                # 통합 시트 찾기 또는 생성
+                # Find or create consolidated sheet
                 if consol_name in worksheet_map:
                     consol_ws = worksheet_map[consol_name]
                     logger.info(f"기존 통합 시트 사용: {consol_name}")
                 else:
-                    # 새 통합 시트 생성
+                    # Create new consolidated sheet
                     try:
                         consol_ws = spreadsheet.add_worksheet(title=consol_name, rows=1000, cols=100)
                         logger.info(f"새 통합 시트 생성됨: {consol_name}")
-                        # 통합 시트에 초기 헤더 추가
+                        # Add initial header to consolidated sheet
                         consol_ws.update_cell(1, 1, "기준일자")
-                        time.sleep(1)  # API 제한 방지
+                        time.sleep(1)  # Prevent API rate limiting
                     except Exception as create_err:
                         logger.error(f"통합 시트 생성 실패 {consol_name}: {str(create_err)}")
                         continue
                 
-                # Raw 시트와 통합 시트의 모든 데이터 가져오기
-                raw_data = raw_ws.get_all_values()
-                consol_data = consol_ws.get_all_values()
+                # Get all data from both sheets
+                try:
+                    raw_data = raw_ws.get_all_values()
+                    consol_data = consol_ws.get_all_values()
+                except Exception as get_data_err:
+                    logger.error(f"시트 데이터 가져오기 실패: {str(get_data_err)}")
+                    continue
                 
                 if not raw_data:
                     logger.warning(f"Raw 시트 {raw_name}가 비어 있음")
                     continue
                 
-                # 디버깅: Raw 데이터 샘플 출력
-                logger.info(f"Raw 시트 {raw_name} 데이터 샘플: {raw_data[0][:5]}...")
+                # Debug: Print sample of Raw data
+                logger.debug(f"Raw 시트 {raw_name} 데이터 샘플: {raw_data[0][:5]}...")
                 if len(raw_data) > 1:
-                    logger.info(f"첫 번째 데이터 행: {raw_data[1][:5]}...")
+                    logger.debug(f"첫 번째 데이터 행: {raw_data[1][:5]}...")
                 
-                # 마지막 컬럼 찾기
+                # Find the data column from Raw sheet
                 raw_headers = raw_data[0]
-                last_col_idx = -1
                 
-                # 마지막 컬럼부터 역순으로 데이터가 있는 컬럼 찾기
+                # Find the last column with data, starting from the right
+                # This ensures we get the most recent data column
+                last_col_idx = -1
                 for col_idx in range(len(raw_headers)-1, 0, -1):
-                    # 컬럼에 데이터가 있는지 확인
+                    # Check if column has data
                     has_data = False
-                    for row_idx in range(1, min(10, len(raw_data))):  # 처음 10개 행 확인
-                        if col_idx < len(raw_data[row_idx]) and raw_data[row_idx][col_idx] and \
-                           raw_data[row_idx][col_idx].lower() not in ('none', 'nan', '-'):
+                    for row_idx in range(1, min(10, len(raw_data))):  # Check first 10 rows
+                        if (col_idx < len(raw_data[row_idx]) and 
+                            raw_data[row_idx][col_idx] and 
+                            raw_data[row_idx][col_idx].lower() not in ('none', 'nan', '-')):
                             has_data = True
                             break
                     
@@ -8687,16 +8704,16 @@ def update_consolidated_sheets(client, data_updates):
                     logger.warning(f"{raw_name}에서 데이터 컬럼을 찾을 수 없음")
                     continue
                 
-                # 선택된 컬럼 디버깅 정보
+                # Debug info for selected column
                 logger.info(f"{raw_name}에서 컬럼 {last_col_idx} 사용: {raw_headers[last_col_idx]}")
                 
-                # 통합 시트 초기화 (비어있는 경우)
+                # Initialize consolidated sheet if empty
                 if not consol_data or len(consol_data[0]) == 0:
                     consol_ws.update_cell(1, 1, "기준일자")
                     consol_data = [["기준일자"]]
                     time.sleep(1)
                 
-                # 통합 시트에 날짜 컬럼 찾기 또는 추가
+                # Find or add date column in consolidated sheet
                 consol_headers = consol_data[0]
                 if latest_date in consol_headers:
                     date_col_idx = consol_headers.index(latest_date) + 1
@@ -8707,11 +8724,12 @@ def update_consolidated_sheets(client, data_updates):
                     logger.info(f"새 날짜 컬럼 추가: {date_col_idx}: {latest_date}")
                     time.sleep(1)
                 
-                # Raw 시트에서 키-값 추출
+                # ===== IMPROVED PART STARTS HERE =====
+                # Extract all key-value pairs from Raw sheet
                 updates = []
-                row_keys = {}  # 키 텍스트 -> 행 인덱스 매핑
+                row_keys = {}  # Map key text -> row index
                 
-                # 통합 시트의 기존 항목 가져오기
+                # Get existing items from consolidated sheet
                 existing_keys = []
                 if len(consol_data) > 1:
                     for i in range(1, len(consol_data)):
@@ -8719,17 +8737,28 @@ def update_consolidated_sheets(client, data_updates):
                             existing_keys.append(consol_data[i][0])
                             row_keys[consol_data[i][0]] = i + 1  # +1 for 1-indexed rows
                 
-                # Raw 시트의 각 행 처리
+                # Count items to ensure all are transferred
+                total_items = 0
+                valid_items = 0
+                
+                # Process each row from Raw sheet
                 for i in range(1, len(raw_data)):
-                    if i < len(raw_data) and len(raw_data[i]) > 0:
+                    if i < len(raw_data) and raw_data[i] and len(raw_data[i]) > 0:
                         key = raw_data[i][0]
-                        if not key or key.lower() in ('none', 'nan'):
+                        total_items += 1
+                        
+                        # Skip empty keys
+                        if not key or key.lower() in ('none', 'nan', ''):
                             continue
                         
-                        # 마지막 컬럼의 값 가져오기
-                        value = raw_data[i][last_col_idx] if last_col_idx < len(raw_data[i]) else ""
+                        valid_items += 1
                         
-                        # 통합 시트의 행 결정
+                        # Get value from the selected column
+                        value = ""
+                        if last_col_idx < len(raw_data[i]):
+                            value = raw_data[i][last_col_idx]
+                        
+                        # Determine row in consolidated sheet
                         if key in row_keys:
                             row_idx = row_keys[key]
                         else:
@@ -8737,50 +8766,84 @@ def update_consolidated_sheets(client, data_updates):
                             existing_keys.append(key)
                             row_keys[key] = row_idx
                             
-                            # 첫 번째 컬럼에 키 추가
+                            # Add key to first column
                             updates.append({
                                 'range': f'A{row_idx}',
                                 'values': [[key]]
                             })
                         
-                        # 날짜 컬럼에 값 추가
+                        # Add value to date column
                         updates.append({
                             'range': f'{chr(64 + date_col_idx)}{row_idx}',
                             'values': [[value]]
                         })
                 
-                # 업데이트 수행
+                # Log the number of items being processed
+                logger.info(f"{raw_name} 시트에서 총 {total_items}개 항목 중 {valid_items}개 유효 항목 처리")
+                logger.info(f"{consol_name}에 {len(updates)}개 업데이트 적용 예정")
+                
+                # Execute updates in batches with improved error handling
                 if updates:
-                    logger.info(f"{consol_name}에 {len(updates)}개 업데이트 적용")
-                    batch_size = 10
+                    batch_size = 10  # Adjust based on API limits
+                    successful_updates = 0
                     
                     for i in range(0, len(updates), batch_size):
                         batch = updates[i:i+batch_size]
                         try:
                             consol_ws.batch_update(batch)
-                            logger.info(f"배치 {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1} 성공")
-                            time.sleep(1)
+                            successful_updates += len(batch)
+                            logger.info(f"배치 {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1} 성공 ({len(batch)}개 항목)")
+                            
+                            # Progressive sleep to avoid API rate limits
+                            sleep_time = min(1 + (i // 50) * 0.5, 3)  # Increase delay as we process more
+                            time.sleep(sleep_time)
                         except Exception as batch_err:
                             logger.error(f"배치 업데이트 실패: {str(batch_err)}")
                             
-                            # 개별 업데이트로 폴백
+                            # Fall back to individual updates
                             for update in batch:
                                 try:
                                     consol_ws.batch_update([update])
+                                    successful_updates += 1
                                     time.sleep(1)
                                 except Exception as single_err:
                                     logger.error(f"단일 업데이트 실패: {str(single_err)}")
                     
-                    # 타임스탬프 업데이트
+                    logger.info(f"{consol_name} 시트 업데이트 완료: {successful_updates}/{len(updates)} 성공")
+                    
+                    # Update timestamp and meta information
                     try:
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        # Place timestamp below the data
                         footer_row = len(existing_keys) + 5
                         
-                        consol_ws.update_cell(footer_row, 1, "Last Updated")
-                        consol_ws.update_cell(footer_row, 2, timestamp)
-                        logger.info(f"{consol_name}에 타임스탬프 추가")
+                        meta_updates = [
+                            {
+                                'range': f'A{footer_row}',
+                                'values': [["Last Updated"]]
+                            },
+                            {
+                                'range': f'B{footer_row}',
+                                'values': [[timestamp]]
+                            },
+                            {
+                                'range': f'A{footer_row+1}',
+                                'values': [["항목 수"]]
+                            },
+                            {
+                                'range': f'B{footer_row+1}',
+                                'values': [[str(valid_items)]]
+                            }
+                        ]
+                        
+                        consol_ws.batch_update(meta_updates)
+                        logger.info(f"{consol_name}에 메타 정보 추가 완료")
                     except Exception as ts_err:
-                        logger.warning(f"타임스탬프 추가 실패: {str(ts_err)}")
+                        logger.warning(f"메타 정보 추가 실패: {str(ts_err)}")
+                    
+                    # Verify if data count matches
+                    if valid_items > successful_updates / 2:  # Each item has 2 updates (key & value)
+                        logger.warning(f"{consol_name} 시트에 모든 항목이 업데이트되지 않았습니다: {valid_items} 항목 중 약 {successful_updates/2:.0f}개 업데이트됨")
                     
                     updated_count += 1
                 else:
@@ -8788,6 +8851,8 @@ def update_consolidated_sheets(client, data_updates):
                     
             except Exception as sheet_err:
                 logger.error(f"{raw_name}/{consol_name} 처리 중 오류: {str(sheet_err)}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         logger.info(f"통합 시트 업데이트 완료: {updated_count}개 시트 업데이트됨")
         return updated_count
@@ -8801,21 +8866,22 @@ def update_consolidated_sheets(client, data_updates):
 
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
-    Enhanced function to create more informative placeholder DataFrames.
+    Creates an enhanced placeholder DataFrame with detailed diagnostic information
+    when data extraction fails.
     
     Args:
         post_info: Dictionary with post information
         file_params: Optional dictionary with file parameters
         
     Returns:
-        pandas.DataFrame: Placeholder DataFrame with diagnostic information
+        pd.DataFrame: Placeholder DataFrame with diagnostic information
     """
     try:
         # Extract date information
         date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info['title'])
         
-        year = date_match.group(1) if date_match else "Unknown"
-        month = date_match.group(2) if date_match else "Unknown"
+        year = date_match.group(1) if date_match else "알 수 없음"
+        month = date_match.group(2) if date_match else "알 수 없음"
         
         # Get report type
         report_type = determine_report_type(post_info['title'])
@@ -8823,46 +8889,320 @@ def create_improved_placeholder_dataframe(post_info, file_params=None):
         # Determine extraction status
         extraction_status = "데이터 추출 실패"
         
-        # Add diagnostic information if available
-        diagnostic_info = "알 수 없는 오류"
+        # Detailed diagnostic information
+        diagnostic_info = []
+        param_info = []
         
+        # Add diagnostic information based on file_params
         if file_params:
             if 'atch_file_no' in file_params and 'file_ord' in file_params:
                 extraction_status = "문서 뷰어 접근 실패"
-                diagnostic_info = f"atch_file_no={file_params['atch_file_no']}, file_ord={file_params['file_ord']}"
+                param_info.append(f"atch_file_no={file_params['atch_file_no']}")
+                param_info.append(f"file_ord={file_params['file_ord']}")
             elif 'content' in file_params:
                 extraction_status = "HTML 콘텐츠 분석 실패"
                 content_preview = file_params['content'][:100] + "..." if len(file_params['content']) > 100 else file_params['content']
-                diagnostic_info = f"Content preview: {content_preview}"
+                diagnostic_info.append(f"콘텐츠 미리보기: {content_preview}")
             elif 'ajax_data' in file_params:
                 extraction_status = "AJAX 데이터 분석 실패"
-                diagnostic_info = "AJAX response received but could not be parsed"
+                diagnostic_info.append("AJAX 응답을 받았으나 처리할 수 없습니다")
+                if isinstance(file_params.get('ajax_data'), dict):
+                    ajax_keys = list(file_params['ajax_data'].keys())
+                    if ajax_keys:
+                        diagnostic_info.append(f"AJAX 데이터 키: {', '.join(ajax_keys[:5])}")
             elif 'download_url' in file_params:
                 extraction_status = "직접 다운로드 URL 접근 실패"
-                diagnostic_info = f"URL: {file_params['download_url']}"
+                diagnostic_info.append(f"URL: {file_params['download_url']}")
         
-        # Create DataFrame with improved diagnostic information
-        df = pd.DataFrame({
+        # Create base DataFrame
+        data = {
             '구분': [f'{year}년 {month}월 통계'],
             '보고서 유형': [report_type],
             '상태': [extraction_status],
-            '진단 정보': [diagnostic_info],
-            '링크': [post_info.get('url', '링크 없음')],
-            '추출 시도 시간': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-        })
+            '시간': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+        }
         
-        logger.info(f"Enhanced placeholder DataFrame created: {year}년 {month}월 {report_type}")
+        # Add parameter information if available
+        if param_info:
+            data['파라미터'] = [', '.join(param_info)]
+        
+        # Add diagnostic information if available
+        if diagnostic_info:
+            data['진단 정보'] = ['\n'.join(diagnostic_info)]
+        
+        # Add post URL
+        if post_info.get('url'):
+            data['링크'] = [post_info['url']]
+        
+        # Add department information if available
+        if post_info.get('department'):
+            data['담당 부서'] = [post_info['department']]
+        
+        # Create DataFrame
+        df = pd.DataFrame(data)
+        
+        # Save diagnostic information to file for reference
+        try:
+            timestamp = int(time.time())
+            diagnostic_file = f"extraction_failure_{timestamp}.json"
+            diagnostic_data = {
+                'timestamp': timestamp,
+                'post_title': post_info.get('title', ''),
+                'post_date': post_info.get('date', ''),
+                'year': year,
+                'month': month,
+                'report_type': report_type,
+                'extraction_status': extraction_status,
+                'file_params': {k: str(v) for k, v in file_params.items() if k != 'post_info'} if file_params else {},
+                'diagnostic_info': diagnostic_info
+            }
+            with open(diagnostic_file, 'w', encoding='utf-8') as f:
+                json.dump(diagnostic_data, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"진단 정보 파일 저장: {diagnostic_file}")
+        except Exception as save_err:
+            logger.warning(f"진단 정보 파일 저장 실패: {str(save_err)}")
+        
+        logger.info(f"개선된 대체 DataFrame 생성: {year}년 {month}월 {report_type}")
         return df
             
     except Exception as e:
-        logger.error(f"Placeholder DataFrame creation error: {str(e)}")
+        logger.error(f"대체 DataFrame 생성 중 오류: {str(e)}")
         # Create minimal DataFrame with error info
         return pd.DataFrame({
             '구분': ['오류 발생'],
             '업데이트 상태': ['데이터프레임 생성 실패'],
-            '비고': [f'오류: {str(e)}']
+            '비고': [f'오류: {str(e)}'],
+            '시간': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
         })
 
+def handle_error_and_recover(driver, error, context=None, screenshot=True, html_dump=True, restart_driver=False):
+    """
+    Comprehensive error handling and system recovery function.
+    Takes appropriate actions to recover from errors and collects diagnostic information.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        error: Exception that occurred
+        context: String describing what was being done when the error occurred
+        screenshot: Whether to take a screenshot
+        html_dump: Whether to save the page HTML
+        restart_driver: Whether to restart the driver completely
+        
+    Returns:
+        dict: Recovery status information
+    """
+    error_id = int(time.time())
+    recovery_info = {
+        'error_id': error_id,
+        'timestamp': datetime.now().isoformat(),
+        'error_type': type(error).__name__,
+        'error_message': str(error),
+        'context': context or 'Unknown context',
+        'recovery_status': 'failed',
+        'artifacts': []
+    }
+    
+    logger.error(f"오류 발생 [ID:{error_id}] - {context}: {str(error)}")
+    
+    try:
+        # 1. Capture error information
+        import traceback
+        error_traceback = traceback.format_exc()
+        logger.error(f"상세 스택 트레이스 [ID:{error_id}]:\n{error_traceback}")
+        
+        error_file = f"error_{error_id}.log"
+        with open(error_file, 'w', encoding='utf-8') as f:
+            f.write(f"Error ID: {error_id}\n")
+            f.write(f"Timestamp: {recovery_info['timestamp']}\n")
+            f.write(f"Context: {context}\n")
+            f.write(f"Error: {str(error)}\n\n")
+            f.write(f"Traceback:\n{error_traceback}\n")
+        recovery_info['artifacts'].append(error_file)
+        
+        # 2. Try to take a screenshot if requested
+        if screenshot and driver:
+            try:
+                screenshot_path = f"error_screenshot_{error_id}.png"
+                driver.save_screenshot(screenshot_path)
+                logger.info(f"오류 스크린샷 저장 [ID:{error_id}]: {screenshot_path}")
+                recovery_info['artifacts'].append(screenshot_path)
+            except Exception as ss_err:
+                logger.warning(f"스크린샷 저장 실패 [ID:{error_id}]: {str(ss_err)}")
+        
+        # 3. Try to save page HTML if requested
+        if html_dump and driver:
+            try:
+                html_path = f"error_html_{error_id}.html"
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(driver.page_source)
+                logger.info(f"HTML 소스 저장 [ID:{error_id}]: {html_path}")
+                recovery_info['artifacts'].append(html_path)
+            except Exception as html_err:
+                logger.warning(f"HTML 소스 저장 실패 [ID:{error_id}]: {str(html_err)}")
+        
+        # 4. Collect browser and page information
+        if driver:
+            try:
+                browser_info = {}
+                
+                # Basic driver info
+                browser_info['url'] = driver.current_url
+                browser_info['title'] = driver.title
+                
+                # JS environment info
+                js_info = driver.execute_script("""
+                    return {
+                        userAgent: navigator.userAgent,
+                        platform: navigator.platform,
+                        readyState: document.readyState,
+                        cookies: document.cookie,
+                        bodySize: document.body ? document.body.innerHTML.length : 0,
+                        iframesCount: document.querySelectorAll('iframe').length
+                    };
+                """)
+                browser_info.update(js_info)
+                
+                # Save browser info
+                browser_info_file = f"browser_info_{error_id}.json"
+                with open(browser_info_file, 'w', encoding='utf-8') as f:
+                    json.dump(browser_info, f, ensure_ascii=False, indent=2)
+                logger.info(f"브라우저 정보 저장 [ID:{error_id}]: {browser_info_file}")
+                recovery_info['artifacts'].append(browser_info_file)
+                recovery_info['browser_info'] = browser_info
+            except Exception as info_err:
+                logger.warning(f"브라우저 정보 수집 실패 [ID:{error_id}]: {str(info_err)}")
+        
+        # 5. Recovery actions
+        if driver:
+            try:
+                # Reset browser context without losing cookies
+                if not restart_driver:
+                    # Soft recovery - keep session, reset state
+                    success = reset_browser_context(driver, delete_cookies=False, navigate_to_blank=True)
+                    if success:
+                        logger.info(f"브라우저 컨텍스트 초기화 성공 [ID:{error_id}]")
+                        recovery_info['recovery_status'] = 'soft_reset'
+                    else:
+                        logger.warning(f"브라우저 컨텍스트 초기화 실패 [ID:{error_id}]")
+                        
+                        # Try to navigate back to stats URL
+                        try:
+                            driver.get(CONFIG['stats_url'])
+                            WebDriverWait(driver, 10).until(
+                                EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
+                            )
+                            logger.info(f"통계 페이지로 복귀 성공 [ID:{error_id}]")
+                            recovery_info['recovery_status'] = 'navigated_back'
+                        except Exception as nav_err:
+                            logger.warning(f"통계 페이지 복귀 실패 [ID:{error_id}]: {str(nav_err)}")
+                else:
+                    # Hard recovery - restart driver completely
+                    logger.info(f"WebDriver 재시작 시도 [ID:{error_id}]")
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                        
+                    # This function returns a new driver instance, but you'll need to update the reference outside
+                    recovery_info['recovery_status'] = 'hard_reset'
+                    recovery_info['message'] = "드라이버를 완전히 재시작해야 합니다"
+            except Exception as recovery_err:
+                logger.error(f"복구 시도 중 오류 [ID:{error_id}]: {str(recovery_err)}")
+        
+        # 6. Error notification via Telegram
+        try:
+            if CONFIG.get('telegram_token') and CONFIG.get('chat_id'):
+                telegram_message = f"""⚠️ *모니터링 시스템 오류* [ID:{error_id}]
+                
+*컨텍스트*: {context}
+*오류 유형*: {type(error).__name__}
+*오류 메시지*: {str(error)}
+*복구 상태*: {recovery_info['recovery_status']}
+*발생 시간*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                
+자세한 내용은 로그 파일을 확인하세요."""
+                
+                # Async notification will be handled elsewhere - this just prepares the message
+                recovery_info['telegram_message'] = telegram_message
+                logger.info(f"텔레그램 알림 메시지 준비됨 [ID:{error_id}]")
+        except Exception as notify_err:
+            logger.error(f"텔레그램 알림 준비 중 오류 [ID:{error_id}]: {str(notify_err)}")
+        
+        return recovery_info
+        
+    except Exception as meta_err:
+        # Meta-error: Error in the error handler itself
+        logger.critical(f"오류 처리 중 추가 오류 발생 [ID:{error_id}]: {str(meta_err)}")
+        recovery_info['meta_error'] = str(meta_err)
+        return recovery_info
+
+
+async def send_error_notification(error_info, retries=3):
+    """
+    Send error notification via Telegram.
+    
+    Args:
+        error_info: Error information dictionary
+        retries: Number of retry attempts
+        
+    Returns:
+        bool: Whether the notification was sent successfully
+    """
+    if not CONFIG.get('telegram_token') or not CONFIG.get('chat_id'):
+        logger.warning("텔레그램 설정이 없어 알림을 보낼 수 없습니다")
+        return False
+        
+    for attempt in range(retries):
+        try:
+            # Initialize Telegram bot
+            bot = telegram.Bot(token=CONFIG['telegram_token'])
+            
+            # Send message
+            message = error_info.get('telegram_message')
+            if not message:
+                # Create a default message if none exists
+                message = f"""⚠️ *모니터링 시스템 오류* [ID:{error_info.get('error_id', 'unknown')}]
+                
+*오류 유형*: {error_info.get('error_type', 'Unknown')}
+*오류 메시지*: {error_info.get('error_message', 'No message')}
+*발생 시간*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+            
+            # Send to chat
+            await bot.send_message(
+                chat_id=int(CONFIG['chat_id']),
+                text=message,
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"텔레그램 오류 알림 전송 성공 [ID:{error_info.get('error_id', 'unknown')}]")
+            
+            # If there are screenshots or important files, send them too
+            artifacts = error_info.get('artifacts', [])
+            screenshot_paths = [path for path in artifacts if path.endswith('.png')]
+            
+            if screenshot_paths and len(screenshot_paths) > 0:
+                # Send the most recent screenshot
+                screenshot_path = screenshot_paths[0]
+                try:
+                    with open(screenshot_path, 'rb') as photo:
+                        await bot.send_photo(
+                            chat_id=int(CONFIG['chat_id']),
+                            photo=photo,
+                            caption=f"오류 스크린샷 [ID:{error_info.get('error_id', 'unknown')}]"
+                        )
+                    logger.info(f"텔레그램 오류 스크린샷 전송 성공: {screenshot_path}")
+                except Exception as photo_err:
+                    logger.warning(f"텔레그램 스크린샷 전송 실패: {str(photo_err)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"텔레그램 알림 전송 중 오류 (시도 {attempt+1}/{retries}): {str(e)}")
+            await asyncio.sleep(2)  # Wait before retry
+    
+    logger.error(f"텔레그램 알림 전송 실패 ({retries}회 시도 후)")
+    return False
 
 def retry_with_backoff(func, max_retries=3, base_delay=2, *args, **kwargs):
     """
@@ -9071,225 +9411,219 @@ def setup_enhanced_logging():
 
 
 async def main():
-    """메인 함수: 환경 변수 처리 및 모니터링 실행"""
-    # 향상된 로깅 설정
+    """
+    Enhanced main function with improved error handling, monitoring coordination,
+    and more detailed status reporting.
+    """
+    # Setup enhanced logging
     global logger
     logger = setup_enhanced_logging()
     
-    # GitHub Actions 환경 감지
+    # Create run ID for this execution
+    run_id = int(time.time())
+    log_prefix = f"[Run-{run_id}]"
+    
+    logger.info(f"{log_prefix} MSIT 통신 통계 모니터링 시작")
+    
+    # Check GitHub Actions environment
     is_github_actions = os.environ.get('GITHUB_ACTIONS', 'false').lower() == 'true'
     if is_github_actions:
-        logger.info("GitHub Actions 환경에서 실행 중")
+        logger.info(f"{log_prefix} GitHub Actions 환경에서 실행 중")
     
-    # 1. 검토 기간 설정
+    # Execution status tracking
+    status = {
+        'run_id': run_id,
+        'start_time': datetime.now().isoformat(),
+        'status': 'starting',
+        'pages_processed': 0,
+        'posts_found': 0,
+        'stats_posts_found': 0,
+        'data_updates': 0,
+        'errors': 0,
+        'warnings': 0
+    }
+    
+    # Process configuration
     try:
-        # 시작 날짜와 종료 날짜 (YYYY-MM-DD 형식)
-        start_date_str = os.environ.get('START_DATE', '')
-        end_date_str = os.environ.get('END_DATE', '')
+        # 1. Review period configuration
+        days_range, start_date_str, end_date_str = configure_date_range()
         
-        if start_date_str and end_date_str:
-            # 날짜 형식 검증
-            try:
-                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-                end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-                
-                # 날짜 범위 확인
-                if start_date > end_date:
-                    logger.error(f"시작 날짜({start_date_str})가 종료 날짜({end_date_str})보다 나중입니다.")
-                    logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
-                    # 기본값 사용
-                    days_range = int(os.environ.get('DAYS_RANGE', '4'))
-                    start_date_str = None
-                    end_date_str = None
-                else:
-                    # 현재 날짜와의 차이로 days_range 계산
-                    today = datetime.now().date()
-                    days_range = (today - start_date).days
-                    
-                    logger.info(f"검토 기간 설정: {start_date_str} ~ {end_date_str} (days_range: {days_range}일)")
-            except ValueError as date_err:
-                logger.error(f"날짜 형식 오류: {str(date_err)}")
-                logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
-                # 기본값 사용
-                days_range = int(os.environ.get('DAYS_RANGE', '4'))
-                start_date_str = None
-                end_date_str = None
-        else:
-            # 날짜가 입력되지 않은 경우 days_range 사용
-            days_range = int(os.environ.get('DAYS_RANGE', '4'))
-            logger.info(f"검토 기간 미설정, 기본값 사용: days_range={days_range}일")
-            start_date_str = None
-            end_date_str = None
-    except Exception as e:
-        logger.error(f"검토 기간 설정 중 오류: {str(e)}")
-        logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
-        days_range = int(os.environ.get('DAYS_RANGE', '4'))
-        start_date_str = None
-        end_date_str = None
-    
-    # 2. 페이지 범위 설정
-    try:
-        start_page_str = os.environ.get('START_PAGE', '1')
-        end_page_str = os.environ.get('END_PAGE', '5')
+        # 2. Page range configuration
+        start_page, end_page = configure_page_range()
         
-        # 페이지 번호 검증
-        try:
-            start_page = int(start_page_str)
-            end_page = int(end_page_str)
-            
-            # 페이지 범위 확인
-            if start_page <= 0 or end_page <= 0:
-                logger.error("페이지 번호는 1 이상이어야 합니다.")
-                logger.info("기본 페이지 범위(1~5)를 사용합니다.")
-                start_page = 1
-                end_page = 5
-            elif start_page > end_page:
-                logger.error(f"시작 페이지({start_page})가 종료 페이지({end_page})보다 큽니다.")
-                logger.info("기본 페이지 범위(1~5)를 사용합니다.")
-                start_page = 1
-                end_page = 5
-            else:
-                logger.info(f"페이지 범위 설정: {start_page} ~ {end_page}")
-        except ValueError:
-            logger.error("페이지 번호는 정수여야 합니다.")
-            logger.info("기본 페이지 범위(1~5)를 사용합니다.")
-            start_page = 1
-            end_page = 5
-    except Exception as e:
-        logger.error(f"페이지 범위 설정 중 오류: {str(e)}")
-        logger.info("기본 페이지 범위(1~5)를 사용합니다.")
-        start_page = 1
-        end_page = 5
-    
-    # 3. 기타 환경 변수
-    try:
-        # Google Sheets 업데이트 여부
-        check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
-        check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
+        # 3. Other environment variables
+        check_sheets, update_consolidation, ocr_enabled, cleanup_old_sheets, reverse_order = configure_features()
         
-        # 통합 시트 업데이트 설정
-        update_consolidation_str = os.environ.get('UPDATE_CONSOLIDATION', 'true').lower()
-        update_consolidation = update_consolidation_str in ('true', 'yes', '1', 'y')
-        logger.info(f"통합 시트 업데이트: {update_consolidation}")
+        # 4. Update global CONFIG
+        update_global_config()
         
-        # 스프레드시트 이름
-        spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
+        # 5. Check OCR libraries if OCR is enabled
+        if CONFIG['ocr_enabled']:
+            check_ocr_libraries(is_github_actions)
         
-        # OCR 설정 확인
-        ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
-        ocr_enabled = ocr_enabled_str in ('true', 'yes', '1', 'y')
-
-         # ADD THIS SECTION - read cleanup option
-        cleanup_sheets_str = os.environ.get('CLEANUP_OLD_SHEETS', 'false').lower()
-        cleanup_old_sheets = cleanup_sheets_str in ('true', 'yes', '1', 'y')
-
-       
-        # 최대 API 요청 간격
-        api_request_wait = int(os.environ.get('API_REQUEST_WAIT', '2'))
+        # Log configuration summary
+        log_configuration_summary(days_range, start_date_str, end_date_str, 
+                                 start_page, end_page, check_sheets, 
+                                 ocr_enabled, cleanup_old_sheets, reverse_order)
         
-        # 재시도 설정
-        max_retries = int(os.environ.get('MAX_RETRIES', '3'))
-        page_load_timeout = int(os.environ.get('PAGE_LOAD_TIMEOUT', '30'))
-        
-        # 역순 탐색 (기본 활성화)
-        reverse_order_str = os.environ.get('REVERSE_ORDER', 'true').lower()
-        reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
-        
-        # 환경 설정 로그
-        if start_date_str and end_date_str:
-            logger.info(f"MSIT 모니터 시작 - 검토 기간: {start_date_str}~{end_date_str}, 페이지: {start_page}~{end_page}")
-        else:
-            logger.info(f"MSIT 모니터 시작 - 최근 {days_range}일 검토, 페이지: {start_page}~{end_page}")
-            
-        logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 역순 탐색: {reverse_order}")
-        logger.info(f"스프레드시트 이름: {spreadsheet_name}")
-        
-        # 전역 설정 업데이트
-        CONFIG['spreadsheet_name'] = spreadsheet_name
-        CONFIG['update_consolidation'] = update_consolidation
-        CONFIG['api_request_wait'] = api_request_wait
-        CONFIG['ocr_enabled'] = ocr_enabled
-        CONFIG['max_retries'] = max_retries
-        CONFIG['page_load_timeout'] = page_load_timeout
-        CONFIG['cleanup_old_sheets'] = cleanup_old_sheets
-
-        
-        # Log the configuration
-        logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 시트 정리: {cleanup_old_sheets}")
-    
-    
+        status['config'] = {
+            'days_range': days_range,
+            'start_date': start_date_str,
+            'end_date': end_date_str,
+            'start_page': start_page,
+            'end_page': end_page,
+            'check_sheets': check_sheets,
+            'update_consolidation': update_consolidation,
+            'ocr_enabled': ocr_enabled,
+            'cleanup_old_sheets': cleanup_old_sheets,
+            'reverse_order': reverse_order
+        }
+        status['status'] = 'configured'
     except Exception as config_err:
-        logger.error(f"환경 설정 처리 중 오류: {str(config_err)}")
-        return
-    
-    # OCR 라이브러리 확인 (기존 코드)
-    if CONFIG['ocr_enabled']:
-        try:
-            import pytesseract
-            from PIL import Image, ImageEnhance, ImageFilter
-            import cv2
-            
-            # Tesseract 경로 설정
-            pytesseract_cmd = os.environ.get('PYTESSERACT_CMD', 'tesseract')
-            pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
-            logger.info(f"Tesseract 경로 설정: {pytesseract_cmd}")
-            
-            # Tesseract 가용성 확인
-            try:
-                version = pytesseract.get_tesseract_version()
-                logger.info(f"Tesseract OCR 버전: {version}")
-            except Exception as tess_err:
-                logger.warning(f"Tesseract OCR 설치 확인 실패: {str(tess_err)}")
-                if is_github_actions:
-                    # GitHub Actions에서는 tesseract 설치 여부 확인
-                    import subprocess
-                    try:
-                        result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
-                        if result.stdout:
-                            logger.info(f"Tesseract 실행 파일 경로: {result.stdout.strip()}")
-                        else:
-                            logger.warning("Tesseract 실행 파일을 찾을 수 없음")
-                            CONFIG['ocr_enabled'] = False
-                    except Exception as which_err:
-                        logger.warning(f"Tesseract 경로 확인 실패: {str(which_err)}")
-                        CONFIG['ocr_enabled'] = False
-                else:
-                    CONFIG['ocr_enabled'] = False
-            
-            logger.info("OCR 관련 라이브러리 로드 성공")
-        except ImportError as import_err:
-            logger.warning(f"OCR 라이브러리 가져오기 실패: {str(import_err)}")
-            CONFIG['ocr_enabled'] = False
-    
-    # 모니터링 실행
-    try:
-        await run_monitor(
-            days_range=days_range,
-            check_sheets=check_sheets,
-            start_page=start_page,
-            end_page=end_page,
-            start_date=start_date_str,
-            end_date=end_date_str,
-            reverse_order=reverse_order
-        )
-    except Exception as e:
-        logging.error(f"메인 함수 오류: {str(e)}", exc_info=True)
+        logger.error(f"{log_prefix} 설정 처리 중 오류: {str(config_err)}")
+        status['status'] = 'config_error'
+        status['error'] = str(config_err)
         
-        # 치명적 오류 시 텔레그램 알림 시도
-        try:
-            bot = telegram.Bot(token=CONFIG['telegram_token'])
-            # 오류 메시지 제한 (너무 길면 자름)
-            error_msg = str(e)
-            if len(error_msg) > 500:
-                error_msg = error_msg[:500] + "..."
-                
-            await bot.send_message(
-                chat_id=int(CONFIG['chat_id']),
-                text=f"⚠️ *MSIT 모니터링 치명적 오류*\n\n{error_msg}\n\n시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                parse_mode='Markdown'
+        # Send error notification
+        await send_error_notification({
+            'error_id': run_id,
+            'error_type': 'ConfigurationError',
+            'error_message': str(config_err),
+            'telegram_message': f"⚠️ *모니터링 설정 오류*\n\n설정 처리 중 문제가 발생했습니다: {str(config_err)}\n\n실행 ID: {run_id}"
+        })
+        
+        return status
+    
+    # Initialize resources
+    driver = None
+    gs_client = None
+    
+    try:
+        # Record start time
+        start_time = time.time()
+        
+        # Create directories
+        ensure_directories()
+        
+        # Initialize WebDriver with enhanced stealth settings
+        driver = setup_enhanced_driver()
+        logger.info(f"{log_prefix} WebDriver 초기화 완료")
+        status['status'] = 'driver_initialized'
+        
+        # Initialize Google Sheets client if needed
+        if check_sheets and CONFIG['gspread_creds']:
+            gs_client = setup_gspread_client()
+            if gs_client:
+                logger.info(f"{log_prefix} Google Sheets 클라이언트 초기화 완료")
+                status['has_sheets_client'] = True
+            else:
+                logger.warning(f"{log_prefix} Google Sheets 클라이언트 초기화 실패")
+                status['has_sheets_client'] = False
+                status['warnings'] += 1
+        
+        # Access MSIT website
+        access_success = await access_msit_website(driver, log_prefix)
+        if not access_success:
+            logger.error(f"{log_prefix} MSIT 웹사이트 접근 실패")
+            status['status'] = 'website_access_failed'
+            status['errors'] += 1
+            return status
+        
+        status['status'] = 'website_accessed'
+        
+        # Parse pages
+        all_posts, telecom_stats_posts, result_info = await parse_pages(
+            driver, start_page, end_page, days_range, 
+            start_date_str, end_date_str, reverse_order, log_prefix
+        )
+        
+        status['pages_processed'] = result_info.get('pages_processed', 0)
+        status['posts_found'] = len(all_posts)
+        status['stats_posts_found'] = len(telecom_stats_posts)
+        status['status'] = 'pages_parsed'
+        
+        logger.info(f"{log_prefix} 페이지 파싱 완료: {len(all_posts)}개 게시물, {len(telecom_stats_posts)}개 통신 통계")
+        
+        # Process telecom statistics posts if found
+        data_updates = []
+        
+        if gs_client and telecom_stats_posts and check_sheets:
+            data_updates = await process_stats_posts(
+                driver, gs_client, telecom_stats_posts, log_prefix
             )
-        except Exception as telegram_err:
-            logger.error(f"텔레그램 메시지 전송 중 추가 오류: {str(telegram_err)}")
+            
+            status['data_updates'] = len(data_updates)
+            status['status'] = 'data_processed'
+            
+            # Consolidate data if needed
+            if update_consolidation and data_updates:
+                consolidation_result = await consolidate_data(gs_client, data_updates, log_prefix)
+                status['consolidation_result'] = consolidation_result
+            
+            # Clean up date-specific sheets if requested
+            if cleanup_old_sheets and data_updates:
+                cleanup_result = await cleanup_sheets(gs_client, log_prefix)
+                status['cleanup_result'] = cleanup_result
+        
+        # Calculate execution time
+        end_time = time.time()
+        execution_time = end_time - start_time
+        status['execution_time'] = execution_time
+        logger.info(f"{log_prefix} 실행 시간: {execution_time:.2f}초")
+        
+        # Send notification
+        await send_notification(all_posts, data_updates, log_prefix)
+        
+        status['status'] = 'completed'
+        logger.info(f"{log_prefix} MSIT 통신 통계 모니터링 정상 종료")
+        
+        return status
+    
+    except Exception as e:
+        # Handle critical error
+        logger.error(f"{log_prefix} 모니터링 중 치명적 오류: {str(e)}")
+        status['status'] = 'critical_error'
+        status['error'] = str(e)
+        status['errors'] += 1
+        
+        if driver:
+            # Try to recover and collect diagnostic info
+            recovery_info = handle_error_and_recover(
+                driver, e, context="Main execution", 
+                screenshot=True, html_dump=True, restart_driver=False
+            )
+            status['recovery_info'] = recovery_info
+            
+            # Send error notification
+            await send_error_notification(recovery_info)
+        else:
+            # No driver available, send simple notification
+            simple_error = {
+                'error_id': run_id,
+                'error_type': type(e).__name__,
+                'error_message': str(e),
+                'telegram_message': f"❌ *모니터링 시스템 치명적 오류*\n\n오류: {str(e)}\n\n실행 ID: {run_id}"
+            }
+            await send_error_notification(simple_error)
+        
+        return status
+    
+    finally:
+        # Clean up resources
+        if driver:
+            try:
+                driver.quit()
+                logger.info(f"{log_prefix} WebDriver 종료")
+            except Exception as quit_err:
+                logger.warning(f"{log_prefix} WebDriver 종료 중 오류: {str(quit_err)}")
+        
+        # Save run status to file
+        try:
+            status['end_time'] = datetime.now().isoformat()
+            with open(f"run_status_{run_id}.json", 'w', encoding='utf-8') as f:
+                json.dump(status, f, ensure_ascii=False, indent=2)
+        except Exception as status_err:
+            logger.warning(f"{log_prefix} 실행 상태 저장 중 오류: {str(status_err)}")
 
 
 if __name__ == "__main__":
