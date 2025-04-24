@@ -8537,12 +8537,10 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
         
         logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
 
-
-
 def update_consolidated_sheets(client, data_updates):
     """
     개선된 통합 시트 업데이트 함수.
-    Raw 시트의 데이터를 통합 시트로 복사하는 작업을 더 견고하게 수행합니다.
+    계층 구조를 보존하며 Raw 시트의 마지막 열을 통합 시트로 복사합니다.
     
     Args:
         client: gspread client instance
@@ -8583,18 +8581,6 @@ def update_consolidated_sheets(client, data_updates):
                     # 통합 시트 생성 필요
                     logger.info(f"통합 시트 없음, '{consol_name}' 생성 예정")
                     raw_sheets.append((title, consol_name))
-        
-        if not raw_sheets:
-            # 직접 Raw 키워드로 검색
-            logger.warning("Raw-통합 시트 쌍을 찾지 못함, Raw 시트 기반으로 새 통합 시트 생성 시도")
-            
-            # 모든 Raw 시트 찾기
-            for title in worksheet_map.keys():
-                if '_Raw' in title:
-                    base_name = title.split('_Raw')[0]
-                    consol_name = f"{base_name}_통합"
-                    raw_sheets.append((title, consol_name))
-                    logger.info(f"Raw 시트 발견, 통합 시트 생성 예정: {title} -> {consol_name}")
         
         if not raw_sheets:
             logger.warning("통합할 Raw 시트를 찾을 수 없음")
@@ -8668,182 +8654,261 @@ def update_consolidated_sheets(client, data_updates):
                     logger.info(f"통합 시트 '{consol_name}'에서 {len(consol_data)}행 데이터 가져옴")
                 except Exception as consol_err:
                     logger.error(f"통합 시트 데이터 가져오기 실패: {str(consol_err)}")
-                    if len(consol_err.args) > 0 and "exceeds grid limits" in str(consol_err):
-                        # 시트가 비어있는 경우 기본 헤더 추가
-                        consol_ws.update_cell(1, 1, "기준일자")
-                        consol_data = [["기준일자"]]
-                        logger.info("통합 시트에 기본 헤더 추가")
-                    else:
-                        continue
-                
-                # 마지막 데이터 열 찾기 (개선된 알고리즘)
+                    # 시트가 비어있는 경우 기본 헤더 추가
+                    consol_ws.update_cell(1, 1, "기준일자")
+                    consol_data = [["기준일자"]]
+                    logger.info("통합 시트에 기본 헤더 추가")
+
+                # Raw 시트 헤더 가져오기
                 raw_headers = raw_data[0] if raw_data else []
                 
-                # 1. 모든 열에서 데이터가 있는 셀 수 계산
+                # 새로운 접근법: 데이터 열과 식별자 열 감지
+                # 1. 숫자 데이터가 시작되는 열 찾기 - 이 열부터 데이터 영역으로 간주
+                data_start_col = 0
                 data_density = []
-                for col_idx in range(len(raw_headers)):
-                    non_empty_count = 0
-                    for row_idx in range(1, len(raw_data)):  # 헤더 제외
-                        if row_idx < len(raw_data) and col_idx < len(raw_data[row_idx]):
-                            cell_value = raw_data[row_idx][col_idx]
-                            if cell_value and cell_value.strip() and cell_value.lower() not in ('none', 'nan', '-'):
-                                non_empty_count += 1
-                    data_density.append(non_empty_count)
                 
-                # 2. 데이터가 있는 열 중에서 가장 오른쪽(마지막) 열 선택
-                last_col_idx = -1
-                for col_idx in range(len(data_density)-1, 0, -1):  # 첫 번째 열은 항목명이므로 제외
-                    if data_density[col_idx] > 0:  # 데이터가 있는 열
-                        last_col_idx = col_idx
+                # 각 열의 숫자 데이터 비율 계산
+                for col_idx in range(len(raw_headers)):
+                    numeric_count = 0
+                    total_count = 0
+                    
+                    for row_idx in range(1, len(raw_data)):  # 헤더 제외
+                        if col_idx < len(raw_data[row_idx]):
+                            cell_value = raw_data[row_idx][col_idx]
+                            if cell_value and cell_value.strip():
+                                total_count += 1
+                                # 숫자 패턴 확인 (쉼표 포함 가능)
+                                if re.match(r'^-?[\d,]+\.?\d*$', cell_value.strip()):
+                                    numeric_count += 1
+                    
+                    numeric_ratio = numeric_count / total_count if total_count > 0 else 0
+                    data_density.append((col_idx, numeric_ratio))
+                
+                # 숫자 비율이 높은 열 중 가장 첫 번째 열을 데이터 시작 열로 간주
+                data_density.sort(key=lambda x: (x[1], x[0]), reverse=True)
+                
+                for col_idx, ratio in data_density:
+                    if ratio > 0.5:  # 50% 이상이 숫자인 경우를 데이터 열로 간주
+                        data_start_col = col_idx
                         break
                 
-                if last_col_idx <= 0:
-                    logger.warning(f"'{raw_name}'에서 유효한 데이터 열을 찾을 수 없음")
-                    continue
+                # 데이터 시작 열이 감지되지 않으면 기본값 사용
+                if data_start_col == 0:
+                    # 기본값: 5번째 열부터 데이터로 간주 (0-based)
+                    data_start_col = 5
                 
-                # 마지막 열의 헤더 가져오기
-                last_col_header = raw_headers[last_col_idx] if last_col_idx < len(raw_headers) else f"Column_{last_col_idx}"
-                logger.info(f"Raw 시트 '{raw_name}'의 마지막 데이터 열: {last_col_idx} ('{last_col_header}')")
+                logger.info(f"데이터 시작 열 감지: {data_start_col} (0-based)")
                 
-                # 통합 시트에 날짜 열 찾기 또는 추가
-                consol_headers = consol_data[0] if consol_data else []
+                # 2. 마지막 데이터 열 찾기
+                last_col_idx = -1
+                for col_idx in range(len(raw_headers)-1, data_start_col-1, -1):
+                    # 헤더가 유효한지 확인
+                    if col_idx < len(raw_headers) and raw_headers[col_idx] and raw_headers[col_idx].lower() not in ('nan', 'none', ''):
+                        # 데이터가 있는지 확인
+                        has_data = False
+                        for row_idx in range(1, len(raw_data)):
+                            if col_idx < len(raw_data[row_idx]):
+                                cell_value = raw_data[row_idx][col_idx]
+                                if cell_value and cell_value.strip() and cell_value.lower() not in ('nan', 'none', ''):
+                                    has_data = True
+                                    break
+                        
+                        if has_data:
+                            last_col_idx = col_idx
+                            break
                 
-                # 최신 날짜 또는 마지막 열 헤더를 사용
-                date_header = latest_date if latest_date else last_col_header
+                if last_col_idx < data_start_col:
+                    last_col_idx = len(raw_headers) - 1
+                    logger.warning(f"유효한 마지막 데이터 열을 찾을 수 없음, 마지막 열({last_col_idx})을 사용")
                 
-                if date_header in consol_headers:
-                    date_col_idx = consol_headers.index(date_header) + 1  # 1-based 인덱스
-                    logger.info(f"통합 시트의 날짜 열 '{date_header}' 위치: {date_col_idx}")
-                else:
-                    date_col_idx = len(consol_headers) + 1  # 새 열 추가
+                # 마지막 열의 헤더 확인
+                last_col_header = raw_headers[last_col_idx] if last_col_idx < len(raw_headers) else "Unknown"
+                logger.info(f"마지막 데이터 열: {last_col_idx} ('{last_col_header}')")
+                
+                # 3. 식별자 열 범위 설정 (0부터 data_start_col 전까지)
+                id_cols_range = range(0, data_start_col)
+                logger.info(f"식별자 열 범위: 0-{data_start_col-1}")
+                
+                # 통합 시트 헤더 확인/설정
+                consol_headers = consol_data[0] if consol_data and len(consol_data) > 0 else []
+                
+                # 빈 통합 시트인 경우 Raw 시트 헤더로 초기화
+                if not consol_headers or len(consol_headers) <= 1:
+                    # 계층 구조 헤더 복사
+                    header_updates = []
+                    for col_idx in id_cols_range:
+                        if col_idx < len(raw_headers):
+                            header_updates.append({
+                                'range': f'{chr(65+col_idx)}1',
+                                'values': [[raw_headers[col_idx]]]
+                            })
+                    
+                    # 날짜 헤더 추가
+                    date_col_idx = len(id_cols_range) + 1  # 1-based
+                    header_updates.append({
+                        'range': f'{chr(64+date_col_idx)}1',
+                        'values': [[latest_date]]
+                    })
+                    
+                    # 헤더 업데이트
                     try:
-                        # 새 날짜 헤더 추가
-                        consol_ws.update_cell(1, date_col_idx, date_header)
-                        logger.info(f"통합 시트에 새 날짜 열 추가: {date_col_idx} ('{date_header}')")
-                        time.sleep(1)  # API 제한 방지
+                        consol_ws.batch_update(header_updates)
+                        logger.info(f"통합 시트 헤더 초기화 완료")
+                        time.sleep(2)  # API 제한 방지
                         
-                        # 로컬 데이터 업데이트
-                        if consol_data:
-                            for row in consol_data:
-                                while len(row) < date_col_idx:
-                                    row.append("")
-                            consol_headers = consol_data[0]
-                            while len(consol_headers) < date_col_idx:
-                                consol_headers.append("")
-                            consol_headers[date_col_idx-1] = date_header
+                        # 로컬 헤더 업데이트
+                        while len(consol_headers) < date_col_idx:
+                            consol_headers.append("")
+                        for col_idx in id_cols_range:
+                            if col_idx < len(raw_headers) and col_idx < len(consol_headers):
+                                consol_headers[col_idx] = raw_headers[col_idx]
+                        consol_headers[date_col_idx-1] = latest_date
                     except Exception as header_err:
-                        logger.error(f"날짜 헤더 추가 실패: {str(header_err)}")
-                        continue
+                        logger.error(f"헤더 초기화 실패: {str(header_err)}")
+                else:
+                    # 기존 통합 시트에 날짜 열 추가
+                    date_col_idx = len(consol_headers) + 1  # 1-based
+                    for i, header in enumerate(consol_headers):
+                        if header == latest_date:
+                            date_col_idx = i + 1
+                            break
+                    
+                    if date_col_idx > len(consol_headers):
+                        # 새 날짜 헤더 추가
+                        try:
+                            consol_ws.update_cell(1, date_col_idx, latest_date)
+                            consol_headers.append(latest_date)
+                            logger.info(f"날짜 헤더 '{latest_date}' 추가 완료: 열 {date_col_idx}")
+                            time.sleep(1)  # API 제한 방지
+                        except Exception as date_err:
+                            logger.error(f"날짜 헤더 추가 실패: {str(date_err)}")
                 
-                # 업데이트할 데이터 준비
-                updates = []
-                
-                # 첫 번째 열(항목 열)의 기존 데이터 매핑
-                existing_items = {}
-                if consol_data and len(consol_data) > 1:
-                    for row_idx, row in enumerate(consol_data[1:], 2):  # 1-based, 헤더 제외
-                        if row and len(row) > 0 and row[0]:
-                            existing_items[row[0]] = row_idx
-                
-                # Raw 데이터의 각 행 처리
-                new_items_count = 0
-                cells_updated = 0
-                
-                for raw_row_idx in range(1, len(raw_data)):  # 헤더 제외
-                    if raw_row_idx >= len(raw_data) or len(raw_data[raw_row_idx]) == 0:
-                        continue
+                # 4. 복합 식별자를 사용한 행 매핑
+                # Raw 시트의 행 식별자 생성
+                raw_row_identifiers = []
+                for row_idx in range(1, len(raw_data)):  # 헤더 제외
+                    if row_idx < len(raw_data):
+                        id_values = []
                         
-                    # 첫 번째 열에서 항목 키 가져오기
-                    key = raw_data[raw_row_idx][0]
-                    if not key or key.strip() == "" or key.lower() in ('none', 'nan'):
-                        continue
+                        # 계층 구조의 모든 열 수집 (비어있지 않은 모든 값)
+                        for col_idx in id_cols_range:
+                            if col_idx < len(raw_data[row_idx]):
+                                value = raw_data[row_idx][col_idx].strip()
+                                id_values.append(value)
+                            else:
+                                id_values.append("")
+                        
+                        # 빈 문자열이 아닌 식별자 값만 있는지 확인
+                        non_empty_values = [v for v in id_values if v]
+                        if not non_empty_values:
+                            raw_row_identifiers.append((row_idx, None))
+                            continue
+                        
+                        # 더 명확한 구분을 위해 열 인덱스와 값 결합하여 복합 식별자 생성
+                        # 예: "col0=1-1|col1=SK브로드밴드"
+                        identifier_parts = [f"col{i}={v}" for i, v in enumerate(id_values) if v]
+                        identifier = "|".join(identifier_parts)
+                        
+                        raw_row_identifiers.append((row_idx, identifier))
+                
+                # 통합 시트의 행 식별자 생성
+                consol_row_identifiers = {}
+                if len(consol_data) > 1:
+                    for row_idx in range(1, len(consol_data)):  # 헤더 제외
+                        if row_idx < len(consol_data):
+                            id_values = []
+                            
+                            # 계층 구조의 모든 열 수집
+                            for col_idx in id_cols_range:
+                                if col_idx < len(consol_data[row_idx]):
+                                    value = consol_data[row_idx][col_idx].strip()
+                                    id_values.append(value)
+                                else:
+                                    id_values.append("")
+                            
+                            # 빈 문자열이 아닌 식별자 값만 있는지 확인
+                            non_empty_values = [v for v in id_values if v]
+                            if not non_empty_values:
+                                continue
+                            
+                            # 더 명확한 구분을 위해 열 인덱스와 값 결합
+                            identifier_parts = [f"col{i}={v}" for i, v in enumerate(id_values) if v]
+                            identifier = "|".join(identifier_parts)
+                            
+                            consol_row_identifiers[identifier] = row_idx + 1  # 1-based
+                
+                # 5. 데이터 업데이트 준비
+                updates = []
+                new_rows = []
+                
+                for raw_row_idx, identifier in raw_row_identifiers:
+                    if not identifier:
+                        continue  # 유효하지 않은 식별자 스킵
                     
                     # 마지막 열의 데이터 가져오기
-                    value = ""
-                    if last_col_idx < len(raw_data[raw_row_idx]):
-                        value = raw_data[raw_row_idx][last_col_idx]
-                        
-                        # 숫자 형식 유지 (쉼표나 공백이 있는 경우 처리)
-                        if value and value.strip():
-                            # 숫자 형식인지 확인 (쉼표 포함)
-                            if re.match(r'^-?[\d,]+\.?\d*$', value.strip()):
-                                # 값 그대로 유지 (숫자 형식 보존)
-                                pass
+                    last_col_value = ""
+                    if raw_row_idx < len(raw_data) and last_col_idx < len(raw_data[raw_row_idx]):
+                        last_col_value = raw_data[raw_row_idx][last_col_idx]
                     
-                    # 통합 시트에서 해당 행 찾기 또는 새 행 추가
-                    if key in existing_items:
-                        consol_row_idx = existing_items[key]
-                    else:
-                        # 새 항목 추가
-                        consol_row_idx = len(existing_items) + 2  # 헤더 + 기존 항목 + 1
-                        existing_items[key] = consol_row_idx
+                    # 통합 시트의 해당 행 찾기
+                    if identifier in consol_row_identifiers:
+                        # 기존 행 업데이트
+                        consol_row_idx = consol_row_identifiers[identifier]
                         
-                        # 첫 번째 열에 항목 추가
+                        # 날짜 열에 값 추가
+                        col_letter = chr(64 + date_col_idx) if date_col_idx <= 26 else chr(64 + date_col_idx // 26) + chr(64 + date_col_idx % 26)
                         updates.append({
-                            'range': f'A{consol_row_idx}',
-                            'values': [[key]]
+                            'range': f'{col_letter}{consol_row_idx}',
+                            'values': [[last_col_value]]
                         })
-                        new_items_count += 1
-                    
-                    # 날짜 열에 값 추가
-                    col_letter = chr(64 + date_col_idx) if date_col_idx <= 26 else chr(64 + date_col_idx // 26) + chr(64 + date_col_idx % 26)
-                    updates.append({
-                        'range': f'{col_letter}{consol_row_idx}',
-                        'values': [[value]]
-                    })
-                    cells_updated += 1
+                    else:
+                        # 새 행 추가 - 계층 구조와 함께 복사
+                        new_row_idx = len(consol_row_identifiers) + 2  # 헤더 + 기존 행 수 + 1
+                        consol_row_identifiers[identifier] = new_row_idx
+                        
+                        # 계층 구조 열 복사
+                        for col_idx in id_cols_range:
+                            if col_idx < len(raw_data[raw_row_idx]):
+                                col_letter = chr(65 + col_idx)
+                                updates.append({
+                                    'range': f'{col_letter}{new_row_idx}',
+                                    'values': [[raw_data[raw_row_idx][col_idx]]]
+                                })
+                        
+                        # 날짜 열에 값 추가
+                        col_letter = chr(64 + date_col_idx) if date_col_idx <= 26 else chr(64 + date_col_idx // 26) + chr(64 + date_col_idx % 26)
+                        updates.append({
+                            'range': f'{col_letter}{new_row_idx}',
+                            'values': [[last_col_value]]
+                        })
+                        
+                        new_rows.append(raw_row_idx)
                 
-                # 업데이트 실행 (더 적은 배치 크기로 안정성 향상)
+                # 6. 배치 처리로 업데이트 실행
                 if updates:
-                    logger.info(f"통합 시트 '{consol_name}'에 {len(updates)}개 업데이트 준비됨 (새 항목: {new_items_count}, 데이터 셀: {cells_updated})")
+                    logger.info(f"통합 시트 '{consol_name}'에 {len(updates)}개 업데이트 준비됨 (새 행: {len(new_rows)}개)")
                     
-                    # 항목 업데이트와 값 업데이트 분리
-                    item_updates = [u for u in updates if 'A' in u['range']]
-                    value_updates = [u for u in updates if 'A' not in u['range']]
-                    
-                    # 더 작은 배치로 나누어 처리
-                    batch_size = 10
+                    # 작은 배치로 나누어 처리
+                    batch_size = 5
                     success = True
                     
-                    # 1. 먼저 항목 업데이트
-                    if item_updates:
-                        for i in range(0, len(item_updates), batch_size):
-                            batch = item_updates[i:i+batch_size]
-                            try:
-                                consol_ws.batch_update(batch)
-                                logger.info(f"항목 배치 {i//batch_size + 1}/{(len(item_updates)-1)//batch_size + 1} 성공")
-                                time.sleep(2)  # API 제한 방지
-                            except Exception as batch_err:
-                                logger.error(f"항목 배치 업데이트 실패: {str(batch_err)}")
-                                success = False
-                                
-                                # 개별 업데이트로 폴백
-                                for item_update in batch:
-                                    try:
-                                        consol_ws.batch_update([item_update])
-                                        time.sleep(2)
-                                    except Exception as single_err:
-                                        logger.error(f"개별 항목 업데이트 실패: {str(single_err)}")
-                    
-                    # 2. 그 다음 값 업데이트
-                    if value_updates:
-                        for i in range(0, len(value_updates), batch_size):
-                            batch = value_updates[i:i+batch_size]
-                            try:
-                                consol_ws.batch_update(batch)
-                                logger.info(f"값 배치 {i//batch_size + 1}/{(len(value_updates)-1)//batch_size + 1} 성공")
-                                time.sleep(2)  # API 제한 방지
-                            except Exception as batch_err:
-                                logger.error(f"값 배치 업데이트 실패: {str(batch_err)}")
-                                success = False
-                                
-                                # 개별 업데이트로 폴백
-                                for value_update in batch:
-                                    try:
-                                        consol_ws.batch_update([value_update])
-                                        time.sleep(2)
-                                    except Exception as single_err:
-                                        logger.error(f"개별 값 업데이트 실패: {str(single_err)}")
+                    for i in range(0, len(updates), batch_size):
+                        batch = updates[i:i+batch_size]
+                        try:
+                            consol_ws.batch_update(batch)
+                            logger.info(f"배치 {i//batch_size + 1}/{(len(updates)-1)//batch_size + 1} 성공")
+                            time.sleep(2)  # API 제한 방지
+                        except Exception as batch_err:
+                            logger.error(f"배치 업데이트 실패: {str(batch_err)}")
+                            success = False
+                            
+                            # 개별 업데이트로 폴백
+                            for update in batch:
+                                try:
+                                    consol_ws.batch_update([update])
+                                    time.sleep(2)
+                                except Exception as single_err:
+                                    logger.error(f"개별 업데이트 실패: {str(single_err)}")
                     
                     if success:
                         updated_count += 1
@@ -8852,13 +8917,15 @@ def update_consolidated_sheets(client, data_updates):
                     # 메타데이터 추가
                     try:
                         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        meta_row = len(existing_items) + 5
+                        last_row = max(consol_row_identifiers.values()) if consol_row_identifiers else 1
+                        meta_row = last_row + 3  # 마지막 데이터 행 이후 공백 포함
                         meta_updates = [
                             {'range': f'A{meta_row}', 'values': [["Last Updated"]]},
                             {'range': f'B{meta_row}', 'values': [[now]]},
-                            {'range': f'C{meta_row}', 'values': [[f"총 {len(existing_items)}개 항목, {new_items_count}개 추가됨"]]},
+                            {'range': f'C{meta_row}', 'values': [[f"{len(new_rows)}개 행 추가됨"]]},
                         ]
                         consol_ws.batch_update(meta_updates)
+                        logger.info(f"메타데이터 업데이트 완료: 행 {meta_row}")
                     except Exception as meta_err:
                         logger.warning(f"메타데이터 업데이트 실패: {str(meta_err)}")
                 
@@ -8867,6 +8934,8 @@ def update_consolidated_sheets(client, data_updates):
                 
             except Exception as sheet_err:
                 logger.error(f"시트 '{raw_name}/{consol_name}' 처리 중 오류: {str(sheet_err)}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         logger.info(f"통합 시트 업데이트 완료: {updated_count}개 시트 업데이트됨")
         return updated_count
@@ -8876,7 +8945,6 @@ def update_consolidated_sheets(client, data_updates):
         import traceback
         logger.error(traceback.format_exc())
         return 0
-
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
     Enhanced function to create more informative placeholder DataFrames.
