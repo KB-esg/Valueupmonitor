@@ -8537,7 +8537,7 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
         
         logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
 
-def update_consolidated_sheets(client, data_updates):
+def update_consolidated_sheets(gs_client, data_updates):
     """
     개선된 통합 시트 업데이트 함수.
     Raw 시트의 모든 행과 계층 구조를 통합 시트에 복제하면서 과거 데이터를 보존합니다.
@@ -8613,7 +8613,23 @@ def update_consolidated_sheets(client, data_updates):
         updated_count = 0
         
         for raw_name, consol_name in raw_sheets:
+            # 중요: 모든 변수 명시적 초기화
+            raw_data = None
+            consol_data = None
+            raw_headers = None
+            consol_headers = None
+            structured_consol_data = {}
+            date_headers = []
+            date_col_indices = {}
+            new_headers = []
+            new_rows = []
+            id_cols_count = 0
+            id_cols_range = None
+            last_col_idx = -1
+            
             try:
+                logger.info(f"===== 시트 쌍 처리 시작: {raw_name} -> {consol_name} =====")
+                
                 # Raw 시트 가져오기
                 raw_ws = worksheet_map.get(raw_name)
                 if not raw_ws:
@@ -8639,6 +8655,16 @@ def update_consolidated_sheets(client, data_updates):
                 # Raw 시트 데이터 가져오기 (전체 데이터)
                 try:
                     raw_data = raw_ws.get_all_values()
+                    # 중요: 데이터 로그 추가 (첫 번째 행과 첫 번째 열의 일부만)
+                    if raw_data and len(raw_data) > 0:
+                        header_sample = raw_data[0][:5] if len(raw_data[0]) > 5 else raw_data[0]
+                        logger.info(f"{raw_name} 헤더 샘플: {header_sample}")
+                        
+                        # 첫 번째 데이터 행 샘플
+                        if len(raw_data) > 1:
+                            first_row_sample = raw_data[1][:5] if len(raw_data[1]) > 5 else raw_data[1]
+                            logger.info(f"{raw_name} 첫 번째 데이터 행 샘플: {first_row_sample}")
+                            
                     logger.info(f"Raw 시트 '{raw_name}'에서 {len(raw_data)}행 데이터 가져옴")
                 except Exception as raw_err:
                     logger.error(f"Raw 시트 데이터 가져오기 실패: {str(raw_err)}")
@@ -8656,8 +8682,8 @@ def update_consolidated_sheets(client, data_updates):
                     logger.error(f"통합 시트 데이터 가져오기 실패: {str(consol_err)}")
                     consol_data = []
                 
-                # Raw 시트 헤더 가져오기
-                raw_headers = raw_data[0] if raw_data else []
+                # Raw 시트 헤더 가져오기 - 깊은 복사 적용
+                raw_headers = raw_data[0].copy() if raw_data else []
                 
                 # 데이터 열 범위와 식별자 열 범위 결정
                 # 기본값: 계층구조는 0-4열, 데이터는 5열부터
@@ -8693,14 +8719,14 @@ def update_consolidated_sheets(client, data_updates):
                 # 통합 시트 헤더 처리
                 consol_headers = []
                 if consol_data and len(consol_data) > 0:
-                    consol_headers = consol_data[0]
+                    consol_headers = consol_data[0].copy()  # 깊은 복사
                 
                 # 1. 통합 시트 데이터를 메모리에 구조화해서 저장
-                structured_consol_data = {}
+                structured_consol_data = {}  # 명시적 초기화
                 
                 # 기존 통합 시트의 헤더
-                date_headers = []
-                date_col_indices = {}  # 날짜 헤더 -> 열 인덱스 매핑
+                date_headers = []  # 명시적 초기화
+                date_col_indices = {}  # 명시적 초기화
                 
                 if consol_headers:
                     for i, header in enumerate(consol_headers[id_cols_count:], id_cols_count):
@@ -8740,7 +8766,7 @@ def update_consolidated_sheets(client, data_updates):
                         # 데이터 저장 (날짜별 값)
                         if row_id not in structured_consol_data:
                             structured_consol_data[row_id] = {
-                                'id_vals': consol_data[row_idx][:id_cols_count],
+                                'id_vals': consol_data[row_idx][:id_cols_count].copy(),  # 깊은 복사
                                 'date_vals': {}
                             }
                             
@@ -8751,7 +8777,7 @@ def update_consolidated_sheets(client, data_updates):
                 
                 # 2. Raw 시트 데이터를 기반으로 새 구조 생성
                 # 새 헤더 생성 (계층 구조 + 날짜 헤더)
-                new_headers = []
+                new_headers = []  # 명시적 초기화
                 
                 # 계층 구조 헤더 추가
                 for col_idx in id_cols_range:
@@ -8766,7 +8792,7 @@ def update_consolidated_sheets(client, data_updates):
                 
                 # 3. Raw 시트 데이터를 토대로 새 행 생성
                 # 새로 추가될 데이터 행 준비
-                new_rows = [new_headers]  # 헤더 행부터 시작
+                new_rows = [new_headers.copy()]  # 헤더 행부터 시작, 깊은 복사
                 
                 # Raw 시트의 모든 행 처리
                 for row_idx in range(1, len(raw_data)):
@@ -8788,23 +8814,33 @@ def update_consolidated_sheets(client, data_updates):
                         id_parts.append(f"col{col_idx}={val.strip()}")
                     row_id = "|".join(id_parts)
                     
+                    # 로그 추가 (몇 개 행만 샘플로 로깅)
+                    if row_idx < 3 or row_idx % 20 == 0:  # 첫 두 행과 20행마다 로깅
+                        logger.info(f"{raw_name} 행 {row_idx}: ID={row_id}")
+                    
                     # 새 행 데이터 준비
-                    new_row = id_vals.copy()  # 계층 구조 먼저 복사
+                    new_row = id_vals.copy()  # 계층 구조 먼저 복사, 깊은 복사 적용
                     
                     # 기존 데이터가 있는지 확인
-                    existing_data = structured_consol_data.get(row_id, {'id_vals': id_vals, 'date_vals': {}})
+                    existing_data = structured_consol_data.get(row_id, {'id_vals': id_vals.copy(), 'date_vals': {}})
                     
                     # 각 날짜 열에 대한 값 추가
                     for date_header in date_headers:
                         # 최신 날짜이면 Raw 데이터에서 값 가져오기
                         if date_header == latest_date:
                             if last_col_idx < len(raw_data[row_idx]):
-                                new_row.append(raw_data[row_idx][last_col_idx])
+                                current_value = raw_data[row_idx][last_col_idx]
+                                new_row.append(current_value)
+                                
+                                # 로깅 추가 (샘플 행의 값)
+                                if row_idx < 3 or row_idx % 20 == 0:
+                                    logger.info(f"{raw_name} 행 {row_idx}, {date_header} 값: {current_value}")
                             else:
                                 new_row.append("")
                         else:
                             # 기존 날짜 열이면 통합 시트에서 값 가져오기
-                            new_row.append(existing_data['date_vals'].get(date_header, ""))
+                            existing_value = existing_data['date_vals'].get(date_header, "")
+                            new_row.append(existing_value)
                     
                     # 새 행 추가
                     new_rows.append(new_row)
@@ -8814,14 +8850,14 @@ def update_consolidated_sheets(client, data_updates):
                 
                 # 4. 통합 시트에는 있지만 Raw 시트에는 없는 행 추가
                 for row_id, data in structured_consol_data.items():
-                    id_vals = data['id_vals']
+                    id_vals = data['id_vals'].copy()  # 깊은 복사
                     
                     # 빈 행 스킵
                     if not any(val.strip() for val in id_vals):
                         continue
                         
                     # 새 행 준비
-                    new_row = id_vals.copy()
+                    new_row = id_vals.copy()  # 깊은 복사
                     
                     # 각 날짜 열에 대한 값 추가
                     for date_header in date_headers:
@@ -8902,10 +8938,34 @@ def update_consolidated_sheets(client, data_updates):
                     except Exception as alt_err:
                         logger.error(f"대체 업데이트 방법도 실패: {str(alt_err)}")
                 
+                # 중요: 각 시트 처리 후 변수 명시적 삭제
+                del raw_data
+                del consol_data
+                del raw_headers
+                del consol_headers
+                del structured_consol_data
+                del date_headers
+                del date_col_indices
+                del new_headers
+                del new_rows
+                
+                logger.info(f"===== 시트 쌍 처리 완료: {raw_name} -> {consol_name} =====")
+                
             except Exception as sheet_err:
                 logger.error(f"시트 '{raw_name}/{consol_name}' 처리 중 오류: {str(sheet_err)}")
                 import traceback
                 logger.error(traceback.format_exc())
+                
+                # 중요: 오류 발생해도 변수 초기화
+                del raw_data
+                del consol_data
+                del raw_headers
+                del consol_headers
+                del structured_consol_data
+                del date_headers
+                del date_col_indices
+                del new_headers
+                del new_rows
         
         logger.info(f"통합 시트 업데이트 완료: {updated_count}개 시트 업데이트됨")
         return updated_count
@@ -8915,8 +8975,6 @@ def update_consolidated_sheets(client, data_updates):
         import traceback
         logger.error(traceback.format_exc())
         return 0
-
-
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
     Enhanced function to create more informative placeholder DataFrames.
