@@ -3247,8 +3247,10 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         entire_html = driver.execute_script("return document.documentElement.innerHTML;")
         if entire_html:
             # 디버깅용 HTML 저장
+            debug_path = f"debug_html_{int(time.time())}.html"
             with open(f"entire_html_{int(time.time())}.html", 'w', encoding='utf-8') as f:
                 f.write(entire_html)
+            logger.info(f"디버깅용 HTML 저장: {debug_path}")
             
             # HTML에서 데이터 추출
             js_extracted_data = extract_data_from_html(entire_html)
@@ -6825,9 +6827,16 @@ def update_single_sheet(spreadsheet, sheet_name, df, date_str, post_info=None):
 
 # 새로운 함수: Raw 업데이트를 위한 시트 처리 함수
 def update_single_sheet_raw(spreadsheet, sheet_name, df, date_str, post_info=None):
-    """이전 함수와의 호환성을 위한 래퍼"""
+     # 데이터프레임의 첫 몇 행 로깅 (추가)
+    logger.info(f"시트 '{sheet_name}' 데이터 처리 시작, 크기: {df.shape}")
+    if not df.empty:
+        logger.info(f"첫 행 데이터 샘플: {df.iloc[0].to_dict()}")
+        # 컬럼명 로깅
+        logger.info(f"컬럼 목록: {list(df.columns)}")
+    
+    # 기존 코드 계속...
     return update_sheet(spreadsheet, sheet_name, df, date_str, post_info, {'mode': 'replace'})
-
+    
 def ensure_metadata_sheet(spreadsheet):
     """
     Ensure that a metadata sheet exists in the spreadsheet.
@@ -9292,6 +9301,7 @@ def process_document_sheets(driver, sheet_tabs):
                 sheet_name = tab.text.strip()
                 if not sheet_name:
                     sheet_name = f"시트{original_index+1}"
+                logger.info(f"시트 '{sheet_name}' 데이터 매핑 시작, 원래 인덱스: {original_index}")
             except:
                 sheet_name = f"시트{i+1}"
                 
