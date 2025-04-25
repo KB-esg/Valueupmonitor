@@ -3708,6 +3708,9 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         logger.error(f"OCR 폴백 프로세스 중 오류: {str(e)}")
         return None
 
+
+
+
 def access_iframe_direct(driver, file_params):
     """
     iframe에 직접 접근하여 SynapDocViewServer의 데이터를 추출하는 개선된 함수
@@ -4102,7 +4105,95 @@ def access_iframe_direct(driver, file_params):
     
     return None
 
+def verify_tab_change(driver, tab_name, timeout=10):
+    """Verify that the tab has changed by checking various indicators"""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            # Check page title or header that might reflect current tab
+            header_text = driver.execute_script("""
+                const headers = document.querySelectorAll('.sheet-header, .page-header, h1, h2');
+                for (let i = 0; i < headers.length; i++) {
+                    if (headers[i].textContent.includes(arguments[0])) {
+                        return true;
+                    }
+                }
+                return false;
+            """, tab_name)
+            
+            if header_text:
+                return True
+                
+            # Check if tab appears selected
+            tab_active = driver.execute_script("""
+                const tabs = document.querySelectorAll('.sheet-list__sheet-tab');
+                for (let i = 0; i < tabs.length; i++) {
+                    if (tabs[i].textContent.includes(arguments[0]) && 
+                        (tabs[i].classList.contains('active') || 
+                         tabs[i].getAttribute('aria-selected') === 'true')) {
+                        return true;
+                    }
+                }
+                return false;
+            """, tab_name)
+            
+            if tab_active:
+                return True
+                
+            time.sleep(0.5)
+        except:
+            time.sleep(0.5)
+    
+    return False
 
+def robust_tab_click(driver, tab, tab_name, max_attempts=3):
+    """Try multiple approaches to click a tab and verify the switch"""
+    for attempt in range(max_attempts):
+        try:
+            # Try different click methods
+            if attempt == 0:
+                driver.execute_script("arguments[0].click();", tab)
+            elif attempt == 1:
+                tab.click()  # Direct click
+            else:
+                # Try finding by text and clicking
+                tabs = driver.find_elements(By.XPATH, f"//div[contains(@class, 'tab') and contains(text(), '{tab_name}')]")
+                if tabs:
+                    driver.execute_script("arguments[0].click();", tabs[0])
+            
+            # Wait for tab change to take effect
+            time.sleep(2)
+            
+            # Verify the tab changed
+            if verify_tab_change(driver, tab_name):
+                return True
+                
+            # Try forcing a refresh if the tab didn't change
+            force_tab_refresh(driver, tab_name)
+            time.sleep(2)
+            
+        except Exception as e:
+            logger.warning(f"Tab click attempt {attempt+1} failed: {str(e)}")
+            time.sleep(1)
+    
+    return False
+
+def force_tab_refresh(driver, tab_index):
+    """Force a tab refresh by manipulating the iframe source if needed"""
+    try:
+        iframe = driver.find_element(By.ID, "innerWrap")
+        current_src = iframe.get_attribute('src')
+        
+        # Some document viewers use URL parameters to specify tabs
+        if '?' in current_src:
+            base_url = current_src.split('?')[0]
+            new_src = f"{base_url}?tab={tab_index}"
+            driver.execute_script(f"document.getElementById('innerWrap').src = '{new_src}';")
+            return True
+    except:
+        pass
+    
+    return False
 
 
 def find_content_areas(driver):
