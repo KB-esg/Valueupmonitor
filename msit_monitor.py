@@ -9190,7 +9190,8 @@ def setup_enhanced_logging():
 # 수정: 시트 탭 전환 로직 개선 및 탭 전환 확인 메커니즘 추가
 def process_document_sheets(driver, sheet_tabs):
     """
-    문서 뷰어에서 각 시트 탭을 순차적으로 전환하고 데이터를 추출하는 개선된 함수
+    문서 뷰어에서 각 시트 탭을 2→3→4→1 순서로 전환하고 데이터를 추출하는 개선된 함수
+    마지막에는 첫 번째 시트가 표시되도록 설계
     
     Args:
         driver: Selenium WebDriver 인스턴스
@@ -9208,62 +9209,77 @@ def process_document_sheets(driver, sheet_tabs):
             return single_sheet_data
         return {}
     
-    logger.info(f"총 {len(sheet_tabs)}개 시트 탭 발견, 순차적으로 처리합니다")
+    logger.info(f"총 {len(sheet_tabs)}개 시트 탭 발견, 처리 순서 변경: 2→3→4→...→1")
+    
+    # 순서 변경: 첫 번째 시트를 마지막에 처리하기 위해 탭 순서 재정렬
+    # 첫 번째 탭이 있으면 마지막으로 이동, 나머지는 원래 순서대로
+    reordered_tabs = []
+    if len(sheet_tabs) > 1:
+        # 첫 번째 탭 저장
+        first_tab = sheet_tabs[0]
+        # 나머지 탭 추가 (2번째부터 끝까지)
+        reordered_tabs.extend(sheet_tabs[1:])
+        # 첫 번째 탭을 마지막에 추가
+        reordered_tabs.append(first_tab)
+    else:
+        # 시트가 1개면 그대로 사용
+        reordered_tabs = sheet_tabs
     
     # 각 시트 탭 처리
-    for i, tab in enumerate(sheet_tabs):
+    for i, tab in enumerate(reordered_tabs):
         try:
             # 시트 탭 텍스트 추출
             try:
+                original_index = sheet_tabs.index(tab)  # 원래 인덱스 확인
                 sheet_name = tab.text.strip()
                 if not sheet_name:
-                    sheet_name = f"시트{i+1}"
+                    sheet_name = f"시트{original_index+1}"
             except:
                 sheet_name = f"시트{i+1}"
                 
-            logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
+            is_first_tab = (tab == sheet_tabs[0])
+            logger.info(f"시트 {i+1}/{len(reordered_tabs)} 처리 중: {sheet_name} (원래 순서: {sheet_tabs.index(tab)+1})")
             
-            # 첫 번째 탭이 아닐 경우에만 클릭 (첫 번째는 기본적으로 선택되어 있음)
-            if i > 0:
-                # 현재 시트 내용의 특징적인 텍스트나 요소를 저장 (변경 감지용)
-                before_content_hash = get_content_hash(driver)
+            # 클릭해서 탭 전환 (reordered_tabs의 모든 요소에 대해 클릭 필요)
+            # 현재 시트 내용의 특징적인 텍스트나 요소를 저장 (변경 감지용)
+            before_content_hash = get_content_hash(driver)
+            
+            # JavaScript로 클릭 (더 안정적)
+            try:
+                logger.info(f"탭 '{sheet_name}' 클릭 중...")
+                driver.execute_script("arguments[0].click();", tab)
                 
-                # JavaScript로 클릭 (더 안정적)
-                try:
-                    logger.info(f"탭 '{sheet_name}' 클릭 중...")
+                # 충분한 대기 시간 설정 (3초)
+                time.sleep(3)
+                
+                # 내용이 변경되었는지 확인
+                after_content_hash = get_content_hash(driver)
+                
+                if before_content_hash == after_content_hash:
+                    # 내용이 변경되지 않았을 경우 추가 대기 및 재확인
+                    logger.warning(f"탭 '{sheet_name}' 클릭 후 내용 변경이 감지되지 않음, 추가 대기 중...")
+                    time.sleep(2)  # 추가 대기
+                    
+                    # 한 번 더 클릭 시도
                     driver.execute_script("arguments[0].click();", tab)
+                    time.sleep(2)
                     
-                    # 충분한 대기 시간 설정 (3초)
-                    time.sleep(3)
-                    
-                    # 내용이 변경되었는지 확인
+                    # 다시 확인
                     after_content_hash = get_content_hash(driver)
-                    
                     if before_content_hash == after_content_hash:
-                        # 내용이 변경되지 않았을 경우 추가 대기 및 재확인
-                        logger.warning(f"탭 '{sheet_name}' 클릭 후 내용 변경이 감지되지 않음, 추가 대기 중...")
-                        time.sleep(2)  # 추가 대기
-                        
-                        # 한 번 더 클릭 시도
-                        driver.execute_script("arguments[0].click();", tab)
-                        time.sleep(2)
-                        
-                        # 다시 확인
-                        after_content_hash = get_content_hash(driver)
-                        if before_content_hash == after_content_hash:
-                            logger.warning(f"탭 '{sheet_name}' 전환 실패, 내용이 변경되지 않음")
-                    else:
-                        logger.info(f"탭 '{sheet_name}' 내용 변경 확인됨")
-                        
-                except Exception as click_err:
-                    logger.error(f"탭 '{sheet_name}' 클릭 중 오류: {str(click_err)}")
-                    # 클릭 실패 시 다른 방법 시도 (Selenium 클릭)
-                    try:
-                        tab.click()
-                        time.sleep(3)  # 대기
-                    except:
-                        logger.error(f"대체 클릭 방법도 실패, 다음 시트로 진행")
-                        continue
+                        logger.warning(f"탭 '{sheet_name}' 전환 실패, 내용이 변경되지 않음")
+                else:
+                    logger.info(f"탭 '{sheet_name}' 내용 변경 확인됨")
+                    
+            except Exception as click_err:
+                logger.error(f"탭 '{sheet_name}' 클릭 중 오류: {str(click_err)}")
+                # 클릭 실패 시 다른 방법 시도 (Selenium 클릭)
+                try:
+                    tab.click()
+                    time.sleep(3)  # 대기
+                except:
+                    logger.error(f"대체 클릭 방법도 실패, 다음 시트로 진행")
+                    continue
             
             # 현재 탭에서 데이터 추출
             sheet_data = extract_current_sheet_data(driver, sheet_name)
@@ -9293,6 +9309,8 @@ def process_document_sheets(driver, sheet_tabs):
     # 모든 시트 처리 완료
     if not all_sheets:
         logger.warning("모든 시트 탭에서 데이터를 추출하지 못함")
+    else:
+        logger.info(f"총 {len(all_sheets)}개 시트에서 데이터 추출 완료 (마지막 표시 시트: 첫 번째 시트)")
     
     return all_sheets
 
