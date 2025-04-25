@@ -3818,14 +3818,14 @@ def access_iframe_direct(driver, file_params):
                         logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
                         
                         # 첫 번째가 아닌 시트는 클릭하여 전환
-                        if i > 0:
-                            try:
-                                # JavaScript로 클릭 (더 안정적)
-                                driver.execute_script("arguments[0].click();", tab)
-                                time.sleep(3)  # 시트 전환 대기
-                            except Exception as click_err:
-                                logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
-                                continue
+                        
+                        try:
+                            # JavaScript로 클릭 (더 안정적)
+                            driver.execute_script("arguments[0].click();", tab)
+                            time.sleep(3)  # 시트 전환 대기
+                        except Exception as click_err:
+                            logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
+                            continue
                         
                         try:
                             # mainTable 구조에서 직접 데이터 추출
