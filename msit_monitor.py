@@ -3708,527 +3708,6 @@ def access_iframe_with_ocr_fallback(driver, file_params):
         logger.error(f"OCR 폴백 프로세스 중 오류: {str(e)}")
         return None
 
-def extract_data_from_sheet_tabs(driver):
-    """
-    시트 탭 클릭을 통한 데이터 추출 개선 함수
-    
-    Args:
-        driver: Selenium WebDriver 인스턴스
-        
-    Returns:
-        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
-    """
-    all_sheets_data = {}
-    
-    try:
-        # 문서 뷰어 감지
-        logger.info("문서 뷰어 감지 시도")
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "iframe"))
-        )
-        
-        # 시트 탭 찾기
-        sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
-        if not sheet_tabs:
-            # 다른 선택자로 시트 탭 찾기
-            sheet_tabs = driver.find_elements(By.CSS_SELECTOR, "div[role='tab'], .tab-item, li.tab")
-            
-        if sheet_tabs:
-            logger.info(f"시트 탭 {len(sheet_tabs)}개 발견")
-            
-            for i, tab in enumerate(sheet_tabs):
-                sheet_name = tab.text.strip() if tab.text.strip() else f"시트{i+1}"
-                logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
-                
-                # 시트 탭 클릭 전 스크린샷
-                take_screenshot(driver, f"before_tab_click_{sheet_name}")
-                
-                # 첫 번째가 아닌 시트는 클릭하여 전환
-                if i > 0:
-                    try:
-                        # 자바스크립트로 탭 클릭 (더 안정적)
-                        driver.execute_script("arguments[0].click();", tab)
-                        logger.info(f"탭 '{sheet_name}' 클릭")
-                        
-                        # 충분한 대기 시간 추가 (중요)
-                        time.sleep(5)  # 탭 변경 및 데이터 로드 대기
-                    except Exception as click_err:
-                        logger.error(f"시트 탭 클릭 실패 ({sheet_name}): {str(click_err)}")
-                        continue
-                        
-                # 탭 클릭 후 스크린샷
-                take_screenshot(driver, f"after_tab_click_{sheet_name}")
-                
-                # 여러 방법으로 데이터 추출 시도
-                sheet_data = extract_data_with_multiple_methods(driver, sheet_name)
-                
-                if sheet_data is not None and not sheet_data.empty:
-                    all_sheets_data[sheet_name] = sheet_data
-                    logger.info(f"시트 '{sheet_name}'에서 데이터 추출 성공: {sheet_data.shape[0]}행 {sheet_data.shape[1]}열")
-                else:
-                    logger.warning(f"시트 '{sheet_name}'에서 데이터를 추출하지 못했습니다")
-        else:
-            logger.warning("시트 탭을 찾을 수 없습니다")
-            
-            # 단일 시트 처리
-            sheet_data = extract_data_with_multiple_methods(driver, "기본 시트")
-            if sheet_data is not None and not sheet_data.empty:
-                all_sheets_data["기본 시트"] = sheet_data
-                logger.info(f"단일 시트에서 데이터 추출 성공: {sheet_data.shape[0]}행 {sheet_data.shape[1]}열")
-        
-        return all_sheets_data
-    
-    except Exception as e:
-        logger.error(f"시트 탭을 통한 데이터 추출 중 오류: {str(e)}")
-        return all_sheets_data  # 부분적으로라도 추출된 데이터 반환
-
-def extract_data_with_multiple_methods(driver, sheet_name):
-    """
-    여러 방법을 시도하여 현재 활성화된 시트에서 데이터 추출
-    
-    Args:
-        driver: Selenium WebDriver 인스턴스
-        sheet_name: 시트 이름
-        
-    Returns:
-        pandas.DataFrame: 추출된 DataFrame 또는 None
-    """
-    try:
-        # 1. mainTable 방식 시도
-        logger.info(f"방법 1: '{sheet_name}'에서 mainTable 방식으로 데이터 추출 시도")
-        
-        # mainTable 요소 찾기
-        main_table = None
-        try:
-            main_table = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "mainTable"))
-            )
-            logger.info(f"시트 '{sheet_name}'에서 mainTable 요소 찾음")
-        except TimeoutException:
-            logger.warning(f"시트 '{sheet_name}'에서 mainTable 요소를 찾을 수 없음")
-        
-        if main_table:
-            try:
-                # JavaScript로 테이블 데이터 추출 (메모리 효율적)
-                table_data = driver.execute_script("""
-                    try {
-                        const mainTable = document.getElementById('mainTable');
-                        if (!mainTable) return null;
-                        
-                        // 여러 방법으로 행 찾기
-                        let rows = mainTable.querySelectorAll('div[class*="tr"]');
-                        if (!rows || rows.length === 0) {
-                            // 직접 자식 요소 시도
-                            rows = Array.from(mainTable.children);
-                        }
-                        
-                        if (!rows || rows.length === 0) return null;
-                        
-                        const tableData = [];
-                        for (let i = 0; i < rows.length; i++) {
-                            const row = rows[i];
-                            
-                            // 여러 방법으로 셀 찾기
-                            let cells = row.querySelectorAll('div[class*="td"]');
-                            if (!cells || cells.length === 0) {
-                                // 직계 자식 요소 시도
-                                cells = Array.from(row.children);
-                            }
-                            
-                            if (!cells || cells.length === 0) continue;
-                            
-                            const rowData = [];
-                            for (let j = 0; j < cells.length; j++) {
-                                rowData.push(cells[j].textContent.trim());
-                            }
-                            
-                            if (rowData.length > 0) {
-                                tableData.push(rowData);
-                            }
-                        }
-                        
-                        return tableData;
-                    } catch (e) {
-                        return { error: e.message };
-                    }
-                """)
-                
-                if isinstance(table_data, list) and table_data:
-                    try:
-                        # 첫 번째 행을 헤더로 가정
-                        headers = table_data[0]
-                        data = table_data[1:]
-                        
-                        if headers and data:
-                            df = pd.DataFrame(data, columns=headers)
-                            logger.info(f"시트 '{sheet_name}'에서 mainTable 방식으로 {df.shape[0]}행 {df.shape[1]}열 추출 성공")
-                            return df
-                    except Exception as df_err:
-                        logger.warning(f"시트 '{sheet_name}'에서 DataFrame 변환 오류: {str(df_err)}")
-            except Exception as js_err:
-                logger.warning(f"시트 '{sheet_name}'에서 JavaScript 실행 오류: {str(js_err)}")
-        
-        # 2. 컨테이너 선택자 방식 시도
-        logger.info(f"방법 2: '{sheet_name}'에서 컨테이너 선택자 방식으로 데이터 추출 시도")
-        selectors = [
-            "div[id='container']",
-            ".grid-container",
-            ".table-container",
-            "div[class*='grid']",
-            "div[class*='table']"
-        ]
-        
-        for selector in selectors:
-            try:
-                containers = driver.find_elements(By.CSS_SELECTOR, selector)
-                if containers:
-                    logger.info(f"시트 '{sheet_name}'에서 '{selector}' 선택자로 {len(containers)}개 컨테이너 찾음")
-                    
-                    for container_idx, container in enumerate(containers):
-                        try:
-                            # 행 요소 찾기 (여러 선택자 시도)
-                            row_selectors = [
-                                "div[class*='tr']", 
-                                "div[class*='row']",
-                                "> div"  # 직계 자식 div
-                            ]
-                            
-                            rows = []
-                            for row_selector in row_selectors:
-                                try:
-                                    temp_rows = container.find_elements(By.CSS_SELECTOR, row_selector)
-                                    if temp_rows and len(temp_rows) > 1:  # 최소 2행 필요 (헤더 + 데이터)
-                                        rows = temp_rows
-                                        logger.info(f"컨테이너 {container_idx+1}에서 '{row_selector}' 선택자로 {len(rows)}개 행 찾음")
-                                        break
-                                except:
-                                    continue
-                            
-                            if not rows:
-                                continue
-                                
-                            # 첫 번째 행에서 셀 선택자 결정
-                            first_row = rows[0]
-                            cell_selectors = [
-                                "div[class*='td']", 
-                                "div[class*='cell']",
-                                "> div"  # 직계 자식 div
-                            ]
-                            
-                            cell_selector = None
-                            for cs in cell_selectors:
-                                try:
-                                    cells = first_row.find_elements(By.CSS_SELECTOR, cs)
-                                    if cells and len(cells) > 0:
-                                        cell_selector = cs
-                                        break
-                                except:
-                                    continue
-                            
-                            if not cell_selector:
-                                continue
-                                
-                            # 데이터 추출
-                            table_data = []
-                            for row in rows:
-                                try:
-                                    cells = row.find_elements(By.CSS_SELECTOR, cell_selector)
-                                    row_data = [cell.text.strip() for cell in cells]
-                                    if any(cell for cell in row_data):  # 빈 행 제외
-                                        table_data.append(row_data)
-                                except:
-                                    continue
-                            
-                            if len(table_data) >= 2:  # 최소 헤더 + 1개 데이터 행
-                                headers = table_data[0]
-                                data = table_data[1:]
-                                
-                                # 헤더가 비어있으면 자동 생성
-                                if not any(h for h in headers):
-                                    col_count = max(len(row) for row in data)
-                                    headers = [f"Column_{i+1}" for i in range(col_count)]
-                                
-                                # DataFrame 생성
-                                df = pd.DataFrame(data, columns=headers)
-                                logger.info(f"시트 '{sheet_name}'에서 컨테이너 선택자 방식으로 {df.shape[0]}행 {df.shape[1]}열 추출 성공")
-                                return df
-                        except Exception as container_err:
-                            logger.warning(f"컨테이너 {container_idx+1} 처리 중 오류: {str(container_err)}")
-            except Exception as selector_err:
-                logger.debug(f"선택자 '{selector}' 처리 중 오류: {str(selector_err)}")
-                continue
-        
-        # 3. iframe 내부 접근 시도
-        logger.info(f"방법 3: '{sheet_name}'에서 iframe 내부 접근 시도")
-        try:
-            iframe = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.TAG_NAME, "iframe"))
-            )
-            
-            # iframe으로 전환
-            driver.switch_to.frame(iframe)
-            logger.info(f"시트 '{sheet_name}'에서 iframe으로 전환 성공")
-            
-            # iframe 내에서 테이블 찾기
-            tables = driver.find_elements(By.TAG_NAME, "table")
-            
-            if tables:
-                logger.info(f"iframe 내에서 {len(tables)}개 테이블 찾음")
-                
-                # 가장 큰 테이블 선택
-                largest_table = max(tables, key=lambda t: len(t.find_elements(By.TAG_NAME, "tr")))
-                
-                # 테이블 데이터 추출
-                rows = largest_table.find_elements(By.TAG_NAME, "tr")
-                
-                table_data = []
-                for row in rows:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if not cells:  # th도 확인
-                        cells = row.find_elements(By.TAG_NAME, "th")
-                        
-                    row_data = [cell.text.strip() for cell in cells]
-                    if any(cell for cell in row_data):  # 빈 행 제외
-                        table_data.append(row_data)
-                
-                # 기본 컨텐츠로 돌아가기
-                driver.switch_to.default_content()
-                
-                if len(table_data) >= 2:  # 최소 헤더 + 1개 데이터 행
-                    headers = table_data[0]
-                    data = table_data[1:]
-                    
-                    # 헤더가 비어있으면 자동 생성
-                    if not any(h for h in headers):
-                        col_count = max(len(row) for row in data)
-                        headers = [f"Column_{i+1}" for i in range(col_count)]
-                    
-                    # DataFrame 생성
-                    df = pd.DataFrame(data, columns=headers)
-                    logger.info(f"시트 '{sheet_name}'에서 iframe 내부 테이블로 {df.shape[0]}행 {df.shape[1]}열 추출 성공")
-                    return df
-            else:
-                # innerHTML에서 테이블 추출 시도
-                html_content = driver.find_element(By.TAG_NAME, "html").get_attribute("innerHTML")
-                
-                # 기본 컨텐츠로 돌아가기
-                driver.switch_to.default_content()
-                
-                # HTML에서 표 구조 추출
-                if html_content:
-                    tables_dict = extract_data_from_html(html_content)
-                    if tables_dict and len(tables_dict) > 0:
-                        # 가장 큰 테이블 선택
-                        largest_df = None
-                        max_size = 0
-                        
-                        for table_name, df in tables_dict.items():
-                            if df.size > max_size:
-                                max_size = df.size
-                                largest_df = df
-                        
-                        if largest_df is not None and not largest_df.empty:
-                            logger.info(f"시트 '{sheet_name}'에서 iframe HTML 파싱으로 {largest_df.shape[0]}행 {largest_df.shape[1]}열 추출 성공")
-                            return largest_df
-        except TimeoutException:
-            logger.warning(f"시트 '{sheet_name}'에서 iframe을 찾을 수 없음")
-            # 기본 컨텐츠로 복귀 시도
-            try:
-                driver.switch_to.default_content()
-            except:
-                pass
-        except Exception as iframe_err:
-            logger.warning(f"시트 '{sheet_name}'에서 iframe 처리 중 오류: {str(iframe_err)}")
-            # 기본 컨텐츠로 복귀 시도
-            try:
-                driver.switch_to.default_content()
-            except:
-                pass
-        
-        # 4. JavaScript로 DOM 구조 자세히 분석
-        logger.info(f"방법 4: '{sheet_name}'에서 JavaScript로 DOM 구조 분석")
-        try:
-            dom_info = driver.execute_script("""
-                return (function() {
-                    const result = {
-                        potentialTables: []
-                    };
-                    
-                    // 테이블처럼 보이는 구조 찾기
-                    function findTableLikeStructures() {
-                        const divs = document.querySelectorAll('div');
-                        
-                        for (const div of divs) {
-                            // 자식 요소가 충분히 많은지
-                            if (div.children.length < 2) continue;
-                            
-                            // 크기가 충분히 큰지
-                            const rect = div.getBoundingClientRect();
-                            if (rect.width < 100 || rect.height < 100) continue;
-                            
-                            // 자식 요소들이 유사한 구조를 가지는지
-                            let similarChildren = 0;
-                            const firstChildType = div.children[0].tagName;
-                            for (const child of div.children) {
-                                if (child.tagName === firstChildType) {
-                                    similarChildren++;
-                                }
-                            }
-                            
-                            // 80% 이상의 자식이 같은 유형이면 테이블 후보
-                            if (similarChildren / div.children.length > 0.8) {
-                                // 각 자식의 자식 요소 수도 확인 (셀처럼 보이는지)
-                                let cellCount = 0;
-                                
-                                for (const child of div.children) {
-                                    if (child.children.length > 0) {
-                                        cellCount += child.children.length;
-                                    }
-                                }
-                                
-                                if (cellCount > div.children.length) {
-                                    // DOM 경로 구성
-                                    let path = '';
-                                    let current = div;
-                                    while (current && current !== document.body) {
-                                        const tag = current.tagName.toLowerCase();
-                                        const id = current.id ? '#' + current.id : '';
-                                        const classes = Array.from(current.classList).map(c => '.' + c).join('');
-                                        path = tag + id + classes + ' > ' + path;
-                                        current = current.parentElement;
-                                    }
-                                    
-                                    // 정보 저장
-                                    result.potentialTables.push({
-                                        path: path.slice(0, -3),  // 마지막 ' > ' 제거
-                                        childCount: div.children.length,
-                                        cellCount: cellCount,
-                                        dimensions: {
-                                            width: rect.width,
-                                            height: rect.height
-                                        },
-                                        id: div.id,
-                                        classes: Array.from(div.classList)
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    
-                    findTableLikeStructures();
-                    
-                    // 추가 정보 수집
-                    result.documentTitle = document.title;
-                    result.bodyChildCount = document.body.children.length;
-                    result.scripts = document.scripts.length;
-                    result.iframeCount = document.querySelectorAll('iframe').length;
-                    
-                    return result;
-                })();
-            """)
-            
-            if dom_info and 'potentialTables' in dom_info and dom_info['potentialTables']:
-                # 가능성 있는 테이블 구조 중 가장 큰 것 선택
-                potential_tables = sorted(dom_info['potentialTables'], 
-                                         key=lambda t: t['dimensions']['width'] * t['dimensions']['height'],
-                                         reverse=True)
-                
-                logger.info(f"시트 '{sheet_name}'에서 {len(potential_tables)}개 테이블 구조 후보 발견")
-                
-                for table_info in potential_tables[:3]:  # 상위 3개만 시도
-                    try:
-                        # 선택자 구성
-                        selector = table_info['path']
-                        
-                        # ID가 있으면 더 정확한 선택자 사용
-                        if table_info['id']:
-                            selector = f"#{table_info['id']}"
-                        
-                        logger.info(f"테이블 구조 후보 선택자: {selector}")
-                        
-                        # 해당 요소 찾기
-                        table_element = driver.find_element(By.CSS_SELECTOR, selector)
-                        
-                        # 데이터 추출 시도
-                        row_elements = table_element.find_elements(By.CSS_SELECTOR, "> div, > tr")
-                        
-                        if row_elements and len(row_elements) >= 2:
-                            # 첫 번째 행에서 셀 선택자 파악
-                            first_row = row_elements[0]
-                            cell_selectors = ["> div", "> td", "> th", "*"]
-                            
-                            for cell_selector in cell_selectors:
-                                try:
-                                    cells = first_row.find_elements(By.CSS_SELECTOR, cell_selector)
-                                    if cells and len(cells) > 1:
-                                        # 테이블 데이터 추출
-                                        table_data = []
-                                        
-                                        for row in row_elements:
-                                            try:
-                                                row_cells = row.find_elements(By.CSS_SELECTOR, cell_selector)
-                                                row_data = [cell.text.strip() for cell in row_cells]
-                                                if any(cell for cell in row_data):  # 빈 행 제외
-                                                    table_data.append(row_data)
-                                            except:
-                                                continue
-                                        
-                                        if len(table_data) >= 2:  # 최소 헤더 + 1개 데이터 행
-                                            # 열 길이 통일
-                                            max_cols = max(len(row) for row in table_data)
-                                            for i in range(len(table_data)):
-                                                if len(table_data[i]) < max_cols:
-                                                    table_data[i].extend([''] * (max_cols - len(table_data[i])))
-                                            
-                                            headers = table_data[0]
-                                            data = table_data[1:]
-                                            
-                                            # 헤더가 비어있으면 자동 생성
-                                            if not any(h for h in headers):
-                                                headers = [f"Column_{i+1}" for i in range(max_cols)]
-                                            
-                                            # DataFrame 생성
-                                            df = pd.DataFrame(data, columns=headers)
-                                            logger.info(f"시트 '{sheet_name}'에서 DOM 구조 분석으로 {df.shape[0]}행 {df.shape[1]}열 추출 성공")
-                                            return df
-                                except:
-                                    continue
-                    except:
-                        continue
-        except Exception as js_err:
-            logger.warning(f"시트 '{sheet_name}'에서 JavaScript DOM 분석 중 오류: {str(js_err)}")
-        
-        # 5. 스크린샷 OCR 시도 (마지막 수단)
-        if CONFIG['ocr_enabled']:
-            logger.info(f"방법 5: '{sheet_name}'에서 OCR 시도")
-            try:
-                # 현재 화면 스크린샷
-                screenshot_path = f"ocr_{sheet_name}_{int(time.time())}.png"
-                driver.save_screenshot(screenshot_path)
-                
-                # OCR로 데이터 추출
-                ocr_dataframes = extract_data_from_screenshot(screenshot_path)
-                
-                if ocr_dataframes and len(ocr_dataframes) > 0:
-                    # 가장 큰 DataFrame 선택
-                    largest_df = max(ocr_dataframes, key=lambda df: df.size if df is not None and not df.empty else 0)
-                    
-                    if largest_df is not None and not largest_df.empty:
-                        logger.info(f"시트 '{sheet_name}'에서 OCR로 {largest_df.shape[0]}행 {largest_df.shape[1]}열 추출 성공")
-                        return largest_df
-            except Exception as ocr_err:
-                logger.warning(f"시트 '{sheet_name}'에서 OCR 시도 중 오류: {str(ocr_err)}")
-        
-        logger.warning(f"시트 '{sheet_name}'에서 모든 데이터 추출 방법이 실패했습니다")
-        return None
-        
-    except Exception as e:
-        logger.error(f"시트 '{sheet_name}'에서 데이터 추출 중 오류: {str(e)}")
-        return None
-
-
-
-
 def access_iframe_direct(driver, file_params):
     """
     iframe에 직접 접근하여 SynapDocViewServer의 데이터를 추출하는 개선된 함수
@@ -4326,14 +3805,6 @@ def access_iframe_direct(driver, file_params):
                             driver.switch_to.window(handle)
                             break
                 
-                # 여기에 새 함수 호출 코드 추가
-                logger.info("향상된 시트 탭 기반 데이터 추출 시도...")
-                sheets_data = extract_data_from_sheet_tabs(driver)
-                if sheets_data and any(not df.empty for df in sheets_data.values()):
-                    logger.info(f"향상된 시트 데이터 추출 방식으로 {len(sheets_data)}개 시트 추출 성공")
-                    return sheets_data
-                
-                # 이하 기존 코드는 그대로 유지 (기존 시트 탭 처리 로직)
                 # 1. 시트 탭 찾아서 처리
                 sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
                 if sheet_tabs:
@@ -4631,95 +4102,7 @@ def access_iframe_direct(driver, file_params):
     
     return None
 
-def verify_tab_change(driver, tab_name, timeout=10):
-    """Verify that the tab has changed by checking various indicators"""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            # Check page title or header that might reflect current tab
-            header_text = driver.execute_script("""
-                const headers = document.querySelectorAll('.sheet-header, .page-header, h1, h2');
-                for (let i = 0; i < headers.length; i++) {
-                    if (headers[i].textContent.includes(arguments[0])) {
-                        return true;
-                    }
-                }
-                return false;
-            """, tab_name)
-            
-            if header_text:
-                return True
-                
-            # Check if tab appears selected
-            tab_active = driver.execute_script("""
-                const tabs = document.querySelectorAll('.sheet-list__sheet-tab');
-                for (let i = 0; i < tabs.length; i++) {
-                    if (tabs[i].textContent.includes(arguments[0]) && 
-                        (tabs[i].classList.contains('active') || 
-                         tabs[i].getAttribute('aria-selected') === 'true')) {
-                        return true;
-                    }
-                }
-                return false;
-            """, tab_name)
-            
-            if tab_active:
-                return True
-                
-            time.sleep(0.5)
-        except:
-            time.sleep(0.5)
-    
-    return False
 
-def robust_tab_click(driver, tab, tab_name, max_attempts=3):
-    """Try multiple approaches to click a tab and verify the switch"""
-    for attempt in range(max_attempts):
-        try:
-            # Try different click methods
-            if attempt == 0:
-                driver.execute_script("arguments[0].click();", tab)
-            elif attempt == 1:
-                tab.click()  # Direct click
-            else:
-                # Try finding by text and clicking
-                tabs = driver.find_elements(By.XPATH, f"//div[contains(@class, 'tab') and contains(text(), '{tab_name}')]")
-                if tabs:
-                    driver.execute_script("arguments[0].click();", tabs[0])
-            
-            # Wait for tab change to take effect
-            time.sleep(2)
-            
-            # Verify the tab changed
-            if verify_tab_change(driver, tab_name):
-                return True
-                
-            # Try forcing a refresh if the tab didn't change
-            force_tab_refresh(driver, tab_name)
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.warning(f"Tab click attempt {attempt+1} failed: {str(e)}")
-            time.sleep(1)
-    
-    return False
-
-def force_tab_refresh(driver, tab_index):
-    """Force a tab refresh by manipulating the iframe source if needed"""
-    try:
-        iframe = driver.find_element(By.ID, "innerWrap")
-        current_src = iframe.get_attribute('src')
-        
-        # Some document viewers use URL parameters to specify tabs
-        if '?' in current_src:
-            base_url = current_src.split('?')[0]
-            new_src = f"{base_url}?tab={tab_index}"
-            driver.execute_script(f"document.getElementById('innerWrap').src = '{new_src}';")
-            return True
-    except:
-        pass
-    
-    return False
 
 
 def find_content_areas(driver):
@@ -9803,6 +9186,1018 @@ def setup_enhanced_logging():
     
     # 로거 반환
     return logger
+
+# 수정: 시트 탭 전환 로직 개선 및 탭 전환 확인 메커니즘 추가
+def process_document_sheets(driver, sheet_tabs):
+    """
+    문서 뷰어에서 각 시트 탭을 순차적으로 전환하고 데이터를 추출하는 개선된 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_tabs: 발견된 시트 탭 요소 목록
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    all_sheets = {}
+    
+    if not sheet_tabs or len(sheet_tabs) == 0:
+        logger.warning("시트 탭을 찾을 수 없음, 단일 시트로 처리합니다")
+        single_sheet_data = extract_current_sheet_data(driver, "기본 시트")
+        if single_sheet_data:
+            return single_sheet_data
+        return {}
+    
+    logger.info(f"총 {len(sheet_tabs)}개 시트 탭 발견, 순차적으로 처리합니다")
+    
+    # 각 시트 탭 처리
+    for i, tab in enumerate(sheet_tabs):
+        try:
+            # 시트 탭 텍스트 추출
+            try:
+                sheet_name = tab.text.strip()
+                if not sheet_name:
+                    sheet_name = f"시트{i+1}"
+            except:
+                sheet_name = f"시트{i+1}"
+                
+            logger.info(f"시트 {i+1}/{len(sheet_tabs)} 처리 중: {sheet_name}")
+            
+            # 첫 번째 탭이 아닐 경우에만 클릭 (첫 번째는 기본적으로 선택되어 있음)
+            if i > 0:
+                # 현재 시트 내용의 특징적인 텍스트나 요소를 저장 (변경 감지용)
+                before_content_hash = get_content_hash(driver)
+                
+                # JavaScript로 클릭 (더 안정적)
+                try:
+                    logger.info(f"탭 '{sheet_name}' 클릭 중...")
+                    driver.execute_script("arguments[0].click();", tab)
+                    
+                    # 충분한 대기 시간 설정 (3초)
+                    time.sleep(3)
+                    
+                    # 내용이 변경되었는지 확인
+                    after_content_hash = get_content_hash(driver)
+                    
+                    if before_content_hash == after_content_hash:
+                        # 내용이 변경되지 않았을 경우 추가 대기 및 재확인
+                        logger.warning(f"탭 '{sheet_name}' 클릭 후 내용 변경이 감지되지 않음, 추가 대기 중...")
+                        time.sleep(2)  # 추가 대기
+                        
+                        # 한 번 더 클릭 시도
+                        driver.execute_script("arguments[0].click();", tab)
+                        time.sleep(2)
+                        
+                        # 다시 확인
+                        after_content_hash = get_content_hash(driver)
+                        if before_content_hash == after_content_hash:
+                            logger.warning(f"탭 '{sheet_name}' 전환 실패, 내용이 변경되지 않음")
+                    else:
+                        logger.info(f"탭 '{sheet_name}' 내용 변경 확인됨")
+                        
+                except Exception as click_err:
+                    logger.error(f"탭 '{sheet_name}' 클릭 중 오류: {str(click_err)}")
+                    # 클릭 실패 시 다른 방법 시도 (Selenium 클릭)
+                    try:
+                        tab.click()
+                        time.sleep(3)  # 대기
+                    except:
+                        logger.error(f"대체 클릭 방법도 실패, 다음 시트로 진행")
+                        continue
+            
+            # 현재 탭에서 데이터 추출
+            sheet_data = extract_current_sheet_data(driver, sheet_name)
+            
+            # 추출된 데이터가 있으면 저장
+            if sheet_data and len(sheet_data) > 0:
+                # 시트별 데이터 추가
+                for extracted_name, df in sheet_data.items():
+                    # 이미 저장된 데이터와 동일한지 확인 (중복 방지)
+                    is_duplicate = False
+                    for existing_name, existing_df in all_sheets.items():
+                        if dataframes_are_equal(df, existing_df):
+                            logger.warning(f"시트 '{extracted_name}'의 데이터가 시트 '{existing_name}'과 동일함, 중복 저장 방지")
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        # 중복이 아닌 경우에만 저장
+                        all_sheets[extracted_name] = df
+                        logger.info(f"시트 '{extracted_name}' 데이터 추출 성공: {df.shape[0]}행 {df.shape[1]}열")
+            else:
+                logger.warning(f"시트 '{sheet_name}'에서 데이터를 추출하지 못함")
+        
+        except Exception as tab_err:
+            logger.error(f"시트 탭 {i+1} 처리 중 오류: {str(tab_err)}")
+    
+    # 모든 시트 처리 완료
+    if not all_sheets:
+        logger.warning("모든 시트 탭에서 데이터를 추출하지 못함")
+    
+    return all_sheets
+
+
+# 추가: 현재 페이지 콘텐츠의 해시값을 계산하여 변경 여부 감지에 사용
+def get_content_hash(driver):
+    """
+    현재 페이지 내용의 해시값 계산 (변경 감지용)
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        
+    Returns:
+        str: 콘텐츠 해시값
+    """
+    try:
+        # mainTable 내용 가져오기
+        main_table_html = driver.execute_script("""
+            const mainTable = document.getElementById('mainTable');
+            return mainTable ? mainTable.innerHTML : '';
+        """)
+        
+        # iframe 내용 가져오기
+        iframe_content = ""
+        try:
+            iframe = driver.find_element(By.ID, "innerWrap")
+            driver.switch_to.frame(iframe)
+            iframe_content = driver.page_source
+            driver.switch_to.default_content()
+        except:
+            pass
+        
+        # 현재 활성화된 시트 탭 정보
+        active_tab_info = driver.execute_script("""
+            const activeTabs = document.querySelectorAll('.sheet-list__sheet-tab--active, .sheet-list__sheet-tab.active');
+            return activeTabs.length > 0 ? activeTabs[0].textContent : '';
+        """)
+        
+        # 내용 조합
+        combined_content = main_table_html + iframe_content + active_tab_info
+        
+        # 간단한 해시값 계산 (내용 길이 + 처음 1000자 기준)
+        content_preview = combined_content[:1000] if combined_content else ""
+        hash_value = f"{len(combined_content)}_{hash(content_preview)}"
+        
+        return hash_value
+    except Exception as e:
+        logger.warning(f"콘텐츠 해시 계산 중 오류: {str(e)}")
+        # 오류 시 타임스탬프 반환 (항상 다른 값)
+        return str(time.time())
+
+
+# 추가: 두 DataFrame이 동일한지 비교
+def dataframes_are_equal(df1, df2):
+    """
+    두 DataFrame이 동일한지 비교 (크기, 열 이름, 샘플 값)
+    
+    Args:
+        df1, df2: 비교할 pandas DataFrame
+        
+    Returns:
+        bool: 동일하면 True, 아니면 False
+    """
+    if df1 is None or df2 is None:
+        return False
+        
+    # 크기가 다르면 다른 DataFrame
+    if df1.shape != df2.shape:
+        return False
+    
+    # 최소 크기 이하면 더 자세히 비교
+    if df1.shape[0] < 5 or df1.shape[1] < 3:
+        try:
+            return df1.equals(df2)
+        except:
+            return False
+    
+    # 큰 DataFrame은 샘플링하여 비교
+    try:
+        # 열 이름 비교
+        if set(df1.columns) != set(df2.columns):
+            return False
+            
+        # 처음 3행, 마지막 3행의 주요 값 비교
+        sample_rows = min(3, df1.shape[0])
+        if not df1.head(sample_rows).equals(df2.head(sample_rows)):
+            return False
+            
+        if not df1.tail(sample_rows).equals(df2.tail(sample_rows)):
+            return False
+            
+        # 몇 개 열의 합계 비교
+        numeric_cols1 = df1.select_dtypes(include=['number']).columns[:3]
+        numeric_cols2 = df2.select_dtypes(include=['number']).columns[:3]
+        
+        if len(numeric_cols1) > 0 and len(numeric_cols2) > 0:
+            sum1 = df1[numeric_cols1].sum().sum()
+            sum2 = df2[numeric_cols2].sum().sum()
+            if abs(sum1 - sum2) > 0.001:
+                return False
+        
+        # 대략적으로 동일하다고 판단
+        return True
+    except Exception as e:
+        logger.warning(f"DataFrame 비교 중 오류: {str(e)}")
+        return False
+
+
+# 추가: 현재 시트에서 데이터 추출 (다양한 방법 시도)
+def extract_current_sheet_data(driver, sheet_name):
+    """
+    현재 활성화된 시트에서 데이터를 추출하는 종합 함수 (다양한 방법 시도)
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_name: 현재 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    sheets_data = {}
+    
+    # 스크린샷 저장 (디버깅용)
+    screenshot_path = f"sheet_{sheet_name.replace(' ', '_')}_{int(time.time())}.png"
+    try:
+        driver.save_screenshot(screenshot_path)
+        logger.info(f"시트 '{sheet_name}' 스크린샷 저장: {screenshot_path}")
+    except:
+        pass
+    
+    # 1. mainTable 요소에서 데이터 추출 시도
+    main_table_data = extract_from_main_table(driver, sheet_name)
+    if main_table_data:
+        sheets_data.update(main_table_data)
+        logger.info(f"mainTable 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+    
+    # 2. iframe 내부 접근 시도
+    if not sheets_data:
+        iframe_data = extract_from_iframe(driver, sheet_name)
+        if iframe_data:
+            sheets_data.update(iframe_data)
+            logger.info(f"iframe 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+    
+    # 3. JavaScript를 통한 DOM 구조 분석
+    if not sheets_data:
+        js_data = extract_with_javascript_enhanced(driver, sheet_name)
+        if js_data:
+            sheets_data.update(js_data)
+            logger.info(f"JavaScript 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+    
+    # 4. HTML에서 직접 추출 시도
+    if not sheets_data:
+        html_data = extract_data_from_html_for_sheet(driver.page_source, sheet_name)
+        if html_data:
+            sheets_data.update(html_data)
+            logger.info(f"HTML 파싱 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+    
+    # 5. 다양한 컨테이너 선택자 시도
+    if not sheets_data:
+        container_data = extract_from_containers(driver, sheet_name)
+        if container_data:
+            sheets_data.update(container_data)
+            logger.info(f"컨테이너 선택자 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+    
+    # 6. OCR 마지막 수단 (스크린샷이 있을 경우)
+    if not sheets_data and CONFIG['ocr_enabled'] and os.path.exists(screenshot_path):
+        try:
+            ocr_data = extract_data_from_screenshot(screenshot_path)
+            if ocr_data and len(ocr_data) > 0:
+                sheets_data[f"{sheet_name}_OCR"] = ocr_data[0]
+                logger.info(f"OCR 방식으로 시트 '{sheet_name}' 데이터 추출 성공")
+        except Exception as ocr_err:
+            logger.warning(f"OCR 추출 시도 중 오류: {str(ocr_err)}")
+    
+    return sheets_data
+
+
+# 추가: mainTable 요소에서 데이터 추출
+def extract_from_main_table(driver, sheet_name):
+    """
+    mainTable 요소에서 데이터 추출
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_name: 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        # mainTable 요소 찾기
+        main_table = driver.find_element(By.ID, "mainTable")
+        if not main_table:
+            logger.warning(f"시트 '{sheet_name}'에서 mainTable 요소를 찾을 수 없음")
+            return None
+            
+        logger.info(f"시트 '{sheet_name}'에서 mainTable 요소 발견")
+        
+        # 행 요소 찾기
+        rows = main_table.find_elements(By.CSS_SELECTOR, "div[class*='tr']")
+        if not rows:
+            logger.warning(f"시트 '{sheet_name}'의 mainTable에서 행 요소를 찾을 수 없음")
+            return None
+            
+        logger.info(f"mainTable에서 {len(rows)}개 행 발견")
+        
+        # 데이터 추출
+        table_data = []
+        
+        for row in rows:
+            # 셀 요소 찾기
+            cells = row.find_elements(By.CSS_SELECTOR, "div[class*='td']")
+            
+            if cells:
+                row_data = []
+                for cell in cells:
+                    row_data.append(cell.text.strip())
+                    
+                table_data.append(row_data)
+                
+        # 유효한 데이터가 있는지 확인
+        if not table_data or len(table_data) < 2:
+            logger.warning(f"시트 '{sheet_name}'의 mainTable에서 충분한 데이터를 찾지 못함")
+            return None
+            
+        # 첫 번째 행을 헤더로 사용
+        headers = table_data[0]
+        data = table_data[1:]
+        
+        # DataFrame 생성
+        try:
+            df = pd.DataFrame(data, columns=headers)
+            logger.info(f"mainTable에서 DataFrame 생성: {df.shape[0]}행 {df.shape[1]}열")
+            return {sheet_name: df}
+        except Exception as df_err:
+            logger.warning(f"DataFrame 생성 중 오류: {str(df_err)}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"mainTable 요소에서 데이터 추출 중 오류: {str(e)}")
+        return None
+
+
+# 추가: iframe 내부 접근하여 데이터 추출
+def extract_from_iframe(driver, sheet_name):
+    """
+    iframe 내부로 전환하여 데이터 추출
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_name: 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        # iframe 찾기 시도
+        iframes = []
+        try:
+            iframes.append(driver.find_element(By.ID, "innerWrap"))
+        except:
+            pass
+            
+        if not iframes:
+            try:
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            except:
+                pass
+                
+        if not iframes:
+            logger.warning(f"시트 '{sheet_name}'에서 iframe을 찾을 수 없음")
+            return None
+            
+        # 각 iframe 처리
+        for i, iframe in enumerate(iframes):
+            try:
+                # iframe으로 전환
+                driver.switch_to.frame(iframe)
+                logger.info(f"iframe {i+1}/{len(iframes)}로 전환 성공")
+                
+                # 현재 iframe의 HTML 가져오기
+                iframe_html = driver.page_source
+                
+                # HTML에서 데이터 추출
+                result = extract_data_from_html_for_sheet(iframe_html, f"{sheet_name}_Frame{i+1}")
+                
+                # 기본 컨텐츠로 돌아가기
+                driver.switch_to.default_content()
+                
+                if result:
+                    logger.info(f"iframe {i+1}에서 {len(result)}개 시트 추출 성공")
+                    return result
+                    
+            except Exception as iframe_err:
+                logger.warning(f"iframe {i+1} 처리 중 오류: {str(iframe_err)}")
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                    
+        return None
+        
+    except Exception as e:
+        logger.warning(f"iframe 접근 중 오류: {str(e)}")
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
+        return None
+
+
+# 추가: JavaScript를 통한 향상된 데이터 추출
+def extract_with_javascript_enhanced(driver, sheet_name):
+    """
+    JavaScript를 사용하여 현재 시트의 데이터를 추출하는 향상된 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_name: 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        # 복합적인 JavaScript 코드로 다양한 방식 시도
+        js_result = driver.execute_script("""
+            try {
+                // 1. Synap 뷰어 전용 데이터 추출 시도
+                if (typeof localSynap !== 'undefined') {
+                    // 현재 시트 인덱스 찾기
+                    let currentSheetIndex = -1;
+                    try {
+                        const activeTabs = document.querySelectorAll('.sheet-list__sheet-tab--active, .sheet-list__sheet-tab.active');
+                        if (activeTabs.length > 0) {
+                            const activeTab = activeTabs[0];
+                            const allTabs = document.querySelectorAll('.sheet-list__sheet-tab');
+                            for (let i = 0; i < allTabs.length; i++) {
+                                if (allTabs[i] === activeTab) {
+                                    currentSheetIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.error("활성 탭 찾기 오류:", e);
+                    }
+                    
+                    // 시트 데이터 직접 접근 시도
+                    if (typeof WM !== 'undefined' && WM.getSheets) {
+                        try {
+                            const sheets = WM.getSheets();
+                            if (sheets && sheets.length > 0) {
+                                const targetIndex = currentSheetIndex >= 0 ? currentSheetIndex : 0;
+                                const sheet = sheets[targetIndex];
+                                if (sheet && sheet.getData) {
+                                    return {
+                                        source: 'synap_sheet_data',
+                                        data: sheet.getData(),
+                                        sheetIndex: targetIndex
+                                    };
+                                }
+                            }
+                        } catch (e) {
+                            console.error("WM.getSheets 오류:", e);
+                        }
+                    }
+                }
+                
+                // 2. mainTable에서 데이터 추출
+                const mainTable = document.getElementById('mainTable');
+                if (mainTable) {
+                    // 여러 가지 행 선택자 시도
+                    let rows = [];
+                    const rowSelectors = [
+                        'div[class*="tr"]',
+                        'div.gt-row',
+                        'div[role="row"]',
+                        ':scope > div'
+                    ];
+                    
+                    for (const selector of rowSelectors) {
+                        const selectedRows = mainTable.querySelectorAll(selector);
+                        if (selectedRows && selectedRows.length > 1) { // 최소 두 행 이상 필요
+                            rows = selectedRows;
+                            break;
+                        }
+                    }
+                    
+                    if (rows.length > 1) {
+                        const tableData = [];
+                        
+                        for (let i = 0; i < rows.length; i++) {
+                            const row = rows[i];
+                            
+                            // 여러 가지 셀 선택자 시도
+                            let cells = [];
+                            const cellSelectors = [
+                                'div[class*="td"]',
+                                'div.gt-cell',
+                                'div[role="cell"]',
+                                ':scope > div'
+                            ];
+                            
+                            for (const selector of cellSelectors) {
+                                const selectedCells = row.querySelectorAll(selector);
+                                if (selectedCells && selectedCells.length > 0) {
+                                    cells = selectedCells;
+                                    break;
+                                }
+                            }
+                            
+                            if (cells.length > 0) {
+                                const rowData = [];
+                                for (let j = 0; j < cells.length; j++) {
+                                    rowData.push(cells[j].textContent.trim());
+                                }
+                                
+                                if (rowData.length > 0) {
+                                    tableData.push(rowData);
+                                }
+                            }
+                        }
+                        
+                        if (tableData.length > 1) {
+                            return {
+                                source: 'main_table',
+                                data: tableData
+                            };
+                        }
+                    }
+                }
+                
+                // 3. 테이블 요소 찾기
+                const tables = document.querySelectorAll('table');
+                if (tables.length > 0) {
+                    // 가장 큰 테이블 선택 (데이터 테이블일 가능성 높음)
+                    let largestTable = tables[0];
+                    let maxCells = 0;
+                    
+                    for (let i = 0; i < tables.length; i++) {
+                        const table = tables[i];
+                        const rows = table.rows;
+                        let cellCount = 0;
+                        
+                        for (let j = 0; j < rows.length; j++) {
+                            cellCount += rows[j].cells.length;
+                        }
+                        
+                        if (cellCount > maxCells) {
+                            maxCells = cellCount;
+                            largestTable = table;
+                        }
+                    }
+                    
+                    // 선택된 테이블에서 데이터 추출
+                    const tableData = [];
+                    const rows = largestTable.rows;
+                    
+                    for (let i = 0; i < rows.length; i++) {
+                        const row = rows[i];
+                        const rowData = [];
+                        
+                        for (let j = 0; j < row.cells.length; j++) {
+                            rowData.push(row.cells[j].textContent.trim());
+                        }
+                        
+                        if (rowData.length > 0) {
+                            tableData.push(rowData);
+                        }
+                    }
+                    
+                    if (tableData.length > 1) {
+                        return {
+                            source: 'html_table',
+                            data: tableData
+                        };
+                    }
+                }
+                
+                // 4. 다양한 컨테이너 요소 검색
+                const containers = document.querySelectorAll('div.container, div.content, div.grid, div[class*="table"]');
+                for (let i = 0; i < containers.length; i++) {
+                    const container = containers[i];
+                    
+                    // 여러 가지 행 선택자 시도
+                    let rows = [];
+                    const rowSelectors = [
+                        'div[class*="tr"]',
+                        'div[class*="row"]',
+                        ':scope > div'
+                    ];
+                    
+                    for (const selector of rowSelectors) {
+                        const selectedRows = container.querySelectorAll(selector);
+                        if (selectedRows && selectedRows.length > 1) { // 최소 두 행 이상 필요
+                            rows = selectedRows;
+                            break;
+                        }
+                    }
+                    
+                    if (rows.length > 1) {
+                        const tableData = [];
+                        
+                        for (let j = 0; j < rows.length; j++) {
+                            const row = rows[j];
+                            
+                            // 여러 가지 셀 선택자 시도
+                            let cells = [];
+                            const cellSelectors = [
+                                'div[class*="td"]',
+                                'div[class*="cell"]',
+                                ':scope > div'
+                            ];
+                            
+                            for (const selector of cellSelectors) {
+                                const selectedCells = row.querySelectorAll(selector);
+                                if (selectedCells && selectedCells.length > 0) {
+                                    cells = selectedCells;
+                                    break;
+                                }
+                            }
+                            
+                            if (cells.length > 0) {
+                                const rowData = [];
+                                for (let k = 0; k < cells.length; k++) {
+                                    rowData.push(cells[k].textContent.trim());
+                                }
+                                
+                                if (rowData.length > 0) {
+                                    tableData.push(rowData);
+                                }
+                            }
+                        }
+                        
+                        if (tableData.length > 1) {
+                            return {
+                                source: 'container',
+                                container_index: i,
+                                data: tableData
+                            };
+                        }
+                    }
+                }
+                
+                return null;
+            } catch (e) {
+                return { error: e.toString() };
+            }
+        """)
+        
+        if not js_result or (isinstance(js_result, dict) and 'error' in js_result):
+            error_msg = js_result.get('error', '알 수 없는 오류') if isinstance(js_result, dict) else '데이터 없음'
+            logger.warning(f"JavaScript 추출 실패: {error_msg}")
+            return None
+            
+        # 추출 소스와 데이터 확인
+        if isinstance(js_result, dict) and 'data' in js_result and 'source' in js_result:
+            source = js_result['source']
+            data = js_result['data']
+            
+            if not data or not isinstance(data, list) or len(data) < 2:
+                logger.warning(f"JavaScript에서 충분한 데이터를 추출하지 못함 (소스: {source})")
+                return None
+                
+            logger.info(f"JavaScript에서 데이터 추출 성공 (소스: {source}, 행 수: {len(data)})")
+            
+            # 첫 번째 행을 헤더로 사용
+            headers = data[0]
+            rows = data[1:]
+            
+            # DataFrame 생성
+            try:
+                df = pd.DataFrame(rows, columns=headers)
+                return {f"{sheet_name}": df}
+            except Exception as df_err:
+                logger.warning(f"DataFrame 생성 중 오류: {str(df_err)}")
+                return None
+                
+        return None
+        
+    except Exception as e:
+        logger.warning(f"JavaScript 데이터 추출 중 오류: {str(e)}")
+        return None
+
+
+# 추가: HTML에서 특정 시트의 데이터 추출
+def extract_data_from_html_for_sheet(html_content, sheet_name):
+    """
+    HTML 콘텐츠에서 특정 시트의 표 데이터 추출 (extract_data_from_html 함수 변형)
+    
+    Args:
+        html_content: HTML 문자열
+        sheet_name: 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        # 기존 extract_data_from_html 함수 로직 재사용
+        all_sheets = extract_data_from_html(html_content)
+        
+        if all_sheets:
+            # 시트 이름 변경 (원래 키를 유지하면서 새 시트 이름 포함)
+            renamed_sheets = {}
+            for i, (key, df) in enumerate(all_sheets.items()):
+                renamed_sheets[f"{sheet_name}_{i+1}"] = df
+                
+            return renamed_sheets
+            
+        return None
+        
+    except Exception as e:
+        logger.warning(f"HTML에서 시트 '{sheet_name}' 데이터 추출 중 오류: {str(e)}")
+        return None
+
+
+# 추가: 다양한 컨테이너 선택자에서 데이터 추출
+def extract_from_containers(driver, sheet_name):
+    """
+    다양한 컨테이너 선택자를 사용하여 데이터 추출 시도
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        sheet_name: 시트 이름
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리
+    """
+    try:
+        # 다양한 컨테이너 선택자
+        container_selectors = [
+            "div.container",
+            "div.content",
+            "div.grid",
+            "div[class*='table']",
+            "div[id*='grid']",
+            "div[id*='table']",
+            "div.data-view"
+        ]
+        
+        for selector in container_selectors:
+            try:
+                containers = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+                if not containers:
+                    continue
+                    
+                logger.info(f"선택자 '{selector}'로 {len(containers)}개 컨테이너 발견")
+                
+                for i, container in enumerate(containers):
+                    # 행 요소 찾기
+                    rows = None
+                    row_selectors = [
+                        "div[class*='tr']",
+                        "div[class*='row']",
+                        "> div"  # 직계 자식 div
+                    ]
+                    
+                    for row_selector in row_selectors:
+                        try:
+                            found_rows = container.find_elements(By.CSS_SELECTOR, row_selector)
+                            if found_rows and len(found_rows) > 1:  # 최소 두 행 이상 (헤더 + 데이터)
+                                rows = found_rows
+                                logger.info(f"행 선택자 '{row_selector}'로 {len(rows)}개 행 발견")
+                                break
+                        except:
+                            continue
+                            
+                    if not rows or len(rows) < 2:
+                        continue
+                        
+                    # 셀 요소 찾기 및 데이터 추출
+                    table_data = []
+                    
+                    for row in rows:
+                        cells = None
+                        cell_selectors = [
+                            "div[class*='td']",
+                            "div[class*='cell']",
+                            "> div"  # 직계 자식 div
+                        ]
+                        
+                        for cell_selector in cell_selectors:
+                            try:
+                                found_cells = row.find_elements(By.CSS_SELECTOR, cell_selector)
+                                if found_cells and len(found_cells) > 0:
+                                    cells = found_cells
+                                    break
+                            except:
+                                continue
+                                
+                        if not cells:
+                            continue
+                            
+                        row_data = []
+                        for cell in cells:
+                            row_data.append(cell.text.strip())
+                            
+                        if row_data:
+                            table_data.append(row_data)
+                            
+                    # 유효한 데이터가 있는지 확인
+                    if table_data and len(table_data) >= 2:  # 최소 헤더 + 1행 이상
+                        # 첫 번째 행을 헤더로 사용
+                        headers = table_data[0]
+                        data = table_data[1:]
+                        
+                        # DataFrame 생성
+                        try:
+                            df = pd.DataFrame(data, columns=headers)
+                            logger.info(f"컨테이너 {i+1}에서 DataFrame 생성: {df.shape[0]}행 {df.shape[1]}열")
+                            return {f"{sheet_name}_Container{i+1}": df}
+                        except Exception as df_err:
+                            logger.warning(f"DataFrame 생성 중 오류: {str(df_err)}")
+                            continue
+            except Exception as selector_err:
+                logger.warning(f"선택자 '{selector}' 처리 중 오류: {str(selector_err)}")
+                continue
+                
+        return None
+        
+    except Exception as e:
+        logger.warning(f"컨테이너 선택자에서 데이터 추출 중 오류: {str(e)}")
+        return None
+
+
+# 수정: 기존 access_iframe_with_ocr_fallback 함수 개선
+def access_iframe_with_ocr_fallback(driver, file_params):
+    """
+    iframe 직접 접근 시도 후 실패시 다양한 추출 방법을 시도하는 개선된 함수
+    
+    Args:
+        driver: Selenium WebDriver 인스턴스
+        file_params: 파일 파라미터를 포함한 딕셔너리
+        
+    Returns:
+        dict: 시트 이름을 키로, DataFrame을 값으로 하는 딕셔너리 또는 None
+    """
+    # 1. 일단 기존 iframe 접근 방식 시도
+    sheets_data = access_iframe_direct(driver, file_params)
+    
+    # 정상적으로 데이터 추출에 성공한 경우
+    if sheets_data and any(not df.empty for df in sheets_data.values()):
+        logger.info(f"iframe 직접 접근으로 데이터 추출 성공: {len(sheets_data)}개 시트 추출")
+        
+        # 데이터 품질 검증
+        valid_sheets = {}
+        for sheet_name, df in sheets_data.items():
+            if df is not None and not df.empty:
+                # 기본 품질 체크: 합리적인 데이터가 있는지 확인
+                if df.shape[0] >= 2 and df.shape[1] >= 2:
+                    valid_sheets[sheet_name] = df
+                    logger.info(f"시트 {sheet_name} 검증 완료: {df.shape[0]}행 {df.shape[1]}열")
+                else:
+                    logger.warning(f"시트 {sheet_name}의 데이터가 불충분합니다: {df.shape}")
+        
+        # 유효한 시트가 있으면 반환
+        if valid_sheets:
+            return valid_sheets
+        else:
+            logger.warning("iframe 직접 접근 결과에서 유효한 시트를 찾을 수 없습니다")
+    else:
+        logger.warning("iframe 직접 접근 실패 또는 빈 데이터 반환")
+    
+    # 2. 시트 탭 탐색 및 처리
+    try:
+        # 시트 탭 찾기
+        sheet_tabs = driver.find_elements(By.CSS_SELECTOR, ".sheet-list__sheet-tab")
+        
+        if sheet_tabs and len(sheet_tabs) > 0:
+            logger.info(f"{len(sheet_tabs)}개 시트 탭 발견, 처리 시작")
+            
+            # 개선된 시트 탭 처리 함수 호출
+            tab_data = process_document_sheets(driver, sheet_tabs)
+            
+            if tab_data and len(tab_data) > 0:
+                logger.info(f"시트 탭 처리로 {len(tab_data)}개 시트 추출 성공")
+                
+                # 중복 데이터 여부 확인 및 처리
+                final_data = {}
+                for name, df in tab_data.items():
+                    # 기본 중복 확인 (이름이 아닌 데이터 내용 기준)
+                    is_duplicate = False
+                    for existing_name, existing_df in final_data.items():
+                        if dataframes_are_equal(df, existing_df):
+                            logger.warning(f"시트 '{name}'이 시트 '{existing_name}'과 동일한 데이터를 가짐, 중복 제거")
+                            is_duplicate = True
+                            break
+                            
+                    if not is_duplicate:
+                        final_data[name] = df
+                        
+                if final_data:
+                    logger.info(f"중복 제거 후 {len(final_data)}개 시트 최종 추출")
+                    return final_data
+    except Exception as tabs_err:
+        logger.warning(f"시트 탭 처리 중 오류: {str(tabs_err)}")
+    
+    # 3. 전체 문서 전용 모드 활성화
+    try:
+        logger.info("전체 문서 보기 모드 활성화 시도")
+        
+        # 문서 뷰어 스케일 설정 (더 많은 콘텐츠 표시)
+        scale_script = """
+        try {
+            // Synap 뷰어일 경우
+            if (typeof localSynap !== 'undefined') {
+                // 축소하여 전체 문서가 보이도록 함
+                localSynap.setZoom(0.5);
+                return "Synap viewer zoom adjusted";
+            }
+            
+            // 일반 문서인 경우 CSS transform 사용
+            document.body.style.transform = 'scale(0.5)';
+            document.body.style.transformOrigin = 'top left';
+            
+            // 문서의 모든 스크롤 컨테이너 확장
+            var containers = document.querySelectorAll('.scroll-container, [style*="overflow"]');
+            for (var i = 0; i < containers.length; i++) {
+                containers[i].style.height = 'auto';
+                containers[i].style.maxHeight = 'none';
+                containers[i].style.overflow = 'visible';
+            }
+            
+            return "Document scale adjusted";
+        } catch (e) {
+            return "Error adjusting scale: " + e.message;
+        }
+        """
+        result = driver.execute_script(scale_script)
+        logger.info(f"스케일 조정 결과: {result}")
+        
+        # 잠시 대기하여 조정 적용
+        time.sleep(1)
+    except Exception as scale_err:
+        logger.warning(f"문서 스케일 조정 실패: {str(scale_err)}")
+    
+    # 4. 현재 페이지 전체 분석 (단일 시트로 처리)
+    try:
+        current_data = extract_current_sheet_data(driver, "전체문서")
+        if current_data and len(current_data) > 0:
+            logger.info(f"전체 문서 분석으로 {len(current_data)}개 시트 추출 성공")
+            return current_data
+    except Exception as curr_err:
+        logger.warning(f"전체 문서 분석 중 오류: {str(curr_err)}")
+    
+    # 5. JavaScript로 직접 표 데이터 추출
+    try:
+        logger.info("JavaScript로 표 데이터 직접 추출 시도")
+        js_data = extract_with_javascript(driver)
+        if js_data and any(not df.empty for df in js_data.values()):
+            logger.info(f"JavaScript로 {len(js_data)}개 시트 추출 성공")
+            return js_data
+    except Exception as js_err:
+        logger.warning(f"JavaScript 표 데이터 추출 시도 실패: {str(js_err)}")
+    
+    # 6. 창 크기 조정 (더 많은 내용이 보이도록)
+    try:
+        original_size = driver.get_window_size()
+        logger.info(f"원래 창 크기: {original_size}")
+        
+        # 더 큰 창 크기로 조정
+        driver.set_window_size(1920, 1080)
+        time.sleep(1)  # 창 크기 조정 적용 대기
+        
+        # 전체 스크린샷 캡처
+        full_page_path = f"full_page_{int(time.time())}.png"
+        driver.save_screenshot(full_page_path)
+        logger.info(f"확대된 창에서 전체 페이지 스크린샷 캡처: {full_page_path}")
+        
+        # OCR 기능이 활성화된 경우 스크린샷에서 데이터 추출 시도
+        if CONFIG['ocr_enabled']:
+            try:
+                logger.info("스크린샷에서 OCR로 데이터 추출 시도")
+                ocr_data_list = extract_data_from_screenshot(full_page_path)
+                
+                if ocr_data_list and len(ocr_data_list) > 0:
+                    # 최종 시트 데이터 준비
+                    ocr_sheets = {}
+                    for i, df in enumerate(ocr_data_list):
+                        if df is not None and not df.empty:
+                            ocr_sheets[f"OCR_Table_{i+1}"] = df
+                            
+                    if ocr_sheets:
+                        logger.info(f"OCR로 {len(ocr_sheets)}개 시트 추출 성공")
+                        return ocr_sheets
+            except Exception as ocr_err:
+                logger.warning(f"OCR 데이터 추출 중 오류: {str(ocr_err)}")
+                
+    except Exception as window_err:
+        logger.warning(f"창 크기 조정 중 오류: {str(window_err)}")
+    
+    # 7. 실패 시 플레이스홀더 생성
+    if file_params and file_params.get('post_info'):
+        try:
+            logger.warning("모든 추출 방법 실패, 대체 데이터 생성")
+            placeholder_df = create_improved_placeholder_dataframe(file_params['post_info'], file_params)
+            
+            if not placeholder_df.empty:
+                return {"추출실패_데이터": placeholder_df}
+        except Exception as placeholder_err:
+            logger.error(f"대체 데이터 생성 중 오류: {str(placeholder_err)}")
+            
+    logger.error("모든 데이터 추출 방법 실패")
+    return None
 
 
 async def main():
