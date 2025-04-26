@@ -2245,7 +2245,7 @@ def reset_browser_context(driver, delete_cookies=True, navigate_to_blank=True):
 
 
 def find_view_link_params(driver, post):
-    """게시물에서 바로보기 링크 파라미터 찾기 (클릭 방식 우선)"""
+    """게시물에서 바로보기 링크 파라미터 찾기 (클릭 방식 우선, 직접 URL 접근 폴백 추가)"""
     if not post.get('post_id'):
         logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
         return None
@@ -2264,7 +2264,8 @@ def find_view_link_params(driver, post):
         time.sleep(2)  # 추가 대기
     except Exception as e:
         logger.error(f"게시물 목록 페이지 접근 실패: {str(e)}")
-        return None
+        # 직접 URL 접근 폴백 시도
+        return direct_access_view_link_params(driver, post)
     
     # 최대 재시도 횟수
     max_retries = 3
@@ -2272,11 +2273,19 @@ def find_view_link_params(driver, post):
     
     for attempt in range(max_retries):
         try:
-            # 제목으로 게시물 링크 찾기
+            # 제목으로 게시물 링크 찾기 - 더 유연한 선택자 사용
             xpath_selectors = [
+                # 더 짧은 제목 부분만 비교 (맨 앞 20자만 사용)
                 f"//p[contains(@class, 'title') and contains(text(), '{post['title'][:20]}')]",
                 f"//a[contains(text(), '{post['title'][:20]}')]",
-                f"//div[contains(@class, 'toggle') and contains(., '{post['title'][:20]}')]"
+                f"//div[contains(@class, 'toggle') and contains(., '{post['title'][:20]}')]",
+                # 제목에서 연도와 월만 추출하여 비교 (더 유연한 방식)
+                f"//p[contains(@class, 'title') and contains(text(), '{extract_year_month_from_title(post['title'])}')]",
+                f"//a[contains(text(), '{extract_year_month_from_title(post['title'])}')]",
+                # 통계 유형으로 검색
+                f"//p[contains(@class, 'title') and contains(text(), '{determine_report_type(post['title'])[:15]}')]",
+                # 게시물 번호만 사용
+                f"//a[@onclick and contains(@onclick, '{post['post_id']}')]"
             ]
             
             post_link = None
@@ -2291,6 +2300,7 @@ def find_view_link_params(driver, post):
                     logger.warning(f"선택자로 게시물 찾기 실패: {selector}")
                     continue
             
+            # 링크를 찾지 못한 경우 직접 URL 접근 시도
             if not post_link:
                 logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
                 
@@ -2299,9 +2309,9 @@ def find_view_link_params(driver, post):
                     time.sleep(retry_delay)
                     continue
                 else:
-                    # 모든 재시도 실패 시 처리
-                    logger.warning("게시물 링크 찾기 최대 재시도 횟수 초과")
-                    return None
+                    # 직접 URL 접근 방식으로 대체
+                    logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
+                    return direct_access_view_link_params(driver, post)
             
             # 스크린샷 저장 (클릭 전)
             take_screenshot(driver, f"before_click_{post['post_id']}")
@@ -2309,18 +2319,64 @@ def find_view_link_params(driver, post):
             # 링크 클릭하여 상세 페이지로 이동
             logger.info(f"게시물 링크 클릭 시도: {post['title']}")
             
-            # JavaScript로 클릭 시도 (더 신뢰성 있는 방법)
             try:
-                driver.execute_script("arguments[0].click();", post_link)
-                logger.info("JavaScript를 통한 클릭 실행")
-            except Exception as js_click_err:
-                logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
-                # 일반 클릭 시도
-                post_link.click()
-                logger.info("일반 클릭 실행")
+                # 여러 클릭 방법 시도
+                success = False
+                
+                # 1. JavaScript로 클릭 시도 (가장 안정적인 방법)
+                try:
+                    driver.execute_script("arguments[0].click();", post_link)
+                    logger.info("JavaScript를 통한 클릭 실행")
+                    success = True
+                except Exception as js_click_err:
+                    logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
+                
+                # 2. 일반 클릭 시도
+                if not success:
+                    try:
+                        post_link.click()
+                        logger.info("일반 클릭 실행")
+                        success = True
+                    except Exception as normal_click_err:
+                        logger.warning(f"일반 클릭 실패: {str(normal_click_err)}")
+                
+                # 3. Actions 체인 사용 시도
+                if not success:
+                    try:
+                        actions = webdriver.ActionChains(driver)
+                        actions.move_to_element(post_link).click().perform()
+                        logger.info("ActionChains를 통한 클릭 실행")
+                        success = True
+                    except Exception as action_err:
+                        logger.warning(f"ActionChains 클릭 실패: {str(action_err)}")
+                
+                # 4. href 속성 확인 및 직접 접근
+                if not success:
+                    try:
+                        href = post_link.get_attribute('href')
+                        if href and href != 'javascript:void(0);' and not href.startswith('#'):
+                            driver.get(href)
+                            logger.info(f"href 속성을 통한 직접 이동: {href}")
+                            success = True
+                    except Exception as href_err:
+                        logger.warning(f"href 접근 실패: {str(href_err)}")
+                
+                # 모든 방법 실패 시 직접 URL 구성하여 접근
+                if not success:
+                    logger.warning("모든 클릭 방법 실패, 직접 URL 접근으로 대체")
+                    return direct_access_view_link_params(driver, post)
+            
+            except Exception as click_err:
+                logger.error(f"게시물 링크 클릭 중 오류: {str(click_err)}")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    # 직접 URL 접근으로 폴백
+                    return direct_access_view_link_params(driver, post)
             
             # 페이지 로드 대기
             try:
+                # URL 변경 대기
                 WebDriverWait(driver, 15).until(
                     lambda d: d.current_url != CONFIG['stats_url']
                 )
@@ -2328,13 +2384,21 @@ def find_view_link_params(driver, post):
                 time.sleep(3)  # 추가 대기
             except TimeoutException:
                 logger.warning("URL 변경 감지 실패")
+                # 실패 시 직접 URL로 접근 시도
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    return direct_access_view_link_params(driver, post)
             
-            # 상세 페이지 대기
+            # 상세 페이지 대기 - 다양한 요소를 확인하여 페이지 로드 감지
             wait_elements = [
                 (By.CLASS_NAME, "view_head"),
                 (By.CLASS_NAME, "view_cont"),
                 (By.CSS_SELECTOR, ".bbs_wrap .view"),
-                (By.XPATH, "//div[contains(@class, 'view')]")
+                (By.XPATH, "//div[contains(@class, 'view')]"),
+                (By.CSS_SELECTOR, ".board_view"),
+                (By.CLASS_NAME, "board_detail"),
+                (By.CLASS_NAME, "board_content")
             ]
             
             element_found = False
@@ -2360,16 +2424,15 @@ def find_view_link_params(driver, post):
                     if ajax_result:
                         return ajax_result
                     
-                    # 모든 방법 실패
-                    logger.error("모든 접근 방식 실패")
-                    return None
+                    # 직접 URL 접근 방식으로 대체
+                    return direct_access_view_link_params(driver, post)
             
             # 스크린샷 저장
             take_screenshot(driver, f"post_view_clicked_{post['post_id']}")
             
             # 바로보기 링크 찾기 (확장된 선택자)
             try:
-                # 여러 선택자로 바로보기 링크 찾기
+                # 여러 선택자로 바로보기 링크 찾기 - 확장된 목록
                 view_links = []
                 
                 # 1. 일반적인 '바로보기' 링크
@@ -2380,21 +2443,35 @@ def find_view_link_params(driver, post):
                     all_links = driver.find_elements(By.TAG_NAME, "a")
                     view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
                 
-                # 3. 텍스트로 찾기
+                # 3. 텍스트로 찾기 - 더 다양한 텍스트 패턴
                 if not view_links:
                     all_links = driver.find_elements(By.TAG_NAME, "a")
-                    view_links = [link for link in all_links if '바로보기' in (link.text or '')]
+                    view_links = [link for link in all_links if any(text in (link.text or '').lower() 
+                                 for text in ['바로보기', '보기', '첨부파일', '다운로드', '열기', '보기'])]
                 
-                # 4. class 속성으로 찾기
+                # 4. class 속성으로 찾기 - 더 많은 클래스
                 if not view_links:
-                    view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
+                    view_links = driver.find_elements(By.CSS_SELECTOR, 
+                        "a.attach-file, a.file_link, a.download, a.view, a[class*='file'], a[class*='download'], a[class*='attach']")
                 
                 # 5. 제목에 포함된 키워드로 관련 링크 찾기
-                if not view_links and '통계' in post['title']:
+                if not view_links and any(keyword in post['title'].lower() for keyword in ['통계', '현황', '트래픽']):
                     all_links = driver.find_elements(By.TAG_NAME, "a")
                     view_links = [link for link in all_links if 
                                 any(ext in (link.get_attribute('href') or '')  
-                                   for ext in ['.xls', '.xlsx', '.pdf', '.hwp'])]
+                                   for ext in ['.xls', '.xlsx', '.pdf', '.hwp', '.doc', '.docx'])]
+                
+                # 6. 자식 엘리먼트를 포함하는 링크 찾기
+                if not view_links:
+                    view_links = driver.find_elements(By.CSS_SELECTOR, "a:has(img[alt*='파일']), a:has(i[class*='file']), a:has(span[class*='file'])")
+                
+                # 7. div 내부 파일 링크 찾기
+                if not view_links:
+                    file_divs = driver.find_elements(By.CSS_SELECTOR, "div.file, div.attach, div[class*='file'], div[class*='attach']")
+                    for div in file_divs:
+                        links = div.find_elements(By.TAG_NAME, "a")
+                        if links:
+                            view_links.extend(links)
                 
                 if view_links:
                     view_link = view_links[0]
@@ -2429,7 +2506,7 @@ def find_view_link_params(driver, post):
                                 'post_info': post
                             }
                     # 직접 다운로드 URL인 경우 처리
-                    elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp']):
+                    elif href_attr and any(ext in href_attr for ext in ['.xls', '.xlsx', '.pdf', '.hwp', '.doc', '.docx']):
                         logger.info(f"직접 다운로드 링크 발견: {href_attr}")
                         
                         # 날짜 정보 추출
@@ -2455,7 +2532,10 @@ def find_view_link_params(driver, post):
                         ".view_content", 
                         ".bbs_content",
                         ".bbs_detail_content",
-                        "div[class*='view'] div[class*='cont']"
+                        "div[class*='view'] div[class*='cont']",
+                        ".board_content",
+                        ".detail_content",
+                        "#contents"
                     ]
                     
                     content = ""
@@ -2527,19 +2607,9 @@ def find_view_link_params(driver, post):
                 if ajax_result:
                     return ajax_result
                     
-                # 날짜 정보 추출 시도
-                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post['title'])
-                if date_match:
-                    year = int(date_match.group(1))
-                    month = int(date_match.group(2))
-                    
-                    return {
-                        'content': "페이지 로드 타임아웃",
-                        'date': {'year': year, 'month': month},
-                        'post_info': post
-                    }
+                # 직접 URL 접근 시도
+                return direct_access_view_link_params(driver, post)
                 
-                return None
         except Exception as e:
             logger.error(f"게시물 상세 정보 접근 중 오류: {str(e)}")
             
@@ -2559,6 +2629,15 @@ def find_view_link_params(driver, post):
     
     return None
 
+# 제목에서 연도와 월만 추출하는 헬퍼 함수
+def extract_year_month_from_title(title):
+    """제목에서 연도와 월만 추출 (더 유연한 검색용)"""
+    match = re.search(r'\((\d{4})년\s*(\d{1,2})월말', title)
+    if match:
+        year = match.group(1)
+        month = match.group(2)
+        return f"({year}년 {month}월말"
+    return title[:15]  # 일치하는 패턴이 없으면 앞부분만 반환
 
 def direct_access_view_link_params(driver, post):
     """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
@@ -8539,8 +8618,8 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 
 def update_consolidated_sheets(client, data_updates):
     """
-    개선된 통합 시트 업데이트 함수.
-    Raw 시트의 데이터를 통합 시트에 추가하면서 과거 데이터를 보존합니다.
+    통합된 함수로 통합 시트 업데이트.
+    여러 월의 데이터를 보존하면서 최신 데이터를 추가합니다.
     
     Args:
         client: gspread client instance
@@ -8586,14 +8665,15 @@ def update_consolidated_sheets(client, data_updates):
             logger.warning("통합할 Raw 시트를 찾을 수 없음")
             return 0
         
-        # 최신 날짜 가져오기
-        latest_date = None
+        # 최신 날짜 정보 수집 - 모든 업데이트의 날짜를 추적
+        date_columns = set()
         for update in data_updates:
             if 'date' in update:
                 year = update['date']['year']
                 month = update['date']['month']
-                latest_date = f"{year}년 {month}월"
-                break
+                date_str = f"{year}년 {month}월"
+                date_columns.add(date_str)
+                
             elif 'post_info' in update:
                 post_info = update['post_info']
                 title = post_info.get('title', '')
@@ -8601,13 +8681,10 @@ def update_consolidated_sheets(client, data_updates):
                 if match:
                     year = match.group(1)
                     month = match.group(2)
-                    latest_date = f"{year}년 {month}월"
-                    break
+                    date_str = f"{year}년 {month}월"
+                    date_columns.add(date_str)
         
-        if not latest_date:
-            latest_date = datetime.now().strftime("%Y년 %m월")
-            
-        logger.info(f"통합 시트 날짜 컬럼: {latest_date}")
+        logger.info(f"업데이트할 날짜 컬럼들: {date_columns}")
         
         # 각 통합 시트 업데이트
         updated_count = 0
@@ -8636,216 +8713,185 @@ def update_consolidated_sheets(client, data_updates):
                         logger.error(f"통합 시트 생성 실패 {consol_name}: {str(create_err)}")
                         continue
                 
-                # Raw 시트 데이터 가져오기 (전체 데이터)
-                try:
-                    raw_data = raw_ws.get_all_values()
-                    logger.info(f"Raw 시트 '{raw_name}'에서 {len(raw_data)}행 데이터 가져옴")
-                except Exception as raw_err:
-                    logger.error(f"Raw 시트 데이터 가져오기 실패: {str(raw_err)}")
-                    continue
-                
-                if not raw_data or len(raw_data) < 2:  # 최소 헤더 + 1행 필요
-                    logger.warning(f"Raw 시트 '{raw_name}'에 충분한 데이터가 없음")
-                    continue
-                
-                # 통합 시트 데이터 가져오기
+                # 1. 기존 통합 시트 데이터 가져오기
                 try:
                     consol_data = consol_ws.get_all_values()
                     logger.info(f"통합 시트 '{consol_name}'에서 {len(consol_data)}행 데이터 가져옴")
                 except Exception as consol_err:
-                    logger.error(f"통합 시트 데이터 가져오기 실패: {str(consol_err)}")
+                    logger.warning(f"통합 시트 데이터 가져오기 실패: {str(consol_err)}. 새로 생성합니다.")
                     consol_data = []
                 
-                # Raw 시트 헤더 가져오기
-                raw_headers = raw_data[0] if raw_data else []
+                # 기존 헤더 분석
+                existing_headers = consol_data[0] if consol_data else []
+                existing_date_columns = {}  # 날짜 컬럼 이름 -> 인덱스 매핑
+                id_cols_count = 0
                 
-                # 데이터 열 범위와 식별자 열 범위 결정
-                # 기본값: 계층구조는 0-4열, 데이터는 5열부터
-                id_cols_count = min(5, len(raw_headers))
-                id_cols_range = range(0, id_cols_count)
-                
-                # 마지막 데이터 열 찾기
-                last_col_idx = -1
-                for col_idx in range(len(raw_headers)-1, id_cols_count-1, -1):
-                    # 헤더가 유효한지 확인
-                    if col_idx < len(raw_headers) and raw_headers[col_idx] and raw_headers[col_idx].lower() not in ('nan', 'none', ''):
-                        # 데이터가 있는지 확인
-                        has_data = False
-                        for row_idx in range(1, len(raw_data)):
-                            if col_idx < len(raw_data[row_idx]):
-                                cell_value = raw_data[row_idx][col_idx]
-                                if cell_value and cell_value.strip() and cell_value.lower() not in ('nan', 'none', ''):
-                                    has_data = True
-                                    break
-                        
-                        if has_data:
-                            last_col_idx = col_idx
+                if existing_headers:
+                    # 식별자 열 수 결정 (첫 날짜 열 이전까지)
+                    for idx, header in enumerate(existing_headers):
+                        # 날짜 패턴 확인 (YYYY년 MM월)
+                        if re.match(r'\d{4}년\s*\d{1,2}월', header):
+                            id_cols_count = idx
                             break
-                
-                if last_col_idx < id_cols_count:
-                    last_col_idx = len(raw_headers) - 1
-                    logger.warning(f"유효한 마지막 데이터 열을 찾을 수 없음, 마지막 열({last_col_idx})을 사용")
-                
-                # 마지막 열의 헤더 확인
-                last_col_header = raw_headers[last_col_idx] if last_col_idx < len(raw_headers) else "Unknown"
-                logger.info(f"마지막 데이터 열: {last_col_idx} ('{last_col_header}')")
-                
-                # 통합 시트 헤더 처리
-                consol_headers = []
-                if consol_data and len(consol_data) > 0:
-                    consol_headers = consol_data[0]
-                
-                # 1. 통합 시트 데이터를 메모리에 구조화해서 저장
-                structured_consol_data = {}
-                
-                # 기존 통합 시트의 헤더
-                date_headers = []
-                date_col_indices = {}  # 날짜 헤더 -> 열 인덱스 매핑
-                
-                if consol_headers:
-                    for i, header in enumerate(consol_headers[id_cols_count:], id_cols_count):
-                        date_headers.append(header)
-                        date_col_indices[header] = i
-                
-                # 최신 날짜가 이미 존재하는지 확인
-                if latest_date in date_headers:
-                    logger.info(f"'{latest_date}' 열이 이미 존재함: 열 {date_col_indices[latest_date]}")
+                    
+                    # 식별자 열이 결정되지 않은 경우 기본값 설정
+                    if id_cols_count == 0:
+                        # 기본적으로 계층 구조는 1-5열 정도로 가정
+                        id_cols_count = min(5, len(existing_headers))
+                    
+                    # 날짜 열 매핑
+                    for idx, header in enumerate(existing_headers[id_cols_count:], id_cols_count):
+                        if re.match(r'\d{4}년\s*\d{1,2}월', header):
+                            existing_date_columns[header] = idx
                 else:
-                    # 새 날짜 열 추가
-                    date_headers.append(latest_date)
-                    date_col_indices[latest_date] = id_cols_count + len(date_headers) - 1
-                    logger.info(f"새 날짜 열 '{latest_date}' 추가")
+                    # 헤더가 없는 경우
+                    id_cols_count = 5  # 기본 값
+                    existing_headers = []  # 빈 헤더
                 
-                # 기존 통합 시트에서 데이터 로드
-                if consol_data and len(consol_data) > 1:
-                    for row_idx in range(1, len(consol_data)):
-                        if row_idx >= len(consol_data):
-                            continue
-                            
-                        # 행이 너무 짧으면 스킵
-                        if len(consol_data[row_idx]) < id_cols_count:
-                            continue
-                            
-                        # 계층 식별자 생성 (여러 열 조합)
-                        id_vals = []
-                        for col_idx in id_cols_range:
-                            if col_idx < len(consol_data[row_idx]):
-                                val = consol_data[row_idx][col_idx].strip()
-                                id_vals.append(f"col{col_idx}={val}")
-                            else:
-                                id_vals.append(f"col{col_idx}=")
-                                
-                        row_id = "|".join(id_vals)
-                        
-                        # 데이터 저장 (날짜별 값)
-                        if row_id not in structured_consol_data:
-                            structured_consol_data[row_id] = {
-                                'id_vals': consol_data[row_idx][:id_cols_count],
-                                'date_vals': {}
-                            }
-                            
-                        # 각 날짜 열의 값 저장
-                        for date_header, col_idx in date_col_indices.items():
-                            if col_idx < len(consol_data[row_idx]):
-                                structured_consol_data[row_id]['date_vals'][date_header] = consol_data[row_idx][col_idx]
+                logger.info(f"현재 통합 시트 구조: 식별자 열 {id_cols_count}개, 날짜 열 {len(existing_date_columns)}개")
                 
-                # 2. Raw 시트 데이터를 기반으로 새 구조 생성
-                # 새 헤더 생성 (계층 구조 + 날짜 헤더)
+                # 2. Raw 시트 데이터 가져오기
+                raw_data = raw_ws.get_all_values()
+                if not raw_data or len(raw_data) < 2:  # 최소 헤더 + 1행 필요
+                    logger.warning(f"Raw 시트 '{raw_name}'에 충분한 데이터가 없음")
+                    continue
+                
+                raw_headers = raw_data[0]
+                
+                # 3. 식별자 열과 데이터 열 분석
+                # 어떤 열을 식별자로 사용할지 결정 (기존 통합 시트 구조 우선)
+                if id_cols_count > len(raw_headers):
+                    id_cols_count = len(raw_headers) - 1  # 최소 1개의 데이터 열 남김
+                
+                # 4. 각 날짜 열의 위치 결정 (기존 + 새로운)
+                # 기존 날짜 열 유지
                 new_headers = []
-                
-                # 계층 구조 헤더 추가
-                for col_idx in id_cols_range:
-                    if col_idx < len(raw_headers):
-                        new_headers.append(raw_headers[col_idx])
-                    else:
-                        new_headers.append(f"Column_{col_idx}")
-                
-                # 날짜 헤더 추가
-                for date_header in date_headers:
-                    new_headers.append(date_header)
-                
-                # 3. Raw 시트 데이터를 토대로 새 행 생성
-                # 새로 추가될 데이터 행 준비
-                new_rows = [new_headers]  # 헤더 행부터 시작
-                
-                # Raw 시트의 모든 행 처리
-                for row_idx in range(1, len(raw_data)):
-                    if row_idx >= len(raw_data):
-                        continue
-                        
-                    # 계층 구조 추출
-                    id_vals = []
-                    
-                    for col_idx in id_cols_range:
-                        if col_idx < len(raw_data[row_idx]):
-                            id_vals.append(raw_data[row_idx][col_idx])
+                if existing_headers:
+                    # 식별자 열 유지
+                    for i in range(id_cols_count):
+                        if i < len(existing_headers):
+                            new_headers.append(existing_headers[i])
                         else:
-                            id_vals.append("")
-                    
-                    # 계층 식별자 생성
-                    id_parts = []
-                    for col_idx, val in enumerate(id_vals):
-                        id_parts.append(f"col{col_idx}={val.strip()}")
-                    row_id = "|".join(id_parts)
-                    
-                    # 새 행 데이터 준비
-                    new_row = id_vals.copy()  # 계층 구조 먼저 복사
-                    
-                    # 기존 데이터가 있는지 확인
-                    existing_data = structured_consol_data.get(row_id, {'id_vals': id_vals, 'date_vals': {}})
-                    
-                    # 각 날짜 열에 대한 값 추가
-                    for date_header in date_headers:
-                        # 최신 날짜이면 Raw 데이터에서 값 가져오기
-                        if date_header == latest_date:
-                            if last_col_idx < len(raw_data[row_idx]):
-                                new_row.append(raw_data[row_idx][last_col_idx])
+                            # 기존 헤더에 없는 경우 Raw 시트의 헤더 또는 기본값 사용
+                            new_headers.append(raw_headers[i] if i < len(raw_headers) else f"Column_{i}")
+                else:
+                    # 헤더가 없는 경우 Raw 시트의 헤더 사용
+                    for i in range(id_cols_count):
+                        new_headers.append(raw_headers[i] if i < len(raw_headers) else f"Column_{i}")
+                
+                # 날짜 열 추가 - 이미 있는 날짜는 유지하고 새 날짜 추가
+                all_date_columns = list(existing_date_columns.keys()) + list(date_columns - set(existing_date_columns.keys()))
+                
+                # 날짜 열 정렬 (최신순 또는 오름차순)
+                all_date_columns.sort(key=lambda x: (
+                    # 연도와 월을 추출하여 정렬
+                    int(re.search(r'(\d{4})년', x).group(1)) if re.search(r'(\d{4})년', x) else 0,
+                    int(re.search(r'(\d{1,2})월', x).group(1)) if re.search(r'(\d{1,2})월', x) else 0
+                ))
+                
+                # 모든 날짜 열 추가
+                for date_col in all_date_columns:
+                    new_headers.append(date_col)
+                
+                # 5. 모든 행에 대한 데이터 구성
+                # 식별자 -> 행 데이터 매핑
+                row_data_map = {}
+                
+                # 기존 데이터 맵핑
+                if len(consol_data) > 1:  # 헤더 제외
+                    for row_idx in range(1, len(consol_data)):
+                        row = consol_data[row_idx]
+                        if row_idx >= len(consol_data) or len(row) < id_cols_count:
+                            continue
+                            
+                        # 식별자 키 생성
+                        id_key = "|".join([str(row[i]).strip() for i in range(id_cols_count)])
+                        
+                        # 각 날짜 열의 값 매핑
+                        date_values = {}
+                        for date_col, col_idx in existing_date_columns.items():
+                            if col_idx < len(row):
+                                date_values[date_col] = row[col_idx]
                             else:
-                                new_row.append("")
-                        else:
-                            # 기존 날짜 열이면 통합 시트에서 값 가져오기
-                            new_row.append(existing_data['date_vals'].get(date_header, ""))
-                    
-                    # 새 행 추가
-                    new_rows.append(new_row)
-                    
-                    # 이미 처리된 행 표시
-                    structured_consol_data.pop(row_id, None)
+                                date_values[date_col] = ""
+                                
+                        row_data_map[id_key] = {
+                            'id_values': row[:id_cols_count],
+                            'date_values': date_values
+                        }
                 
-                # 4. 통합 시트에는 있지만 Raw 시트에는 없는 행 추가
-                for row_id, data in structured_consol_data.items():
-                    id_vals = data['id_vals']
-                    
-                    # 빈 행 스킵
-                    if not any(val.strip() for val in id_vals):
+                # 6. 현재 업데이트의 데이터 추가/업데이트
+                # Raw 데이터로부터 업데이트
+                for row_idx in range(1, len(raw_data)):
+                    row = raw_data[row_idx]
+                    if row_idx >= len(raw_data) or len(row) <= id_cols_count:
                         continue
                         
-                    # 새 행 준비
-                    new_row = id_vals.copy()
+                    # 식별자 키 생성
+                    id_key = "|".join([str(row[i]).strip() for i in range(id_cols_count)])
+                    
+                    # 기존 행이 있는지 확인
+                    if id_key not in row_data_map:
+                        # 새 행 추가
+                        row_data_map[id_key] = {
+                            'id_values': row[:id_cols_count],
+                            'date_values': {}
+                        }
+                    
+                    # 어떤 날짜 열을 업데이트할지 결정
+                    # Raw 시트의 마지막 열의 값을 각 날짜 열에 매핑
+                    last_data_idx = len(row) - 1
+                    if last_data_idx < id_cols_count:
+                        continue  # 데이터 열이 없는 경우
+                        
+                    last_value = row[last_data_idx].strip()
+                    
+                    # 업데이트할 날짜 열 처리
+                    for date_col in date_columns:
+                        row_data_map[id_key]['date_values'][date_col] = last_value
+                
+                # 7. 최종 데이터 조합하여 새 행 생성
+                new_rows = [new_headers]  # 헤더부터 시작
+                
+                # 각 행에 대한 데이터 조합
+                for id_key, data in row_data_map.items():
+                    id_values = data['id_values']
+                    date_values = data['date_values']
+                    
+                    # 새 행 구성: 식별자 값 + 각 날짜 열의 값
+                    new_row = list(id_values)  # 식별자 값 복사
                     
                     # 각 날짜 열에 대한 값 추가
-                    for date_header in date_headers:
-                        # 최신 날짜에는 빈 값 설정
-                        if date_header == latest_date:
-                            new_row.append("")
-                        else:
-                            # 기존 날짜 열의 값 복사
-                            new_row.append(data['date_vals'].get(date_header, ""))
-                    
-                    # 새 행 추가
+                    for date_col in all_date_columns:
+                        new_row.append(date_values.get(date_col, ""))
+                        
                     new_rows.append(new_row)
                 
-                # 5. 최종 데이터로 통합 시트 업데이트
+                # 8. 최종 데이터를 통합 시트에 업데이트
                 try:
-                    # 기존 시트 내용 모두 지우기 (변경 사항)
-                    # 기존 데이터를 지우지 않고 업데이트하도록 수정
-                    consol_ws.clear()  # 전체 시트 지우기 - 새로운 내용으로 덮어쓰기 위함
+                    # 기존 데이터 지우기
+                    consol_ws.clear()
                     logger.info(f"통합 시트 '{consol_name}'의 기존 데이터 삭제")
-                    time.sleep(2)  # API 제한 방지
+                    time.sleep(1)  # API 제한 방지
                     
-                    # 새 데이터로 일괄 업데이트
+                    # 빈 값 처리
+                    for i in range(len(new_rows)):
+                        for j in range(len(new_rows[i])):
+                            if new_rows[i][j] is None:
+                                new_rows[i][j] = ""
+                    
+                    # 전체 데이터 한 번에 업데이트
                     consol_ws.update('A1', new_rows)
                     logger.info(f"통합 시트 '{consol_name}'에 {len(new_rows)}행 업데이트 완료")
+                    
+                    # 헤더 행 서식 지정 (선택 사항)
+                    try:
+                        consol_ws.format(f'A1:{chr(64 + len(new_headers))}1', {
+                            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                            "textFormat": {"bold": True}
+                        })
+                    except Exception as format_err:
+                        logger.warning(f"헤더 서식 지정 실패: {str(format_err)}")
                     
                     # 메타데이터 추가
                     try:
@@ -8857,7 +8903,6 @@ def update_consolidated_sheets(client, data_updates):
                             {'range': f'C{meta_row}', 'values': [[f"{len(new_rows)-1}개 행 업데이트됨"]]},
                         ]
                         consol_ws.batch_update(meta_updates)
-                        logger.info(f"메타데이터 업데이트 완료: 행 {meta_row}")
                     except Exception as meta_err:
                         logger.warning(f"메타데이터 업데이트 실패: {str(meta_err)}")
                         
@@ -8866,17 +8911,17 @@ def update_consolidated_sheets(client, data_updates):
                 except Exception as update_err:
                     logger.error(f"통합 시트 업데이트 실패: {str(update_err)}")
                     
-                    # 대체 방법으로 시도 (기존 행별 업데이트 로직 유지)
+                    # 대체 방법: 행별 업데이트
                     try:
                         logger.info("대체 방법으로 행별 업데이트 시도")
+                        batch_size = 10  # 작은 배치 크기로 API 제한 방지
                         
                         # 헤더 먼저 업데이트
                         consol_ws.update('A1', [new_headers])
                         logger.info("헤더 업데이트 완료")
-                        time.sleep(2)
+                        time.sleep(1)
                         
-                        # 행별로 업데이트
-                        batch_size = 10  # 작은 배치 크기로 안정성 높임
+                        # 데이터 행을 배치로 업데이트
                         for i in range(1, len(new_rows), batch_size):
                             end_idx = min(i + batch_size, len(new_rows))
                             batch_range = f'A{i+1}:{chr(64 + len(new_headers))}{end_idx}'
@@ -8885,24 +8930,24 @@ def update_consolidated_sheets(client, data_updates):
                             try:
                                 consol_ws.update(batch_range, batch_data)
                                 logger.info(f"행 {i+1}-{end_idx} 업데이트 완료")
-                                time.sleep(2)  # API 제한 방지
+                                time.sleep(1)
                             except Exception as batch_err:
                                 logger.error(f"행 {i+1}-{end_idx} 업데이트 실패: {str(batch_err)}")
                                 
-                                # 개별 행 업데이트로 대체
+                                # 개별 행 업데이트로 폴백
                                 for j, row_data in enumerate(batch_data, i+1):
                                     try:
                                         row_range = f'A{j}:{chr(64 + len(row_data))}{j}'
                                         consol_ws.update(row_range, [row_data])
                                         logger.info(f"개별 행 {j} 업데이트 완료")
-                                        time.sleep(1)
+                                        time.sleep(0.5)
                                     except Exception as row_err:
                                         logger.error(f"개별 행 {j} 업데이트 실패: {str(row_err)}")
                         
                         updated_count += 1
                     except Exception as alt_err:
-                        logger.error(f"대체 업데이트 방법도 실패: {str(alt_err)}")
-                
+                        logger.error(f"대체 방법으로 업데이트 실패: {str(alt_err)}")
+                        
             except Exception as sheet_err:
                 logger.error(f"시트 '{raw_name}/{consol_name}' 처리 중 오류: {str(sheet_err)}")
                 import traceback
@@ -8916,7 +8961,7 @@ def update_consolidated_sheets(client, data_updates):
         import traceback
         logger.error(traceback.format_exc())
         return 0
-
+        
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
     Enhanced function to create more informative placeholder DataFrames.
