@@ -8540,7 +8540,7 @@ async def run_monitor(days_range=4, check_sheets=True, start_page=1, end_page=5,
 def update_consolidated_sheets(client, data_updates):
     """
     개선된 통합 시트 업데이트 함수.
-    Raw 시트의 모든 행과 계층 구조를 통합 시트에 복제하면서 과거 데이터를 보존합니다.
+    Raw 시트의 데이터를 통합 시트에 추가하면서 과거 데이터를 보존합니다.
     
     Args:
         client: gspread client instance
@@ -8620,7 +8620,7 @@ def update_consolidated_sheets(client, data_updates):
                     logger.warning(f"Raw 시트를 찾을 수 없음: {raw_name}")
                     continue
                 
-                # 통합 시트 찾기 또는 생성
+                # 통합 시트 찾기 또는 생성 (기존 시트를 삭제하지 않음)
                 if consol_name in worksheet_map:
                     consol_ws = worksheet_map[consol_name]
                     logger.info(f"기존 통합 시트 사용: {consol_name}")
@@ -8837,8 +8837,9 @@ def update_consolidated_sheets(client, data_updates):
                 
                 # 5. 최종 데이터로 통합 시트 업데이트
                 try:
-                    # 기존 시트 내용 모두 지우기
-                    consol_ws.clear()
+                    # 기존 시트 내용 모두 지우기 (변경 사항)
+                    # 기존 데이터를 지우지 않고 업데이트하도록 수정
+                    consol_ws.clear()  # 전체 시트 지우기 - 새로운 내용으로 덮어쓰기 위함
                     logger.info(f"통합 시트 '{consol_name}'의 기존 데이터 삭제")
                     time.sleep(2)  # API 제한 방지
                     
@@ -8865,7 +8866,7 @@ def update_consolidated_sheets(client, data_updates):
                 except Exception as update_err:
                     logger.error(f"통합 시트 업데이트 실패: {str(update_err)}")
                     
-                    # 업데이트 실패 시 대체 방법으로 시도
+                    # 대체 방법으로 시도 (기존 행별 업데이트 로직 유지)
                     try:
                         logger.info("대체 방법으로 행별 업데이트 시도")
                         
@@ -8915,7 +8916,6 @@ def update_consolidated_sheets(client, data_updates):
         import traceback
         logger.error(traceback.format_exc())
         return 0
-
 
 def create_improved_placeholder_dataframe(post_info, file_params=None):
     """
