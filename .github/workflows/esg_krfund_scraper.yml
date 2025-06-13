@@ -1,4 +1,4 @@
-name: 01_ESG Fund Data Scraper
+name: ESG Fund Data Scraper
 
 on:
   schedule:
@@ -12,18 +12,18 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
     
     - name: Cache pip packages
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements_esg.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
     
@@ -53,7 +53,7 @@ jobs:
       continue-on-error: true  # 백업 실패해도 워크플로우는 성공으로 처리
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: esg-fund-data-${{ github.run_number }}
         path: data_backup/
