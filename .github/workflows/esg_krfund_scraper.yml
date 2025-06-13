@@ -1,4 +1,4 @@
-name: Weekly_ESG Fund Data Scraper
+name: ESG Fund Data Scraper
 
 on:
   schedule:
@@ -41,7 +41,7 @@ jobs:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
       run: |
-        python esg_krfund_scraper.py
+        python scraper.py
     
     - name: Commit and push backup data
       run: |
