@@ -1,0 +1,78 @@
+name: Weekly_ESG Fund Data Scraper
+
+on:
+  schedule:
+    # 매주 목요일 오전 9시 (KST) = 수요일 오후 12시 (UTC)
+    - cron: '0 0 * * 4'
+  workflow_dispatch:  # 수동 실행도 가능하도록 설정
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        playwright install chromium
+        playwright install-deps
+    
+    - name: Run ESG Fund Scraper
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KRFUND_SPREADSHEET_ID: ${{ secrets.KRFUND_SPREADSHEET_ID }}
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+      run: |
+        python esg_fund_scraper.py
+    
+    - name: Commit and push backup data
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add data_backup/
+        git diff --staged --quiet || git commit -m "Update ESG fund data backup - $(date +'%Y-%m-%d')"
+        git push
+      continue-on-error: true  # 백업 실패해도 워크플로우는 성공으로 처리
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: esg-fund-data-${{ github.run_number }}
+        path: data_backup/
+        retention-days: 30  # 30일간 보관
+    
+    - name: Send notification on failure
+      if: failure()
+      env:
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+      run: |
+        python -c "
+import requests
+import os
+bot_token = os.environ.get('TELCO_NEWS_TOKEN')
+chat_id = os.environ.get('TELCO_NEWS_TESTER')
+if bot_token and chat_id:
+    url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
+    data = {'chat_id': chat_id, 'text': '❌ ESG Fund 데이터 수집 워크플로우 실패!'}
+    requests.post(url, data=data)
+"
+      continue-on-error: true
