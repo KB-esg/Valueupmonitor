@@ -1,4 +1,4 @@
-name: ESG Fund Data Scraper
+name: 01_ESG Fund Data Scraper
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements_esg.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
     
