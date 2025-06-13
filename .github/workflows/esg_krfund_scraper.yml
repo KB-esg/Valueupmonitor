@@ -41,7 +41,7 @@ jobs:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
       run: |
-        python esg_fund_scraper.py
+        python esg_krfund_scraper.py
     
     - name: Commit and push backup data
       run: |
