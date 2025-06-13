@@ -87,7 +87,7 @@ jobs:
     
     - name: Run ESG Fund Scraper
       env:
-        MSIT_GSPREAD_REF: ${{ secrets.MSIT_GSPREAD_REF }}
+        GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
         KRFUND_SPREADSHEET_ID: ${{ secrets.KRFUND_SPREADSHEET_ID }}
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
