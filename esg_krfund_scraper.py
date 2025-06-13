@@ -203,16 +203,18 @@ class ESGFundScraper:
         scope = ['https://spreadsheets.google.com/feeds',
                  'https://www.googleapis.com/auth/drive']
         
-        creds_json = os.environ.get('GOOGLE_SHEETS_CREDS')
+        creds_json = os.environ.get('MSIT_GSPREAD_REF')
         if not creds_json:
             print("No Google Sheets credentials found")
-            return False
+            print("Available environment variables:", list(os.environ.keys()))
+            return []
         
         try:
             creds_dict = json.loads(creds_json)
             # 서비스 계정 이메일 주소 출력
             service_account_email = creds_dict.get('client_email', 'Unknown')
             print(f"Using service account: {service_account_email}")
+            print(f"Please make sure this email has edit access to your Google Sheets")
             
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             client = gspread.authorize(creds)
@@ -220,7 +222,8 @@ class ESGFundScraper:
             sheet_id = os.environ.get('KRFUND_SPREADSHEET_ID')
             if not sheet_id:
                 print("No Google Sheet ID found")
-                return False
+                print("Available environment variables:", list(os.environ.keys()))
+                return []
                 
             spreadsheet = client.open_by_key(sheet_id)
             
@@ -333,11 +336,12 @@ class ESGFundScraper:
             execution_time = round(time.time() - start_time, 2)
             
             # 7. 성공 메시지 전송
+            sheets_count = len(updated_sheets) if isinstance(updated_sheets, list) else 0
             message = f"""✅ *ESG 펀드 데이터 수집 완료*
 
 📅 수집 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 📊 수집 데이터: {total_records}개 레코드
-📁 업데이트 시트: {len(updated_sheets)}개
+📁 업데이트 시트: {sheets_count}개
 💾 백업 파일: {len(saved_files)}개
 ⏱️ 실행 시간: {execution_time}초
 
