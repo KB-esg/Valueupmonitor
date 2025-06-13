@@ -30,7 +30,12 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        echo "Installing requirements from requirements_esg.txt..."
         pip install -r requirements_esg.txt
+        echo "Verifying playwright installation..."
+        pip list | grep playwright || echo "playwright not found in pip list"
+        echo "Final package list:"
+        pip list
     
     - name: Install Playwright browsers
       run: |
