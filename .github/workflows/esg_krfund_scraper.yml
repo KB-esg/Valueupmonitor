@@ -3,7 +3,7 @@ name: 01_ESG Fund Data Scraper
 on:
   schedule:
     # 매주 목요일 오전 9시 (KST) = 수요일 오후 12시 (UTC)
-    - cron: '0 0 * * 4'
+    - cron: '0 0 * * 5'
   workflow_dispatch:  # 수동 실행도 가능하도록 설정
 
 jobs:
