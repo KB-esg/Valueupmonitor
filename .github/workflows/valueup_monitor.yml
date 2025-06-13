@@ -1,4 +1,4 @@
-name: KRX Value-Up Monitoring
+name: 02_KRX Value-Up Monitoring
 
 on:
   schedule:
