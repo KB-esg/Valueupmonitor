@@ -28,7 +28,7 @@ class ESGFundScraper:
             'tab_name': tab_name,
             'top_funds': await self.parse_top_funds(page),
             'new_funds': await self.parse_new_funds(page),
-            'chart_info': await self.parse_chart_info(page)
+            'chart_data': await self.parse_chart_data(page)
         }
         
         return data
@@ -116,16 +116,69 @@ class ESGFundScraper:
         
         return new_funds_data
     
-    async def parse_chart_info(self, page):
-        """차트 정보 파싱 (설정액, 수익률 등)"""
-        chart_info = {}
+    async def parse_chart_data(self, page):
+        """차트 데이터 파싱 (설정액/수익률)"""
+        chart_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
         
-        # 차트 제목 정보 가져오기
-        period_elem = await page.query_selector('#txtTopFund')
-        if period_elem:
-            chart_info['period'] = await period_elem.inner_text()
+        try:
+            # JavaScript 실행하여 차트 데이터 가져오기
+            chart_info = await page.evaluate('''() => {
+                // Highcharts 데이터 추출
+                const charts = window.Highcharts?.charts || [];
+                if (charts.length > 0) {
+                    const chart = charts[0];
+                    const dates = [];
+                    const setupAmounts = [];
+                    const returns = [];
+                    
+                    // X축 날짜 데이터
+                    if (chart.xAxis && chart.xAxis[0]) {
+                        const categories = chart.xAxis[0].categories;
+                        if (categories) {
+                            dates.push(...categories);
+                        }
+                    }
+                    
+                    // 시리즈 데이터
+                    if (chart.series) {
+                        // 설정액 데이터 (첫 번째 시리즈)
+                        if (chart.series[0] && chart.series[0].data) {
+                            chart.series[0].data.forEach(point => {
+                                setupAmounts.push(point.y);
+                            });
+                        }
+                        
+                        // 수익률 데이터 (두 번째 시리즈)
+                        if (chart.series[1] && chart.series[1].data) {
+                            chart.series[1].data.forEach(point => {
+                                returns.push(point.y);
+                            });
+                        }
+                    }
+                    
+                    return {
+                        dates: dates,
+                        setupAmounts: setupAmounts,
+                        returns: returns
+                    };
+                }
+                return null;
+            }''')
+            
+            if chart_info:
+                chart_data = chart_info
+                print(f"Chart data extracted: {len(chart_data['dates'])} data points")
+            else:
+                print("No chart data found")
+                
+        except Exception as e:
+            print(f"Error extracting chart data: {e}")
         
-        return chart_info
+        return chart_data
     
     async def scrape_all_tabs(self):
         """모든 탭의 데이터 수집"""
@@ -194,6 +247,18 @@ class ESGFundScraper:
                 df['collection_date'] = collection_date
                 df['collection_time'] = collection_time
                 dfs[df_key] = df
+            
+            # 일별 차트 데이터 (설정액/수익률)
+            if tab_data['chart_data'] and tab_data['chart_data']['dates']:
+                df_key = f'{tab_name}_daily_chart'
+                chart_df = pd.DataFrame({
+                    'date': tab_data['chart_data']['dates'],
+                    'setup_amount': tab_data['chart_data']['setup_amounts'],
+                    'return_rate': tab_data['chart_data']['returns']
+                })
+                chart_df['tab_type'] = tab_name
+                chart_df['collection_time'] = collection_time
+                dfs[df_key] = chart_df
         
         return dfs
     
@@ -233,12 +298,15 @@ class ESGFundScraper:
                 'SRI_return_top': 'SRI_수익률TOP5',
                 'SRI_growth_top': 'SRI_설정액증가TOP5',
                 'SRI_new_funds': 'SRI_신규펀드',
+                'SRI_daily_chart': 'SRI_일별차트',
                 'ESG_주식_return_top': 'ESG주식_수익률TOP5',
                 'ESG_주식_growth_top': 'ESG주식_설정액증가TOP5',
                 'ESG_주식_new_funds': 'ESG주식_신규펀드',
+                'ESG_주식_daily_chart': 'ESG주식_일별차트',
                 'ESG_채권_return_top': 'ESG채권_수익률TOP5',
                 'ESG_채권_growth_top': 'ESG채권_설정액증가TOP5',
-                'ESG_채권_new_funds': 'ESG채권_신규펀드'
+                'ESG_채권_new_funds': 'ESG채권_신규펀드',
+                'ESG_채권_daily_chart': 'ESG채권_일별차트'
             }
             
             updated_sheets = []
