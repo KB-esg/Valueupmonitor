@@ -203,9 +203,10 @@ class ESGFundScraper:
         scope = ['https://spreadsheets.google.com/feeds',
                  'https://www.googleapis.com/auth/drive']
         
-        creds_json = os.environ.get('MSIT_GSPREAD_REF')
+        creds_json = os.environ.get('GOOGLE_SERVICE')
         if not creds_json:
             print("No Google Sheets credentials found")
+            print("Looking for GOOGLE_SERVICE environment variable")
             print("Available environment variables:", list(os.environ.keys()))
             return []
         
