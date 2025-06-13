@@ -1,8 +1,8 @@
-name: 01_ESG Fund Data Scraper
+name: ESG Fund Data Scraper
 
 on:
   schedule:
-    # 매주 목요일 오전 9시 (KST) = 수요일 오후 12시 (UTC)
+    # 매주 금요일 오전 9시 (KST) = 목요일 오후 12시 (UTC)
     - cron: '0 0 * * 5'
   workflow_dispatch:  # 수동 실행도 가능하도록 설정
 
@@ -30,17 +30,58 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        echo "Installing requirements from requirements_esg.txt..."
-        pip install -r requirements_esg.txt
+        echo "Current directory contents:"
+        ls -la
+        echo "Installing playwright directly..."
+        pip install playwright==1.40.0
+        echo "Installing other requirements from requirements_esg.txt..."
+        if [ -f requirements_esg.txt ]; then
+          pip install -r requirements_esg.txt
+        else
+          echo "requirements_esg.txt not found, installing packages individually"
+          pip install requests==2.31.0
+          pip install pandas==2.0.3
+          pip install gspread==5.10.0
+          pip install google-auth==2.22.0
+          pip install google-auth-oauthlib==1.0.0
+          pip install google-auth-httplib2==0.1.0
+          pip install openpyxl==3.1.2
+        fi
         echo "Verifying playwright installation..."
-        pip list | grep playwright || echo "playwright not found in pip list"
-        echo "Final package list:"
+        pip show playwright
+        echo "All installed packages:"
         pip list
     
     - name: Install Playwright browsers
       run: |
+        # Ubuntu 버전별 호환성을 위한 의존성 수동 설치
+        sudo apt-get update
+        sudo apt-get install -y \
+          libnss3 \
+          libnspr4 \
+          libatk1.0-0 \
+          libatk-bridge2.0-0 \
+          libcups2 \
+          libdrm2 \
+          libdbus-1-3 \
+          libatspi2.0-0 \
+          libx11-6 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxext6 \
+          libxfixes3 \
+          libxrandr2 \
+          libgbm1 \
+          libxcb1 \
+          libxkbcommon0 \
+          libpango-1.0-0 \
+          libcairo2 \
+          libasound2t64 || true
+        
+        # Playwright 브라우저 설치
         python -m playwright install chromium
-        python -m playwright install-deps
+        # 의존성 설치 실패 무시하고 계속 진행
+        python -m playwright install-deps || true
     
     - name: Run ESG Fund Scraper
       env:
