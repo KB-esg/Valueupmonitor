@@ -1,4 +1,4 @@
-name: 01.ESG Fund Data Scraper
+name: 01_ESG Fund Data Scraper
 
 on:
   schedule:
