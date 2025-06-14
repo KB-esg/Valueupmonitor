@@ -161,16 +161,19 @@ class ESGFundScraper:
         return None
 
     async def extract_chart_data(self, page, tab_name):
-        """차트 데이터 추출 (JavaScript 우선, 실패시 이미지 분석)"""
+        """차트 데이터 추출 (JavaScript와 OCR 둘 다 수행하여 비교)"""
         # 1. JavaScript로 직접 추출 시도
-        chart_data = await self.extract_chart_data_via_javascript(page)
+        js_data = await self.extract_chart_data_via_javascript(page)
         
-        if chart_data and chart_data.get('dates'):
-            return chart_data
+        # 2. 이미지 OCR 분석도 수행 (비교용)
+        ocr_data = await self.extract_chart_data_with_ocr_analysis(page, tab_name)
         
-        # 2. JavaScript 실패시 이미지 분석 (기존 OCR 방법)
-        print("⚠️ JavaScript extraction failed, trying image analysis...")
-        return await self.extract_chart_data_with_ocr_analysis(page, tab_name)
+        # 두 방법 모두의 결과를 반환
+        return {
+            'js_data': js_data,
+            'ocr_data': ocr_data,
+            'primary_data': js_data if js_data and js_data.get('dates') else ocr_data
+        }
     
     async def extract_chart_data_with_ocr_analysis(self, page, tab_name):
         """차트 이미지 OCR 분석 (백업 방법)"""
@@ -427,11 +430,12 @@ class ESGFundScraper:
                 
             spreadsheet = client.open_by_key(sheet_id)
             
-            # 시트 이름 매핑 (통합된 시트)
+            # 시트 이름 매핑
             sheet_mapping = {
                 'top_funds': 'ESG_TOP5펀드',
                 'new_funds': 'ESG_신규펀드',
-                'daily_chart': 'ESG_일별차트'
+                'daily_chart': 'ESG_일별차트',
+                'chart_comparison': 'ESG_차트비교검증'
             }
             
             updated_sheets = []
@@ -446,28 +450,47 @@ class ESGFundScraper:
                     except:
                         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=5000, cols=20)
                     
-                    # 기존 데이터 가져오기
-                    existing_data = worksheet.get_all_records()
-                    
-                    if existing_data:
-                        existing_df = pd.DataFrame(existing_data)
-                        # 중복 제거를 위한 키 설정
-                        if df_key == 'top_funds':
-                            # TOP5는 날짜, 탭, 타입, 순위로 구분
-                            key_cols = ['collection_date', 'tab_type', 'type', 'rank']
-                        elif df_key == 'new_funds':
-                            # 신규펀드는 날짜, 탭, 펀드명으로 구분
-                            key_cols = ['collection_date', 'tab_type', 'fund_name']
-                        else:  # daily_chart
-                            # 차트는 날짜, 탭으로 구분
-                            key_cols = ['date', 'tab_type']
+                    if df_key == 'daily_chart':
+                        # 일별 차트는 특별한 처리 (최신 데이터가 위로)
+                        existing_data = worksheet.get_all_records()
                         
-                        # 중복 제거 후 결합
-                        combined_df = pd.concat([existing_df, df], ignore_index=True)
-                        combined_df = combined_df.drop_duplicates(subset=key_cols, keep='last')
-                        combined_df = combined_df.sort_values(by=['collection_date', 'tab_type'])
-                    else:
+                        if existing_data:
+                            existing_df = pd.DataFrame(existing_data)
+                            # 새 데이터와 결합
+                            combined_df = pd.concat([df, existing_df], ignore_index=True)
+                            # 중복 제거 (날짜와 탭으로)
+                            combined_df = combined_df.drop_duplicates(subset=['date', 'tab_type'], keep='first')
+                            # 날짜 역순 정렬 (최신이 위로)
+                            combined_df = combined_df.sort_values(by=['date', 'tab_type'], ascending=[False, True])
+                        else:
+                            combined_df = df
+                            
+                    elif df_key == 'chart_comparison':
+                        # 비교 검증 데이터는 매번 새로 쓰기
                         combined_df = df
+                        combined_df = combined_df.sort_values(by=['date', 'tab_type', 'method'], 
+                                                            ascending=[False, True, True])
+                        
+                    else:
+                        # TOP5와 신규펀드는 기존 로직 유지
+                        existing_data = worksheet.get_all_records()
+                        
+                        if existing_data:
+                            existing_df = pd.DataFrame(existing_data)
+                            # 중복 제거를 위한 키 설정
+                            if df_key == 'top_funds':
+                                key_cols = ['collection_date', 'tab_type', 'type', 'rank']
+                            elif df_key == 'new_funds':
+                                key_cols = ['collection_date', 'tab_type', 'fund_name']
+                            
+                            # 중복 제거 후 결합
+                            combined_df = pd.concat([existing_df, df], ignore_index=True)
+                            combined_df = combined_df.drop_duplicates(subset=key_cols, keep='last')
+                            # 최신 데이터가 위로 오도록 정렬
+                            combined_df = combined_df.sort_values(by=['collection_date', 'tab_type'], 
+                                                                ascending=[False, True])
+                        else:
+                            combined_df = df
                     
                     # 데이터 쓰기
                     worksheet.clear()
