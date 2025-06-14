@@ -8,6 +8,7 @@ import json
 import os
 import requests
 import time
+import re
 
 class ESGFundScraper:
     def __init__(self):
@@ -60,76 +61,84 @@ class ESGFundScraper:
             hover_y = box['y'] + box['height'] / 2
             
             # X축을 따라 이동하며 데이터 수집
-            # 차트 너비를 20-30개 구간으로 나누어 호버
-            num_points = 25
+            num_points = 20
             step = box['width'] / num_points
             
             collected_data = []
             
             for i in range(num_points):
-                hover_x = box['x'] + (i * step) + 10  # 왼쪽 여백 고려
+                hover_x = box['x'] + (i * step) + 10
                 
                 # 마우스를 해당 위치로 이동
                 await page.mouse.move(hover_x, hover_y)
-                await page.wait_for_timeout(100)  # 툴팁이 나타날 시간 대기
+                await page.wait_for_timeout(200)  # 툴팁이 나타날 시간 대기
                 
-                # 툴팁 찾기
-                tooltip = await page.query_selector('.highcharts-tooltip')
-                if tooltip:
-                    # 툴팁이 보이는지 확인
-                    is_visible = await tooltip.is_visible()
-                    if is_visible:
-                        tooltip_text = await tooltip.inner_text()
-                        if tooltip_text:
-                            print(f"Point {i}: {tooltip_text}")
+                # 모든 텍스트 요소 찾기 (SVG 내부의 text 포함)
+                try:
+                    # 방법 1: SVG text 요소 직접 찾기
+                    svg_texts = await page.query_selector_all('.highcharts-tooltip text')
+                    tooltip_texts = []
+                    
+                    for text_elem in svg_texts:
+                        try:
+                            # textContent 사용
+                            text_content = await text_elem.evaluate('(element) => element.textContent')
+                            if text_content:
+                                tooltip_texts.append(text_content.strip())
+                        except:
+                            pass
+                    
+                    # 방법 2: 툴팁 관련 div 찾기
+                    if not tooltip_texts:
+                        tooltip_divs = await page.query_selector_all('.highcharts-tooltip-box, .highcharts-label')
+                        for div in tooltip_divs:
+                            try:
+                                if await div.is_visible():
+                                    text = await div.evaluate('(element) => element.textContent || element.innerText')
+                                    if text:
+                                        tooltip_texts.append(text.strip())
+                            except:
+                                pass
+                    
+                    if tooltip_texts:
+                        print(f"Point {i}: {' | '.join(tooltip_texts)}")
+                        
+                        # 텍스트 파싱
+                        data_point = {}
+                        for text in tooltip_texts:
+                            # 날짜 패턴
+                            if '.' in text and len(text) >= 10:
+                                date_match = re.search(r'(\d{4}\.\d{2}\.\d{2})', text)
+                                if date_match:
+                                    data_point['date'] = date_match.group(1)
                             
-                            # 툴팁 텍스트 파싱
-                            lines = tooltip_text.strip().split('\n')
-                            data_point = {}
-                            
-                            for line in lines:
-                                line = line.strip()
-                                # 날짜 패턴 (YYYY.MM.DD)
-                                if '.' in line and len(line) == 10:
+                            # 설정액 패턴
+                            if '설정액' in text or '억원' in text:
+                                amount_match = re.search(r'([\d,]+\.?\d*)억원', text)
+                                if amount_match:
+                                    value = amount_match.group(1).replace(',', '')
                                     try:
-                                        # 날짜 형식 검증
-                                        parts = line.split('.')
-                                        if len(parts) == 3 and parts[0].isdigit():
-                                            data_point['date'] = line
+                                        data_point['setup_amount'] = float(value)
                                     except:
                                         pass
-                                # 설정액 패턴 (숫자,숫자)
-                                elif '설정액' in line or ':' in line:
-                                    parts = line.split(':')
-                                    if len(parts) == 2:
-                                        value = parts[1].strip().replace(',', '').replace('억원', '')
-                                        try:
-                                            data_point['setup_amount'] = float(value)
-                                        except:
-                                            pass
-                                # 수익률 패턴 (숫자%)
-                                elif '수익률' in line or '%' in line:
-                                    parts = line.split(':')
-                                    if len(parts) == 2:
-                                        value = parts[1].strip().replace('%', '')
-                                        try:
-                                            data_point['return_rate'] = float(value)
-                                        except:
-                                            pass
                             
-                            if data_point:
-                                # 중복 제거를 위해 날짜 확인
-                                if 'date' in data_point and data_point['date'] not in [d.get('date') for d in collected_data]:
-                                    collected_data.append(data_point)
+                            # 수익률 패턴
+                            if '수익률' in text or '%' in text:
+                                rate_match = re.search(r'([-+]?\d+\.?\d*)%', text)
+                                if rate_match:
+                                    try:
+                                        data_point['return_rate'] = float(rate_match.group(1))
+                                    except:
+                                        pass
+                        
+                        if data_point and 'date' in data_point:
+                            # 중복 제거
+                            if data_point['date'] not in [d.get('date') for d in collected_data]:
+                                collected_data.append(data_point)
                 
-                # 다른 방법: highcharts-label 클래스 찾기
-                if not tooltip or not await tooltip.is_visible():
-                    labels = await page.query_selector_all('.highcharts-label')
-                    for label in labels:
-                        if await label.is_visible():
-                            label_text = await label.inner_text()
-                            if label_text and ('.' in label_text or '%' in label_text):
-                                print(f"Label found: {label_text}")
+                except Exception as e:
+                    # 개별 포인트 에러는 무시하고 계속
+                    pass
             
             # 수집된 데이터 정리
             if collected_data:
@@ -145,7 +154,23 @@ class ESGFundScraper:
                         chart_data['returns'].append(data['return_rate'])
                 
                 print(f"Collected {len(collected_data)} data points through hovering")
-                print(f"Dates: {chart_data['dates'][:3]}... (showing first 3)")
+            else:
+                # 호버로 데이터를 가져올 수 없는 경우, 최소한 날짜라도 추출
+                print("Hover data collection failed, trying to extract dates from X-axis")
+                x_labels = await page.query_selector_all('.highcharts-xaxis-labels text')
+                for label in x_labels:
+                    try:
+                        date_text = await label.evaluate('(element) => element.textContent')
+                        if date_text and '.' in date_text:
+                            chart_data['dates'].append(date_text.strip())
+                    except:
+                        pass
+                
+                if chart_data['dates']:
+                    print(f"Extracted {len(chart_data['dates'])} dates from X-axis")
+                    # 더미 데이터 추가 (시트 생성을 위해)
+                    chart_data['setup_amounts'] = [None] * len(chart_data['dates'])
+                    chart_data['returns'] = [None] * len(chart_data['dates'])
             
         except Exception as e:
             print(f"Error in hover data collection: {e}")
