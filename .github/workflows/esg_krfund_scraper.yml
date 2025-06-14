@@ -5,6 +5,20 @@ on:
     # 매주 금요일 오전 9시 (KST) = 목요일 오후 12시 (UTC)
     - cron: '0 0 * * 5'
   workflow_dispatch:  # 수동 실행도 가능하도록 설정
+    inputs:
+      period:
+        description: '데이터 수집 기간'
+        required: true
+        default: '01'
+        type: choice
+        options:
+          - '01'   # 1개월
+          - '03'   # 3개월
+          - '06'   # 6개월
+          - 'YTD'  # 연초이후
+          - '12'   # 1년
+          - '36'   # 3년
+          - '60'   # 5년
 
 jobs:
   scrape-and-update:
@@ -98,14 +112,26 @@ jobs:
         mkdir -p chart_analysis
         echo "📁 Created directories for data storage"
     
+    - name: Set period environment variable
+      run: |
+        # workflow_dispatch 실행시 입력값 사용, 아니면 기본값 01 (1개월)
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "COLLECTION_PERIOD=${{ github.event.inputs.period }}" >> $GITHUB_ENV
+        else
+          echo "COLLECTION_PERIOD=01" >> $GITHUB_ENV
+        fi
+        echo "📅 Selected period: ${{ env.COLLECTION_PERIOD }}"
+    
     - name: Run ESG Fund Scraper
       env:
         GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
         KRFUND_SPREADSHEET_ID: ${{ secrets.KRFUND_SPREADSHEET_ID }}
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+        COLLECTION_PERIOD: ${{ env.COLLECTION_PERIOD }}
       run: |
         echo "🚀 Starting ESG Fund Scraper..."
+        echo "📅 Collection period: $COLLECTION_PERIOD"
         python esg_krfund_scraper.py
         echo "✅ Scraper completed"
     
@@ -147,6 +173,20 @@ jobs:
         echo "- **Date:** $(date +'%Y-%m-%d %H:%M:%S')" >> summary.md
         echo "- **Workflow:** ${{ github.workflow }}" >> summary.md
         echo "- **Run Number:** ${{ github.run_number }}" >> summary.md
+        echo "- **Period:** ${{ env.COLLECTION_PERIOD }}" >> summary.md
+        echo "" >> summary.md
+        
+        period_text=""
+        case "${{ env.COLLECTION_PERIOD }}" in
+          "01") period_text="1개월" ;;
+          "03") period_text="3개월" ;;
+          "06") period_text="6개월" ;;
+          "YTD") period_text="연초이후" ;;
+          "12") period_text="1년" ;;
+          "36") period_text="3년" ;;
+          "60") period_text="5년" ;;
+        esac
+        echo "- **Period Description:** $period_text" >> summary.md
         echo "" >> summary.md
         
         echo "## 📁 Generated Files" >> summary.md
@@ -172,23 +212,6 @@ jobs:
         fi
         echo "" >> summary.md
         
-        echo "## 🔍 How to View Images" >> summary.md
-        echo "" >> summary.md
-        echo "1. Go to the **Actions** tab in this repository" >> summary.md
-        echo "2. Click on this workflow run" >> summary.md
-        echo "3. Scroll down to **Artifacts** section" >> summary.md
-        echo "4. Download \`chart-analysis-${{ github.run_number }}\`" >> summary.md
-        echo "5. Extract the zip file and open \`*_analysis_summary.html\` in your browser" >> summary.md
-        echo "" >> summary.md
-        
-        echo "## 📋 Analysis Status" >> summary.md
-        echo "" >> summary.md
-        png_count=$(find chart_analysis/ -name "*.png" 2>/dev/null | wc -l || echo "0")
-        html_count=$(find chart_analysis/ -name "*.html" 2>/dev/null | wc -l || echo "0")
-        echo "- **PNG Images:** $png_count files" >> summary.md
-        echo "- **HTML Reports:** $html_count files" >> summary.md
-        echo "" >> summary.md
-        
         cat summary.md
     
     - name: Upload Summary Report
@@ -204,7 +227,7 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add data_backup/
-        git diff --staged --quiet || git commit -m "Update ESG fund data backup - $(date +'%Y-%m-%d')"
+        git diff --staged --quiet || git commit -m "Update ESG fund data backup - $(date +'%Y-%m-%d') - Period: ${{ env.COLLECTION_PERIOD }}"
         git push
       continue-on-error: true  # 백업 실패해도 워크플로우는 성공으로 처리
     
@@ -213,6 +236,7 @@ jobs:
       env:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+        COLLECTION_PERIOD: ${{ env.COLLECTION_PERIOD }}
       run: |
         python -c "
         import requests
@@ -221,13 +245,25 @@ jobs:
         
         bot_token = os.environ.get('TELCO_NEWS_TOKEN')
         chat_id = os.environ.get('TELCO_NEWS_TESTER')
+        period = os.environ.get('COLLECTION_PERIOD', '01')
+        
+        period_map = {
+            '01': '1개월',
+            '03': '3개월', 
+            '06': '6개월',
+            'YTD': '연초이후',
+            '12': '1년',
+            '36': '3년',
+            '60': '5년'
+        }
+        period_text = period_map.get(period, period)
         
         if bot_token and chat_id:
             data_files = len(glob.glob('data_backup/*.csv')) if os.path.exists('data_backup') else 0
             chart_files = len(glob.glob('chart_analysis/*.png')) if os.path.exists('chart_analysis') else 0
             html_files = len(glob.glob('chart_analysis/*.html')) if os.path.exists('chart_analysis') else 0
             
-            message = f'✅ ESG Fund 데이터 수집 성공!\n\n📊 수집 결과:\n• 데이터 파일: {data_files}개\n• 차트 이미지: {chart_files}개\n• HTML 보고서: {html_files}개\n\n🔍 이미지 확인 방법:\n1. GitHub Actions → 이 실행 → Artifacts\n2. chart-analysis-${{ github.run_number }} 다운로드\n3. HTML 파일을 브라우저에서 열기'
+            message = f'✅ ESG Fund 데이터 수집 성공!\n\n📅 수집 기간: {period_text}\n📊 수집 결과:\n• 데이터 파일: {data_files}개\n• 차트 이미지: {chart_files}개\n• HTML 보고서: {html_files}개\n\n🔍 이미지 확인 방법:\n1. GitHub Actions → 이 실행 → Artifacts\n2. chart-analysis-${{ github.run_number }} 다운로드\n3. HTML 파일을 브라우저에서 열기'
             
             requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', 
                           data={'chat_id': chat_id, 'text': message})
