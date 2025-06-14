@@ -14,6 +14,7 @@ import pytesseract
 import numpy as np
 import cv2
 import glob
+from tqdm import tqdm
 
 class ESGFundScraper:
     def __init__(self):
@@ -42,7 +43,8 @@ class ESGFundScraper:
                     let chartData = {
                         dates: [],
                         setup_amounts: [],
-                        returns: []
+                        returns: [],
+                        debug_info: {}
                     };
                     
                     // 방법 1: Highcharts.charts 배열에서 찾기
@@ -51,12 +53,15 @@ class ESGFundScraper:
                             let chart = Highcharts.charts[i];
                             if (chart && chart.container && chart.container.id === 'lineAreaZone') {
                                 console.log('Found chart at index:', i);
+                                chartData.debug_info.chart_found = true;
+                                chartData.debug_info.chart_index = i;
                                 
                                 // X축 카테고리 (날짜)
                                 if (chart.xAxis && chart.xAxis[0]) {
                                     // categories가 없으면 tick labels에서 추출
-                                    if (chart.xAxis[0].categories) {
+                                    if (chart.xAxis[0].categories && chart.xAxis[0].categories.length > 0) {
                                         chartData.dates = chart.xAxis[0].categories;
+                                        chartData.debug_info.date_source = 'categories';
                                     } else if (chart.xAxis[0].tickPositions) {
                                         // X축 레이블에서 직접 텍스트 추출
                                         const labels = [];
@@ -66,18 +71,41 @@ class ESGFundScraper:
                                             }
                                         });
                                         chartData.dates = labels;
+                                        chartData.debug_info.date_source = 'tick_labels';
                                     }
+                                    
+                                    // X축 정보 디버깅
+                                    chartData.debug_info.xaxis_min = chart.xAxis[0].min;
+                                    chartData.debug_info.xaxis_max = chart.xAxis[0].max;
+                                    chartData.debug_info.xaxis_type = chart.xAxis[0].type;
                                 }
                                 
                                 // 시리즈 데이터
                                 if (chart.series && chart.series.length > 0) {
+                                    chartData.debug_info.series_count = chart.series.length;
+                                    chartData.debug_info.series_info = [];
+                                    
                                     chart.series.forEach((series, index) => {
-                                        if (series.data && series.data.length > 0) {
+                                        const seriesInfo = {
+                                            name: series.name,
+                                            visible: series.visible,
+                                            data_length: series.data ? series.data.length : 0,
+                                            type: series.type
+                                        };
+                                        chartData.debug_info.series_info.push(seriesInfo);
+                                        
+                                        if (series.visible && series.data && series.data.length > 0) {
                                             const values = series.data.map(point => {
                                                 if (point.y !== undefined) return point.y;
                                                 if (point.options && point.options.y !== undefined) return point.options.y;
                                                 return null;
                                             });
+                                            
+                                            // 날짜가 없는 경우 데이터 포인트에서 추출 시도
+                                            if (chartData.dates.length === 0 && series.data[0].category) {
+                                                chartData.dates = series.data.map(point => point.category || '');
+                                                chartData.debug_info.date_source = 'series_categories';
+                                            }
                                             
                                             // 시리즈 이름으로 구분 (없으면 인덱스로)
                                             if (series.name) {
@@ -100,8 +128,15 @@ class ESGFundScraper:
                                 
                                 // Y축 정보도 추출 (값 범위 파악용)
                                 if (chart.yAxis) {
+                                    chartData.debug_info.yaxis_count = chart.yAxis.length;
+                                    chartData.debug_info.yaxis_info = [];
                                     chart.yAxis.forEach((axis, index) => {
-                                        console.log(`Y-axis ${index} range:`, axis.min, '-', axis.max);
+                                        chartData.debug_info.yaxis_info.push({
+                                            index: index,
+                                            min: axis.min,
+                                            max: axis.max,
+                                            title: axis.options.title ? axis.options.title.text : null
+                                        });
                                     });
                                 }
                                 
@@ -118,6 +153,7 @@ class ESGFundScraper:
                             if (chartIndex && Highcharts.charts[chartIndex]) {
                                 const chart = Highcharts.charts[chartIndex];
                                 console.log('Found chart via data attribute');
+                                chartData.debug_info.chart_found_method = 'data-attribute';
                                 
                                 // 위와 동일한 로직으로 데이터 추출
                                 if (chart.xAxis && chart.xAxis[0] && chart.xAxis[0].categories) {
@@ -145,6 +181,9 @@ class ESGFundScraper:
                                 chartData.dates.push(label.textContent);
                             }
                         });
+                        if (chartData.dates.length > 0) {
+                            chartData.debug_info.date_source = 'svg_labels';
+                        }
                     }
                     
                     console.log('Extracted data:', chartData);
@@ -152,13 +191,27 @@ class ESGFundScraper:
                 }
             ''')
             
-            if chart_data and chart_data.get('dates'):
-                print(f"📊 JavaScript extraction successful!")
-                print(f"   Dates: {len(chart_data['dates'])} items")
-                print(f"   Setup amounts count: {len(chart_data.get('setup_amounts', []))}")
-                print(f"   Returns count: {len(chart_data.get('returns', []))}")
+            if chart_data:
+                print(f"📊 JavaScript extraction result:")
+                print(f"   Dates: {len(chart_data.get('dates', []))} items")
+                print(f"   Setup amounts: {len(chart_data.get('setup_amounts', []))} items")
+                print(f"   Returns: {len(chart_data.get('returns', []))} items")
+                
+                # 디버그 정보 출력
+                if chart_data.get('debug_info'):
+                    debug = chart_data['debug_info']
+                    print(f"   Debug Info:")
+                    print(f"     - Chart found: {debug.get('chart_found', False)}")
+                    print(f"     - Date source: {debug.get('date_source', 'unknown')}")
+                    print(f"     - Series count: {debug.get('series_count', 0)}")
+                    if debug.get('series_info'):
+                        for i, series in enumerate(debug['series_info']):
+                            print(f"     - Series {i}: {series.get('name', 'unnamed')} ({series.get('data_length', 0)} points)")
                 
                 # 데이터 검증
+                if chart_data.get('dates'):
+                    print(f"   First 3 dates: {chart_data['dates'][:3]}...")
+                    print(f"   Last 3 dates: {chart_data['dates'][-3:]}...")
                 if chart_data.get('setup_amounts'):
                     print(f"   Setup amounts sample: {chart_data['setup_amounts'][:3]}...")
                 if chart_data.get('returns'):
@@ -189,7 +242,7 @@ class ESGFundScraper:
         }
     
     async def extract_chart_data_with_ocr_analysis(self, page, tab_name):
-        """차트 이미지 OCR 분석 (백업 방법)"""
+        """차트 이미지 OCR 분석 및 SVG 경로 분석"""
         chart_data = {
             'dates': [],
             'setup_amounts': [],
@@ -213,13 +266,183 @@ class ESGFundScraper:
             await chart_container.screenshot(path=chart_path)
             print(f"📷 Chart screenshot saved: {chart_path}")
             
-            # 여기에 OCR 분석 로직 추가 (필요시)
-            # 현재는 이미지만 저장하고 실제 OCR 처리는 하지 않음
+            # SVG 경로 데이터 직접 추출 시도
+            svg_data = await self.extract_svg_path_data(page)
+            if svg_data and svg_data.get('dates'):
+                print(f"✅ SVG path analysis successful: {len(svg_data['dates'])} data points")
+                return svg_data
+            
+            # SVG 분석이 실패하면 이미지 OCR 시도
+            # 현재는 구현하지 않음 (필요시 추가 가능)
             
         except Exception as e:
             print(f"❌ Error in chart image analysis: {e}")
         
         return chart_data
+    
+    async def extract_svg_path_data(self, page):
+        """SVG path 요소에서 직접 데이터 포인트 추출"""
+        try:
+            svg_data = await page.evaluate('''
+                () => {
+                    const result = {
+                        dates: [],
+                        setup_amounts: [],
+                        returns: [],
+                        debug_info: {}
+                    };
+                    
+                    // Highcharts SVG 컨테이너 찾기
+                    const chartContainer = document.querySelector('#lineAreaZone');
+                    if (!chartContainer) return result;
+                    
+                    const svg = chartContainer.querySelector('svg.highcharts-root');
+                    if (!svg) return result;
+                    
+                    // 모든 시리즈 path 찾기
+                    const seriesPaths = svg.querySelectorAll('path.highcharts-graph');
+                    result.debug_info.series_count = seriesPaths.length;
+                    
+                    if (seriesPaths.length === 0) {
+                        // 다른 선택자 시도
+                        const allPaths = svg.querySelectorAll('path[d]');
+                        result.debug_info.total_paths = allPaths.length;
+                        
+                        // 차트 데이터를 포함하는 path 찾기 (보통 긴 path)
+                        allPaths.forEach((path, index) => {
+                            const d = path.getAttribute('d');
+                            if (d && d.length > 100) { // 충분히 긴 path만
+                                const points = parsePathData(d);
+                                if (points.length > 10) { // 충분한 데이터 포인트가 있는 경우
+                                    result.debug_info[`path_${index}`] = {
+                                        points: points.length,
+                                        class: path.getAttribute('class'),
+                                        stroke: path.getAttribute('stroke')
+                                    };
+                                }
+                            }
+                        });
+                    }
+                    
+                    // X축 레이블에서 날짜 추출
+                    const xLabels = svg.querySelectorAll('.highcharts-xaxis-labels text');
+                    const xLabelData = [];
+                    xLabels.forEach(label => {
+                        const text = label.textContent;
+                        const x = parseFloat(label.getAttribute('x'));
+                        if (text && !isNaN(x)) {
+                            xLabelData.push({ text, x });
+                        }
+                    });
+                    xLabelData.sort((a, b) => a.x - b.x);
+                    result.dates = xLabelData.map(d => d.text);
+                    result.debug_info.x_labels_count = result.dates.length;
+                    
+                    // Path 데이터 파싱 함수
+                    function parsePathData(d) {
+                        const points = [];
+                        const commands = d.match(/[MLHVCSQTAZmlhvcsqtaz][^MLHVCSQTAZmlhvcsqtaz]*/g);
+                        if (!commands) return points;
+                        
+                        let currentX = 0, currentY = 0;
+                        commands.forEach(cmd => {
+                            const type = cmd[0];
+                            const args = cmd.slice(1).trim().split(/[\s,]+/).map(parseFloat);
+                            
+                            if (type === 'M' || type === 'L') {
+                                currentX = args[0];
+                                currentY = args[1];
+                                points.push({ x: currentX, y: currentY });
+                            } else if (type === 'm' || type === 'l') {
+                                currentX += args[0];
+                                currentY += args[1];
+                                points.push({ x: currentX, y: currentY });
+                            }
+                        });
+                        return points;
+                    }
+                    
+                    // 각 시리즈의 path 데이터 추출
+                    seriesPaths.forEach((path, index) => {
+                        const d = path.getAttribute('d');
+                        if (d) {
+                            const points = parsePathData(d);
+                            result.debug_info[`series_${index}_points`] = points.length;
+                            
+                            // SVG 좌표를 실제 값으로 변환하기 위해 Y축 범위 필요
+                            // 일단 원시 좌표만 저장
+                            if (index === 0) {
+                                result.debug_info.series_0_sample = points.slice(0, 5);
+                            }
+                        }
+                    });
+                    
+                    // Highcharts 인스턴스에서 실제 데이터 포인트 수 확인
+                    if (typeof Highcharts !== 'undefined' && Highcharts.charts) {
+                        for (let chart of Highcharts.charts) {
+                            if (chart && chart.container && chart.container.id === 'lineAreaZone') {
+                                if (chart.series) {
+                                    chart.series.forEach((series, idx) => {
+                                        if (series.points) {
+                                            result.debug_info[`highcharts_series_${idx}_points`] = series.points.length;
+                                            
+                                            // 모든 포인트의 날짜와 값 추출
+                                            if (series.visible && series.points.length > 0) {
+                                                const values = [];
+                                                const dates = [];
+                                                
+                                                series.points.forEach(point => {
+                                                    if (point.y !== undefined && point.y !== null) {
+                                                        values.push(point.y);
+                                                        // x값이나 category에서 날짜 추출
+                                                        if (point.category) {
+                                                            dates.push(point.category);
+                                                        } else if (point.x !== undefined) {
+                                                            dates.push(point.x);
+                                                        }
+                                                    }
+                                                });
+                                                
+                                                if (idx === 0) {
+                                                    result.setup_amounts = values;
+                                                    if (dates.length > result.dates.length) {
+                                                        result.dates = dates;
+                                                    }
+                                                } else if (idx === 1) {
+                                                    result.returns = values;
+                                                }
+                                                
+                                                result.debug_info[`extracted_from_series_${idx}`] = values.length;
+                                            }
+                                        }
+                                    });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    
+                    return result;
+                }
+            ''')
+            
+            if svg_data:
+                print(f"📊 SVG path analysis result:")
+                print(f"   Dates: {len(svg_data.get('dates', []))} items")
+                print(f"   Setup amounts: {len(svg_data.get('setup_amounts', []))} items")
+                print(f"   Returns: {len(svg_data.get('returns', []))} items")
+                
+                if svg_data.get('debug_info'):
+                    print(f"   Debug Info: {json.dumps(svg_data['debug_info'], indent=2)}")
+                
+                return svg_data
+                
+        except Exception as e:
+            print(f"❌ SVG path extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return None
     
     async def parse_top_funds(self, page):
         """Top 펀드 데이터 파싱"""
@@ -303,36 +526,203 @@ class ESGFundScraper:
         
         return new_funds_data
     
+    async def wait_for_chart_data_complete(self, page, expected_period):
+        """차트 데이터가 완전히 로드될 때까지 대기 (AJAX 대응)"""
+        print(f"⏳ Waiting for chart data to load completely for {expected_period}...")
+        
+        # 예상 데이터 포인트 수 계산 (대략적)
+        expected_points = {
+            '01': 20,      # 1개월: 약 20영업일
+            '03': 60,      # 3개월: 약 60영업일
+            '06': 120,     # 6개월: 약 120영업일
+            'YTD': 150,    # 연초이후: 가변적
+            '12': 250,     # 1년: 약 250영업일
+            '36': 750,     # 3년: 약 750영업일
+            '60': 1250     # 5년: 약 1250영업일
+        }
+        
+        min_expected = expected_points.get(expected_period, 20)
+        max_wait_time = 30  # 최대 30초 대기
+        check_interval = 0.5  # 0.5초마다 확인
+        
+        # tqdm 진행 바 설정
+        pbar = tqdm(total=100, desc="Loading chart data", unit="%")
+        
+        try:
+            start_time = time.time()
+            previous_count = 0
+            stable_count = 0
+            
+            while (time.time() - start_time) < max_wait_time:
+                # 현재 데이터 포인트 수 확인
+                data_info = await page.evaluate('''
+                    () => {
+                        let maxPoints = 0;
+                        let loadingStatus = 'checking';
+                        
+                        if (typeof Highcharts !== 'undefined' && Highcharts.charts) {
+                            for (let chart of Highcharts.charts) {
+                                if (chart && chart.container && chart.container.id === 'lineAreaZone') {
+                                    if (chart.series) {
+                                        chart.series.forEach(series => {
+                                            if (series.visible) {
+                                                // 여러 데이터 소스 확인
+                                                const counts = [
+                                                    series.processedYData ? series.processedYData.length : 0,
+                                                    series.points ? series.points.length : 0,
+                                                    series.data ? series.data.length : 0
+                                                ];
+                                                maxPoints = Math.max(maxPoints, ...counts);
+                                            }
+                                        });
+                                    }
+                                    
+                                    // 로딩 상태 확인
+                                    if (chart.showLoading) {
+                                        loadingStatus = 'loading';
+                                    } else {
+                                        loadingStatus = 'complete';
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // AJAX 로딩 인디케이터 확인
+                        const loadingIndicators = document.querySelectorAll('.loading, .spinner, .loader');
+                        if (loadingIndicators.length > 0) {
+                            loadingStatus = 'loading';
+                        }
+                        
+                        return {
+                            points: maxPoints,
+                            status: loadingStatus
+                        };
+                    }
+                ''')
+                
+                current_count = data_info['points']
+                loading_status = data_info['status']
+                
+                # 진행률 계산
+                progress = min(100, (current_count / min_expected) * 100)
+                pbar.n = int(progress)
+                pbar.refresh()
+                
+                # 로그 출력
+                if current_count != previous_count:
+                    print(f"\n📊 Current data points: {current_count} (target: >{min_expected})")
+                    stable_count = 0
+                else:
+                    stable_count += 1
+                
+                # 데이터가 충분히 로드되었고 안정적인 경우
+                if current_count >= min_expected and stable_count > 3:
+                    print(f"\n✅ Data loading complete: {current_count} points")
+                    break
+                
+                # 로딩이 완료되었고 데이터가 안정적인 경우
+                if loading_status == 'complete' and stable_count > 5:
+                    print(f"\n✅ Loading complete with {current_count} points")
+                    break
+                
+                previous_count = current_count
+                await page.wait_for_timeout(int(check_interval * 1000))
+                
+            # 최종 대기
+            pbar.n = 100
+            pbar.refresh()
+            pbar.close()
+            
+            # 네트워크 안정화를 위한 추가 대기
+            await page.wait_for_timeout(1000)
+            
+            # 최종 데이터 수 확인
+            final_info = await page.evaluate('''
+                () => {
+                    let result = { points: 0, series_info: [] };
+                    
+                    if (typeof Highcharts !== 'undefined' && Highcharts.charts) {
+                        for (let chart of Highcharts.charts) {
+                            if (chart && chart.container && chart.container.id === 'lineAreaZone') {
+                                if (chart.series) {
+                                    chart.series.forEach((series, idx) => {
+                                        if (series.visible) {
+                                            const info = {
+                                                name: series.name || `Series ${idx}`,
+                                                data: series.data ? series.data.length : 0,
+                                                points: series.points ? series.points.length : 0,
+                                                processedY: series.processedYData ? series.processedYData.length : 0
+                                            };
+                                            result.series_info.push(info);
+                                            result.points = Math.max(result.points, info.processedY, info.points, info.data);
+                                        }
+                                    });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    return result;
+                }
+            ''')
+            
+            print(f"\n📊 Final data status:")
+            print(f"   Total points: {final_info['points']}")
+            for series in final_info.get('series_info', []):
+                print(f"   - {series['name']}: data={series['data']}, points={series['points']}, processed={series['processedY']}")
+                
+        except Exception as e:
+            print(f"\n❌ Error waiting for data: {e}")
+            pbar.close()
+            
     async def fetch_tab_data(self, page, tab_value, tab_name):
-        """특정 탭의 데이터 가져오기"""
-        print(f"🔍 Fetching data for {tab_name}...")
+        """특정 탭의 데이터 가져오기 (AJAX 로딩 대응)"""
+        print(f"\n🔍 Fetching data for {tab_name}...")
         
         # 탭 클릭
         await page.click(f'button[value="{tab_value}"]')
-        await page.wait_for_timeout(3000)  # 데이터 로딩 대기
+        await page.wait_for_timeout(2000)  # 초기 로딩 대기
         
         # 기간 선택 (드롭다운에서 선택)
         try:
-            # 먼저 현재 선택된 기간 확인
+            # 현재 선택된 기간 확인
             current_period = await page.inner_text('#selTerm option[selected]')
             print(f"📅 Current period: {current_period}")
             
-            # 원하는 기간이 이미 선택되어 있지 않은 경우에만 변경
+            # 원하는 기간 선택
             if self.collection_period != '01':  # 기본값이 아닌 경우
                 print(f"📅 Changing period to: {self.period_text_map.get(self.collection_period)}")
                 
-                # select 요소를 직접 조작
+                # 네트워크 요청 모니터링 시작
+                pending_requests = []
+                
+                async def track_requests(request):
+                    if 'api' in request.url or 'data' in request.url or 'chart' in request.url:
+                        pending_requests.append(request.url)
+                        
+                page.on('request', track_requests)
+                
+                # select 요소 변경
                 await page.select_option('#selTerm', self.collection_period)
                 
-                # 선택 후 차트 데이터 로딩 대기
-                await page.wait_for_timeout(3000)
+                # 네트워크 요청 완료 대기
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=10000)
+                except:
+                    pass  # 타임아웃 무시
+                
+                # 차트 데이터 완전 로드 대기
+                await self.wait_for_chart_data_complete(page, self.collection_period)
                 
                 # 변경 확인
                 new_period = await page.inner_text('#selTerm option[selected]')
                 print(f"✅ Period changed to: {new_period}")
+                
         except Exception as e:
             print(f"⚠️ Error changing period: {e}")
-            # 오류가 발생해도 계속 진행
+            import traceback
+            traceback.print_exc()
         
         # 데이터 추출
         data = {
@@ -352,12 +742,33 @@ class ESGFundScraper:
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            
+            # 페이지 설정 개선 (AJAX 대응)
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+            
+            # 네트워크 요청 디버깅 활성화
+            if os.environ.get('DEBUG_NETWORK', 'false').lower() == 'true':
+                page.on('request', lambda request: print(f"📡 Request: {request.url[:80]}..."))
+                page.on('response', lambda response: print(f"📥 Response: {response.status} {response.url[:80]}..."))
             
             try:
                 # 페이지 로드
+                print("📂 Loading ESG fund page...")
                 await page.goto(self.base_url, wait_until='networkidle')
                 await page.wait_for_timeout(3000)
+                
+                # JavaScript 에러 확인
+                await page.evaluate('''
+                    () => {
+                        window.addEventListener('error', (e) => {
+                            console.error('JS Error:', e.message);
+                        });
+                    }
+                ''')
                 
                 # 각 탭 데이터 수집
                 tabs = [
@@ -366,16 +777,26 @@ class ESGFundScraper:
                     ('T0373', 'ESG_채권')
                 ]
                 
-                for tab_value, tab_name in tabs:
+                # 전체 진행 상황 표시
+                print(f"\n📊 Collecting data for {len(tabs)} tabs...")
+                for i, (tab_value, tab_name) in enumerate(tabs, 1):
+                    print(f"\n{'='*50}")
+                    print(f"Tab {i}/{len(tabs)}: {tab_name}")
+                    print(f"{'='*50}")
+                    
                     data = await self.fetch_tab_data(page, tab_value, tab_name)
                     all_data[tab_name] = data
-                    await page.wait_for_timeout(1000)  # 탭 간 대기
+                    
+                    # 탭 간 대기 (서버 부하 방지)
+                    if i < len(tabs):
+                        await page.wait_for_timeout(2000)
                 
             except Exception as e:
                 print(f"❌ Error during scraping: {e}")
                 await self.send_telegram_message(f"❌ ESG 펀드 데이터 수집 중 오류 발생: {str(e)}")
                 raise
             finally:
+                await context.close()
                 await browser.close()
         
         return all_data
