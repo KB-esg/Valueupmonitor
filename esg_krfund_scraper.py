@@ -21,17 +21,138 @@ class ESGFundScraper:
         
         # 탭 클릭
         await page.click(f'button[value="{tab_value}"]')
-        await page.wait_for_timeout(2000)  # 데이터 로딩 대기
+        await page.wait_for_timeout(3000)  # 데이터 로딩 대기
         
         # 데이터 추출
         data = {
             'tab_name': tab_name,
             'top_funds': await self.parse_top_funds(page),
             'new_funds': await self.parse_new_funds(page),
-            'chart_data': await self.parse_chart_data(page)
+            'chart_data': await self.parse_chart_data_with_hover(page)
         }
         
         return data
+    
+    async def parse_chart_data_with_hover(self, page):
+        """마우스 호버를 통한 차트 데이터 추출"""
+        chart_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
+        
+        try:
+            # 차트 영역 찾기
+            chart_element = await page.query_selector('#lineAreaZone')
+            if not chart_element:
+                print("Chart element not found")
+                return chart_data
+            
+            # 차트 영역의 크기와 위치 가져오기
+            box = await chart_element.bounding_box()
+            if not box:
+                print("Could not get chart bounding box")
+                return chart_data
+            
+            print(f"Chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
+            
+            # 차트의 중간 높이 (Y축)
+            hover_y = box['y'] + box['height'] / 2
+            
+            # X축을 따라 이동하며 데이터 수집
+            # 차트 너비를 20-30개 구간으로 나누어 호버
+            num_points = 25
+            step = box['width'] / num_points
+            
+            collected_data = []
+            
+            for i in range(num_points):
+                hover_x = box['x'] + (i * step) + 10  # 왼쪽 여백 고려
+                
+                # 마우스를 해당 위치로 이동
+                await page.mouse.move(hover_x, hover_y)
+                await page.wait_for_timeout(100)  # 툴팁이 나타날 시간 대기
+                
+                # 툴팁 찾기
+                tooltip = await page.query_selector('.highcharts-tooltip')
+                if tooltip:
+                    # 툴팁이 보이는지 확인
+                    is_visible = await tooltip.is_visible()
+                    if is_visible:
+                        tooltip_text = await tooltip.inner_text()
+                        if tooltip_text:
+                            print(f"Point {i}: {tooltip_text}")
+                            
+                            # 툴팁 텍스트 파싱
+                            lines = tooltip_text.strip().split('\n')
+                            data_point = {}
+                            
+                            for line in lines:
+                                line = line.strip()
+                                # 날짜 패턴 (YYYY.MM.DD)
+                                if '.' in line and len(line) == 10:
+                                    try:
+                                        # 날짜 형식 검증
+                                        parts = line.split('.')
+                                        if len(parts) == 3 and parts[0].isdigit():
+                                            data_point['date'] = line
+                                    except:
+                                        pass
+                                # 설정액 패턴 (숫자,숫자)
+                                elif '설정액' in line or ':' in line:
+                                    parts = line.split(':')
+                                    if len(parts) == 2:
+                                        value = parts[1].strip().replace(',', '').replace('억원', '')
+                                        try:
+                                            data_point['setup_amount'] = float(value)
+                                        except:
+                                            pass
+                                # 수익률 패턴 (숫자%)
+                                elif '수익률' in line or '%' in line:
+                                    parts = line.split(':')
+                                    if len(parts) == 2:
+                                        value = parts[1].strip().replace('%', '')
+                                        try:
+                                            data_point['return_rate'] = float(value)
+                                        except:
+                                            pass
+                            
+                            if data_point:
+                                # 중복 제거를 위해 날짜 확인
+                                if 'date' in data_point and data_point['date'] not in [d.get('date') for d in collected_data]:
+                                    collected_data.append(data_point)
+                
+                # 다른 방법: highcharts-label 클래스 찾기
+                if not tooltip or not await tooltip.is_visible():
+                    labels = await page.query_selector_all('.highcharts-label')
+                    for label in labels:
+                        if await label.is_visible():
+                            label_text = await label.inner_text()
+                            if label_text and ('.' in label_text or '%' in label_text):
+                                print(f"Label found: {label_text}")
+            
+            # 수집된 데이터 정리
+            if collected_data:
+                # 날짜순 정렬
+                collected_data.sort(key=lambda x: x.get('date', ''))
+                
+                for data in collected_data:
+                    if 'date' in data:
+                        chart_data['dates'].append(data['date'])
+                    if 'setup_amount' in data:
+                        chart_data['setup_amounts'].append(data['setup_amount'])
+                    if 'return_rate' in data:
+                        chart_data['returns'].append(data['return_rate'])
+                
+                print(f"Collected {len(collected_data)} data points through hovering")
+                print(f"Dates: {chart_data['dates'][:3]}... (showing first 3)")
+            
+        except Exception as e:
+            print(f"Error in hover data collection: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return chart_data
     
     async def parse_top_funds(self, page):
         """Top 펀드 데이터 파싱"""
@@ -116,8 +237,8 @@ class ESGFundScraper:
         
         return new_funds_data
     
-    async def parse_chart_data(self, page):
-        """차트 데이터 파싱 (설정액/수익률)"""
+    async def parse_chart_data_from_svg(self, page):
+        """SVG 차트에서 날짜 추출 (X축 레이블)"""
         chart_data = {
             'dates': [],
             'setup_amounts': [],
@@ -125,58 +246,40 @@ class ESGFundScraper:
         }
         
         try:
-            # JavaScript 실행하여 차트 데이터 가져오기
-            chart_info = await page.evaluate('''() => {
-                // Highcharts 데이터 추출
-                const charts = window.Highcharts?.charts || [];
-                if (charts.length > 0) {
-                    const chart = charts[0];
-                    const dates = [];
-                    const setupAmounts = [];
-                    const returns = [];
-                    
-                    // X축 날짜 데이터
-                    if (chart.xAxis && chart.xAxis[0]) {
-                        const categories = chart.xAxis[0].categories;
-                        if (categories) {
-                            dates.push(...categories);
-                        }
-                    }
-                    
-                    // 시리즈 데이터
-                    if (chart.series) {
-                        // 설정액 데이터 (첫 번째 시리즈)
-                        if (chart.series[0] && chart.series[0].data) {
-                            chart.series[0].data.forEach(point => {
-                                setupAmounts.push(point.y);
-                            });
-                        }
-                        
-                        // 수익률 데이터 (두 번째 시리즈)
-                        if (chart.series[1] && chart.series[1].data) {
-                            chart.series[1].data.forEach(point => {
-                                returns.push(point.y);
-                            });
-                        }
-                    }
-                    
-                    return {
-                        dates: dates,
-                        setupAmounts: setupAmounts,
-                        returns: returns
-                    };
-                }
-                return null;
-            }''')
+            # X축 레이블에서 날짜 추출
+            x_axis_texts = await page.query_selector_all('.highcharts-xaxis-labels text')
+            for text_elem in x_axis_texts:
+                date_text = await text_elem.inner_text()
+                if date_text and '.' in date_text:  # 날짜 형식 확인
+                    chart_data['dates'].append(date_text.strip())
             
-            if chart_info:
-                chart_data = chart_info
-                print(f"Chart data extracted: {len(chart_data['dates'])} data points")
-            else:
-                print("No chart data found")
-                
+            # Y축 값들 추출 (참고용)
+            y_axis_texts = await page.query_selector_all('.highcharts-yaxis-labels text')
+            setup_amounts_range = []
+            returns_range = []
+            
+            for i, text_elem in enumerate(y_axis_texts):
+                value_text = await text_elem.inner_text()
+                if value_text:
+                    # 첫 번째 Y축은 설정액, 두 번째 Y축은 수익률
+                    value = value_text.replace(',', '').replace('%', '')
+                    try:
+                        if i < 7:  # 첫 번째 Y축 (설정액)
+                            setup_amounts_range.append(float(value))
+                        else:  # 두 번째 Y축 (수익률)
+                            returns_range.append(float(value))
+                    except:
+                        pass
+            
+            print(f"Found {len(chart_data['dates'])} dates from chart")
+            print(f"Date range: {chart_data['dates'][0] if chart_data['dates'] else 'N/A'} ~ "
+                  f"{chart_data['dates'][-1] if chart_data['dates'] else 'N/A'}")
+            
+            # 차트의 path 요소에서 실제 데이터 포인트 추정 (복잡한 작업)
+            # 현재는 날짜만 추출
+            
         except Exception as e:
-            print(f"Error extracting chart data: {e}")
+            print(f"Error parsing SVG chart: {e}")
         
         return chart_data
     
@@ -249,16 +352,27 @@ class ESGFundScraper:
                 dfs[df_key] = df
             
             # 일별 차트 데이터 (설정액/수익률)
-            if tab_data['chart_data'] and tab_data['chart_data']['dates']:
+            if tab_data.get('chart_data') and tab_data['chart_data'].get('dates'):
                 df_key = f'{tab_name}_daily_chart'
-                chart_df = pd.DataFrame({
-                    'date': tab_data['chart_data']['dates'],
-                    'setup_amount': tab_data['chart_data']['setup_amounts'],
-                    'return_rate': tab_data['chart_data']['returns']
-                })
-                chart_df['tab_type'] = tab_name
-                chart_df['collection_time'] = collection_time
-                dfs[df_key] = chart_df
+                
+                # 데이터 길이 맞추기
+                dates = tab_data['chart_data']['dates']
+                setup_amounts = tab_data['chart_data']['setup_amounts']
+                returns = tab_data['chart_data']['returns']
+                
+                # 가장 짧은 길이에 맞추기
+                min_length = min(len(dates), len(setup_amounts) if setup_amounts else 0, len(returns) if returns else 0)
+                
+                if min_length > 0:
+                    chart_df = pd.DataFrame({
+                        'date': dates[:min_length],
+                        'setup_amount': setup_amounts[:min_length] if setup_amounts else [None] * min_length,
+                        'return_rate': returns[:min_length] if returns else [None] * min_length
+                    })
+                    chart_df['tab_type'] = tab_name
+                    chart_df['collection_time'] = collection_time
+                    dfs[df_key] = chart_df
+                    print(f"Created chart dataframe for {tab_name} with {min_length} rows")
         
         return dfs
     
