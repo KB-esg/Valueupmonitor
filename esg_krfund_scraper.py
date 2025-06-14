@@ -9,6 +9,9 @@ import os
 import requests
 import time
 import re
+from PIL import Image
+import pytesseract
+import numpy as np
 
 class ESGFundScraper:
     def __init__(self):
@@ -29,13 +32,13 @@ class ESGFundScraper:
             'tab_name': tab_name,
             'top_funds': await self.parse_top_funds(page),
             'new_funds': await self.parse_new_funds(page),
-            'chart_data': await self.parse_chart_data_with_hover(page)
+            'chart_data': await self.parse_chart_data_with_hover_ocr(page, tab_name)
         }
         
         return data
     
-    async def parse_chart_data_with_hover(self, page):
-        """마우스 호버를 통한 차트 데이터 추출"""
+    async def parse_chart_data_with_hover_ocr(self, page, tab_name):
+        """마우스 호버 + 스크린샷 + OCR을 통한 차트 데이터 추출"""
         chart_data = {
             'dates': [],
             'setup_amounts': [],
@@ -57,87 +60,96 @@ class ESGFundScraper:
             
             print(f"Chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
             
+            # 스크린샷 저장 디렉토리
+            screenshot_dir = 'chart_screenshots'
+            if not os.path.exists(screenshot_dir):
+                os.makedirs(screenshot_dir)
+            
             # 차트의 중간 높이 (Y축)
             hover_y = box['y'] + box['height'] / 2
             
             # X축을 따라 이동하며 데이터 수집
-            num_points = 20
+            num_points = 15  # 차트를 15개 구간으로 나누어 호버
             step = box['width'] / num_points
             
             collected_data = []
             
             for i in range(num_points):
-                hover_x = box['x'] + (i * step) + 10
+                hover_x = box['x'] + (i * step) + 20  # 왼쪽 여백 고려
                 
                 # 마우스를 해당 위치로 이동
                 await page.mouse.move(hover_x, hover_y)
-                await page.wait_for_timeout(200)  # 툴팁이 나타날 시간 대기
+                await page.wait_for_timeout(500)  # 툴팁이 나타날 시간 대기
                 
-                # 모든 텍스트 요소 찾기 (SVG 내부의 text 포함)
-                try:
-                    # 방법 1: SVG text 요소 직접 찾기
-                    svg_texts = await page.query_selector_all('.highcharts-tooltip text')
-                    tooltip_texts = []
+                # 현재 화면 스크린샷
+                screenshot_path = f'{screenshot_dir}/{tab_name}_hover_{i}.png'
+                await page.screenshot(path=screenshot_path)
+                
+                # PIL로 이미지 열기
+                img = Image.open(screenshot_path)
+                
+                # 툴팁이 나타날 가능성이 있는 영역 확대
+                # 마우스 위치 주변 영역을 크롭
+                tooltip_area = img.crop((
+                    max(0, int(hover_x - 150)),
+                    max(0, int(hover_y - 100)),
+                    min(img.width, int(hover_x + 150)),
+                    min(img.height, int(hover_y + 100))
+                ))
+                
+                # 툴팁 영역 저장 (디버깅용)
+                tooltip_path = f'{screenshot_dir}/{tab_name}_tooltip_{i}.png'
+                tooltip_area.save(tooltip_path)
+                
+                # OCR 수행
+                custom_config = r'--oem 3 --psm 6'
+                tooltip_text = pytesseract.image_to_string(tooltip_area, lang='kor+eng', config=custom_config)
+                
+                if tooltip_text.strip():
+                    print(f"Point {i} OCR result: {tooltip_text.strip()}")
                     
-                    for text_elem in svg_texts:
-                        try:
-                            # textContent 사용
-                            text_content = await text_elem.evaluate('(element) => element.textContent')
-                            if text_content:
-                                tooltip_texts.append(text_content.strip())
-                        except:
-                            pass
+                    # 데이터 파싱
+                    data_point = {}
+                    lines = tooltip_text.strip().split('\n')
                     
-                    # 방법 2: 툴팁 관련 div 찾기
-                    if not tooltip_texts:
-                        tooltip_divs = await page.query_selector_all('.highcharts-tooltip-box, .highcharts-label')
-                        for div in tooltip_divs:
+                    for line in lines:
+                        # 날짜 패턴 (YYYY.MM.DD)
+                        date_match = re.search(r'(\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})', line)
+                        if date_match:
+                            # 공백 제거하고 점으로 통일
+                            date_str = re.sub(r'\s+', '', date_match.group(1))
+                            date_str = re.sub(r'\.+', '.', date_str)
+                            if len(date_str.split('.')) == 3:
+                                data_point['date'] = date_str
+                        
+                        # 설정액 패턴 (숫자,숫자 억원)
+                        amount_match = re.search(r'([\d,]+\.?\d*)\s*억원', line)
+                        if amount_match:
+                            value = amount_match.group(1).replace(',', '').replace(' ', '')
                             try:
-                                if await div.is_visible():
-                                    text = await div.evaluate('(element) => element.textContent || element.innerText')
-                                    if text:
-                                        tooltip_texts.append(text.strip())
+                                data_point['setup_amount'] = float(value)
                             except:
                                 pass
+                        
+                        # 수익률 패턴 (숫자%)
+                        if '수익률' in line or '%' in line:
+                            rate_match = re.search(r'([-+]?\d+\.?\d*)\s*%', line)
+                            if rate_match:
+                                try:
+                                    data_point['return_rate'] = float(rate_match.group(1))
+                                except:
+                                    pass
                     
-                    if tooltip_texts:
-                        print(f"Point {i}: {' | '.join(tooltip_texts)}")
-                        
-                        # 텍스트 파싱
-                        data_point = {}
-                        for text in tooltip_texts:
-                            # 날짜 패턴
-                            if '.' in text and len(text) >= 10:
-                                date_match = re.search(r'(\d{4}\.\d{2}\.\d{2})', text)
-                                if date_match:
-                                    data_point['date'] = date_match.group(1)
-                            
-                            # 설정액 패턴
-                            if '설정액' in text or '억원' in text:
-                                amount_match = re.search(r'([\d,]+\.?\d*)억원', text)
-                                if amount_match:
-                                    value = amount_match.group(1).replace(',', '')
-                                    try:
-                                        data_point['setup_amount'] = float(value)
-                                    except:
-                                        pass
-                            
-                            # 수익률 패턴
-                            if '수익률' in text or '%' in text:
-                                rate_match = re.search(r'([-+]?\d+\.?\d*)%', text)
-                                if rate_match:
-                                    try:
-                                        data_point['return_rate'] = float(rate_match.group(1))
-                                    except:
-                                        pass
-                        
-                        if data_point and 'date' in data_point:
-                            # 중복 제거
-                            if data_point['date'] not in [d.get('date') for d in collected_data]:
-                                collected_data.append(data_point)
+                    if data_point and 'date' in data_point:
+                        # 중복 제거
+                        if data_point['date'] not in [d.get('date') for d in collected_data]:
+                            collected_data.append(data_point)
+                            print(f"Collected data point: {data_point}")
                 
-                except Exception as e:
-                    # 개별 포인트 에러는 무시하고 계속
+                # 스크린샷 파일 삭제 (공간 절약)
+                try:
+                    os.remove(screenshot_path)
+                except:
                     pass
             
             # 수집된 데이터 정리
@@ -150,30 +162,47 @@ class ESGFundScraper:
                         chart_data['dates'].append(data['date'])
                     if 'setup_amount' in data:
                         chart_data['setup_amounts'].append(data['setup_amount'])
+                    else:
+                        chart_data['setup_amounts'].append(None)
                     if 'return_rate' in data:
                         chart_data['returns'].append(data['return_rate'])
+                    else:
+                        chart_data['returns'].append(None)
                 
-                print(f"Collected {len(collected_data)} data points through hovering")
-            else:
-                # 호버로 데이터를 가져올 수 없는 경우, 최소한 날짜라도 추출
-                print("Hover data collection failed, trying to extract dates from X-axis")
-                x_labels = await page.query_selector_all('.highcharts-xaxis-labels text')
-                for label in x_labels:
-                    try:
-                        date_text = await label.evaluate('(element) => element.textContent')
-                        if date_text and '.' in date_text:
-                            chart_data['dates'].append(date_text.strip())
-                    except:
-                        pass
+                print(f"Total collected {len(collected_data)} data points through hover + OCR")
+            
+            # 데이터가 없는 경우 X축에서 날짜만이라도 추출
+            if not chart_data['dates']:
+                print("Hover + OCR failed, extracting dates from X-axis")
+                
+                # 전체 차트 영역 OCR
+                full_chart_img = img.crop((
+                    int(box['x']),
+                    int(box['y']),
+                    int(box['x'] + box['width']),
+                    int(box['y'] + box['height'] + 50)
+                ))
+                
+                chart_text = pytesseract.image_to_string(full_chart_img, lang='kor+eng', config=custom_config)
+                
+                # X축 날짜 추출
+                date_pattern = r'(\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})'
+                dates = re.findall(date_pattern, chart_text)
+                
+                for date_str in dates:
+                    # 공백 제거하고 점으로 통일
+                    clean_date = re.sub(r'\s+', '', date_str)
+                    clean_date = re.sub(r'\.+', '.', clean_date)
+                    if len(clean_date.split('.')) == 3 and clean_date not in chart_data['dates']:
+                        chart_data['dates'].append(clean_date)
                 
                 if chart_data['dates']:
-                    print(f"Extracted {len(chart_data['dates'])} dates from X-axis")
-                    # 더미 데이터 추가 (시트 생성을 위해)
+                    print(f"Extracted {len(chart_data['dates'])} dates from full chart OCR")
                     chart_data['setup_amounts'] = [None] * len(chart_data['dates'])
                     chart_data['returns'] = [None] * len(chart_data['dates'])
             
         except Exception as e:
-            print(f"Error in hover data collection: {e}")
+            print(f"Error in hover + OCR data collection: {e}")
             import traceback
             traceback.print_exc()
         
