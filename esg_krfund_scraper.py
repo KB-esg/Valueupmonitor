@@ -545,8 +545,14 @@ class ESGFundScraper:
         max_wait_time = 30  # 최대 30초 대기
         check_interval = 0.5  # 0.5초마다 확인
         
-        # tqdm 진행 바 설정
-        pbar = tqdm(total=100, desc="Loading chart data", unit="%")
+        # tqdm 사용 가능 여부 확인
+        try:
+            pbar = tqdm(total=100, desc="Loading chart data", unit="%")
+            use_tqdm = True
+        except:
+            print("ℹ️ Progress bar not available, using simple logging")
+            use_tqdm = False
+            pbar = None
         
         try:
             start_time = time.time()
@@ -606,12 +612,15 @@ class ESGFundScraper:
                 
                 # 진행률 계산
                 progress = min(100, (current_count / min_expected) * 100)
-                pbar.n = int(progress)
-                pbar.refresh()
+                
+                if use_tqdm and pbar:
+                    pbar.n = int(progress)
+                    pbar.refresh()
                 
                 # 로그 출력
                 if current_count != previous_count:
-                    print(f"\n📊 Current data points: {current_count} (target: >{min_expected})")
+                    if not use_tqdm:
+                        print(f"📊 Current data points: {current_count} (target: >{min_expected})")
                     stable_count = 0
                 else:
                     stable_count += 1
@@ -630,9 +639,10 @@ class ESGFundScraper:
                 await page.wait_for_timeout(int(check_interval * 1000))
                 
             # 최종 대기
-            pbar.n = 100
-            pbar.refresh()
-            pbar.close()
+            if use_tqdm and pbar:
+                pbar.n = 100
+                pbar.refresh()
+                pbar.close()
             
             # 네트워크 안정화를 위한 추가 대기
             await page.wait_for_timeout(1000)
@@ -674,7 +684,8 @@ class ESGFundScraper:
                 
         except Exception as e:
             print(f"\n❌ Error waiting for data: {e}")
-            pbar.close()
+            if pbar:
+                pbar.close()
             
     async def fetch_tab_data(self, page, tab_value, tab_name):
         """특정 탭의 데이터 가져오기 (AJAX 로딩 대응)"""
@@ -686,43 +697,96 @@ class ESGFundScraper:
         
         # 기간 선택 (드롭다운에서 선택)
         try:
-            # 현재 선택된 기간 확인
-            current_period = await page.inner_text('#selTerm option[selected]')
-            print(f"📅 Current period: {current_period}")
-            
-            # 원하는 기간 선택
-            if self.collection_period != '01':  # 기본값이 아닌 경우
-                print(f"📅 Changing period to: {self.period_text_map.get(self.collection_period)}")
+            # 드롭다운이 존재하는지 확인
+            select_exists = await page.query_selector('#selTerm')
+            if not select_exists:
+                print("⚠️ Period selector not found, using default period")
+            else:
+                # 현재 선택된 기간 확인
+                current_period = await page.evaluate('''
+                    () => {
+                        const select = document.querySelector('#selTerm');
+                        return select ? select.value : null;
+                    }
+                ''')
+                print(f"📅 Current period value: {current_period}")
                 
-                # 네트워크 요청 모니터링 시작
-                pending_requests = []
-                
-                async def track_requests(request):
-                    if 'api' in request.url or 'data' in request.url or 'chart' in request.url:
-                        pending_requests.append(request.url)
-                        
-                page.on('request', track_requests)
-                
-                # select 요소 변경
-                await page.select_option('#selTerm', self.collection_period)
-                
-                # 네트워크 요청 완료 대기
-                try:
-                    await page.wait_for_load_state('networkidle', timeout=10000)
-                except:
-                    pass  # 타임아웃 무시
-                
-                # 차트 데이터 완전 로드 대기
-                await self.wait_for_chart_data_complete(page, self.collection_period)
-                
-                # 변경 확인
-                new_period = await page.inner_text('#selTerm option[selected]')
-                print(f"✅ Period changed to: {new_period}")
-                
+                # 원하는 기간 선택
+                if self.collection_period != '01' and current_period != self.collection_period:
+                    print(f"📅 Changing period to: {self.period_text_map.get(self.collection_period)} ({self.collection_period})")
+                    
+                    # JavaScript로 직접 선택 (더 안정적)
+                    success = await page.evaluate('''
+                        (targetValue) => {
+                            const select = document.querySelector('#selTerm');
+                            if (!select) return false;
+                            
+                            // 옵션이 존재하는지 확인
+                            const option = Array.from(select.options).find(opt => opt.value === targetValue);
+                            if (!option) {
+                                console.error('Option not found:', targetValue);
+                                return false;
+                            }
+                            
+                            // 값 설정
+                            select.value = targetValue;
+                            
+                            // change 이벤트 트리거
+                            const event = new Event('change', { bubbles: true });
+                            select.dispatchEvent(event);
+                            
+                            // jQuery가 있다면 jQuery 이벤트도 트리거
+                            if (typeof $ !== 'undefined' && $(select).length) {
+                                $(select).trigger('change');
+                            }
+                            
+                            return true;
+                        }
+                    ''', self.collection_period)
+                    
+                    if not success:
+                        print(f"⚠️ Failed to select period via JavaScript, trying alternative method")
+                        # 대체 방법: select_option 사용 (타임아웃 짧게)
+                        try:
+                            await page.select_option('#selTerm', self.collection_period, timeout=5000)
+                        except Exception as e:
+                            print(f"⚠️ Alternative selection also failed: {e}")
+                    
+                    # 선택 후 대기
+                    await page.wait_for_timeout(1000)
+                    
+                    # 네트워크 요청 완료 대기
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    except:
+                        pass  # 타임아웃 무시
+                    
+                    # 차트 데이터 완전 로드 대기
+                    await self.wait_for_chart_data_complete(page, self.collection_period)
+                    
+                    # 변경 확인
+                    new_period = await page.evaluate('''
+                        () => {
+                            const select = document.querySelector('#selTerm');
+                            if (select) {
+                                const selectedOption = select.options[select.selectedIndex];
+                                return {
+                                    value: select.value,
+                                    text: selectedOption ? selectedOption.text : null
+                                };
+                            }
+                            return null;
+                        }
+                    ''')
+                    
+                    if new_period:
+                        print(f"✅ Period changed to: {new_period['text']} (value: {new_period['value']})")
+                    
         except Exception as e:
-            print(f"⚠️ Error changing period: {e}")
+            print(f"⚠️ Error in period selection: {e}")
             import traceback
             traceback.print_exc()
+            print("⚠️ Continuing with default period...")
         
         # 데이터 추출
         data = {
