@@ -241,7 +241,7 @@ class ESGFundScraper:
             return None
     
     async def extract_chart_data_with_ocr_analysis(self, page, tab_name):
-        """차트 이미지 OCR과 좌표 분석을 통한 데이터 추출"""
+        """차트 이미지 OCR과 좌표 분석을 통한 데이터 추출 (단일 듀얼축 차트)"""
         chart_data = {
             'dates': [],
             'setup_amounts': [],
@@ -249,7 +249,7 @@ class ESGFundScraper:
         }
         
         try:
-            # 차트 영역 찾기
+            # Highcharts 차트 영역 찾기 (단일 차트)
             chart_element = await page.query_selector('#lineAreaZone')
             if not chart_element:
                 print("Chart element not found")
@@ -261,67 +261,330 @@ class ESGFundScraper:
                 print("Could not get chart bounding box")
                 return chart_data
             
-            print(f"📊 Chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
+            print(f"📊 Single dual-axis chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
             
             # 스크린샷 저장 디렉토리
             screenshot_dir = 'chart_analysis'
             if not os.path.exists(screenshot_dir):
                 os.makedirs(screenshot_dir)
             
-            # 먼저 페이지 전체 스크린샷으로 디버깅
+            # 전체 페이지 캡처
             full_page_path = f'{screenshot_dir}/{tab_name}_full_page.png'
             await page.screenshot(path=full_page_path, full_page=True)
             print(f"📷 Full page screenshot: {full_page_path}")
             
-            # 차트 영역만 더 정확하게 캡처 (패딩 최소화)
-            chart_screenshot_path = f'{screenshot_dir}/{tab_name}_chart_exact.png'
+            # 단일 차트의 전체 영역 캡처 (제목 + 차트 + X축 + 범례 모두 포함)
+            complete_chart_path = f'{screenshot_dir}/{tab_name}_complete_chart.png'
             await page.screenshot(
-                path=chart_screenshot_path,
+                path=complete_chart_path,
                 clip={
-                    'x': box['x'],
-                    'y': box['y'], 
-                    'width': box['width'],
-                    'height': box['height']
+                    'x': max(0, box['x'] - 100),          # 왼쪽 Y축 레이블 포함
+                    'y': max(0, box['y'] - 80),           # 위쪽 제목 포함  
+                    'width': min(1920, box['width'] + 200), # 오른쪽 Y축 레이블 포함
+                    'height': min(1080, box['height'] + 120) # 아래쪽 X축 레이블과 범례 포함
                 }
             )
             
-            print(f"📷 Exact chart screenshot saved: {chart_screenshot_path}")
-            self.display_image_info(chart_screenshot_path, "정확한 차트 영역")
+            print(f"📷 Complete single chart screenshot saved: {complete_chart_path}")
+            self.display_image_info(complete_chart_path, "완전한 단일 듀얼축 차트")
             
-            # 더 넓은 영역으로 차트 + 축 캡처
-            extended_chart_path = f'{screenshot_dir}/{tab_name}_chart_extended.png'
+            # 순수 차트 영역만 (축과 범례 제외)
+            pure_chart_path = f'{screenshot_dir}/{tab_name}_pure_chart.png'
             await page.screenshot(
-                path=extended_chart_path,
+                path=pure_chart_path,
+                clip={
+                    'x': box['x'] + 50,                   # 왼쪽 Y축 제외
+                    'y': box['y'] + 20,                   # 위쪽 여백
+                    'width': box['width'] - 100,          # 양쪽 Y축 제외
+                    'height': box['height'] - 60          # 아래쪽 X축과 범례 제외
+                }
+            )
+            
+            print(f"📷 Pure chart area screenshot saved: {pure_chart_path}")
+            self.display_image_info(pure_chart_path, "순수 차트 영역 (축 제외)")
+            
+            # 왼쪽 Y축만 (설정액)
+            left_y_axis_path = f'{screenshot_dir}/{tab_name}_left_y_axis.png'
+            await page.screenshot(
+                path=left_y_axis_path,
                 clip={
                     'x': max(0, box['x'] - 80),
-                    'y': max(0, box['y'] - 30),
-                    'width': min(1920, box['width'] + 160),
-                    'height': min(1080, box['height'] + 80)
+                    'y': box['y'] + 20,
+                    'width': 100,
+                    'height': box['height'] - 80
                 }
             )
             
-            print(f"📷 Extended chart screenshot saved: {extended_chart_path}")
-            self.display_image_info(extended_chart_path, "확장된 차트 영역 (축 포함)")
+            print(f"📷 Left Y-axis screenshot saved: {left_y_axis_path}")
+            self.display_image_info(left_y_axis_path, "왼쪽 Y축 (설정액)")
             
-            # 이미지 전처리 및 분석
-            chart_image = Image.open(extended_chart_path)
-            chart_data = await self.analyze_chart_image(chart_image, tab_name, screenshot_dir)
+            # 오른쪽 Y축만 (수익률)
+            right_y_axis_path = f'{screenshot_dir}/{tab_name}_right_y_axis.png'
+            await page.screenshot(
+                path=right_y_axis_path,
+                clip={
+                    'x': box['x'] + box['width'] - 20,
+                    'y': box['y'] + 20,
+                    'width': 100,
+                    'height': box['height'] - 80
+                }
+            )
             
-            # SVG 요소에서 직접 데이터 추출 시도
+            print(f"📷 Right Y-axis screenshot saved: {right_y_axis_path}")
+            self.display_image_info(right_y_axis_path, "오른쪽 Y축 (수익률)")
+            
+            # X축과 범례 영역
+            x_axis_legend_path = f'{screenshot_dir}/{tab_name}_x_axis_legend.png'
+            await page.screenshot(
+                path=x_axis_legend_path,
+                clip={
+                    'x': box['x'],
+                    'y': box['y'] + box['height'] - 60,   # 차트 하단 60px
+                    'width': box['width'],
+                    'height': 100                         # X축 레이블과 범례 포함
+                }
+            )
+            
+            print(f"📷 X-axis and legend screenshot saved: {x_axis_legend_path}")
+            self.display_image_info(x_axis_legend_path, "X축 레이블과 범례 영역")
+            
+            # 완전한 차트 이미지로 분석 수행
+            chart_image = Image.open(complete_chart_path)
+            chart_data = await self.analyze_single_dual_axis_chart(chart_image, tab_name, screenshot_dir)
+            
+            # X축 날짜를 별도 영역에서 추출
+            x_axis_legend_image = Image.open(x_axis_legend_path)
+            dates_from_bottom = self.extract_dates_from_x_axis_area(x_axis_legend_image, screenshot_dir, tab_name)
+            
+            if dates_from_bottom:
+                print(f"✅ Dates extracted from X-axis area: {dates_from_bottom}")
+                chart_data['dates'] = dates_from_bottom
+            
+            # SVG 요소에서 직접 데이터 추출 시도 (더 정확할 수 있음)
             svg_data = await self.extract_svg_chart_data(page)
-            if svg_data:
+            if svg_data and svg_data.get('dates'):
                 print("✅ SVG 데이터 추출 성공!")
-                chart_data.update(svg_data)
+                chart_data['dates'] = svg_data['dates']
+                if not chart_data.get('setup_amounts'):
+                    chart_data['setup_amounts'] = svg_data.get('setup_amounts', [])
+                if not chart_data.get('returns'):
+                    chart_data['returns'] = svg_data.get('returns', [])
             
             # HTML 요약 파일 생성
             self.create_image_summary_html(screenshot_dir, tab_name)
             
         except Exception as e:
-            print(f"❌ Error in chart OCR analysis: {e}")
+            print(f"❌ Error in single dual-axis chart analysis: {e}")
             import traceback
             traceback.print_exc()
         
         return chart_data
+    
+    async def analyze_single_dual_axis_chart(self, chart_image, tab_name, screenshot_dir):
+        """단일 듀얼축 차트 분석"""
+        chart_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
+        
+        try:
+            # 1. Y축 값들 추출 (듀얼축)
+            y_axis_values = self.extract_dual_y_axis_values(chart_image, screenshot_dir, tab_name)
+            
+            # 2. X축 날짜들 추출
+            x_axis_dates = self.extract_x_axis_dates(chart_image, screenshot_dir, tab_name)
+            
+            # 3. 단일 차트에서 두 종류의 라인 추출
+            line_coordinates = self.extract_dual_axis_lines(chart_image, screenshot_dir, tab_name)
+            
+            # 4. 좌표와 Y축 값을 이용한 실제 값 계산
+            if y_axis_values and line_coordinates and x_axis_dates:
+                calculated_data = self.calculate_dual_axis_values(
+                    line_coordinates, y_axis_values, x_axis_dates
+                )
+                chart_data.update(calculated_data)
+            
+        except Exception as e:
+            print(f"❌ Error analyzing single dual-axis chart: {e}")
+        
+        return chart_data
+    
+    def extract_dual_y_axis_values(self, image, screenshot_dir, tab_name):
+        """듀얼 Y축에서 값 추출"""
+        y_axis_data = {
+            'left_axis': [],   # 설정액 (억원)
+            'right_axis': [],  # 수익률 (%)
+        }
+        
+        try:
+            width, height = image.size
+            
+            # 왼쪽 Y축 영역 (설정액) - 더 정확한 위치
+            left_y_axis = image.crop((0, int(height * 0.1), int(width * 0.12), int(height * 0.8)))
+            left_y_path = f'{screenshot_dir}/{tab_name}_left_y_extracted.png'
+            left_y_axis.save(left_y_path)
+            
+            # 오른쪽 Y축 영역 (수익률) - 더 정확한 위치
+            right_y_axis = image.crop((int(width * 0.88), int(height * 0.1), width, int(height * 0.8)))
+            right_y_path = f'{screenshot_dir}/{tab_name}_right_y_extracted.png'
+            right_y_axis.save(right_y_path)
+            
+            self.display_image_info(left_y_path, "추출된 왼쪽 Y축 (설정액)")
+            self.display_image_info(right_y_path, "추출된 오른쪽 Y축 (수익률)")
+            
+            # OCR로 Y축 값들 추출
+            config_numbers = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,%'
+            
+            # 왼쪽 Y축 값들 (설정액 - 큰 숫자)
+            left_text = pytesseract.image_to_string(left_y_axis, config=config_numbers)
+            print(f"🔍 Left Y-axis OCR (설정액): {repr(left_text)}")
+            
+            for line in left_text.split('\n'):
+                numbers = re.findall(r'[\d,]+\.?\d*', line.strip())
+                for num_str in numbers:
+                    try:
+                        value = float(num_str.replace(',', ''))
+                        if value > 1000:  # 설정액은 보통 큰 수
+                            y_axis_data['left_axis'].append(value)
+                    except:
+                        pass
+            
+            # 오른쪽 Y축 값들 (수익률 - 작은 숫자, % 포함 가능)
+            right_text = pytesseract.image_to_string(right_y_axis, config=config_numbers)
+            print(f"🔍 Right Y-axis OCR (수익률): {repr(right_text)}")
+            
+            for line in right_text.split('\n'):
+                numbers = re.findall(r'[\d.]+', line.strip())
+                for num_str in numbers:
+                    try:
+                        value = float(num_str)
+                        if 0 <= value <= 50:  # 수익률은 보통 0-50% 범위
+                            y_axis_data['right_axis'].append(value)
+                    except:
+                        pass
+            
+            # 중복 제거 및 정렬
+            y_axis_data['left_axis'] = sorted(set(y_axis_data['left_axis']), reverse=True)
+            y_axis_data['right_axis'] = sorted(set(y_axis_data['right_axis']), reverse=True)
+            
+            print(f"📈 Left Y-axis values (설정액): {y_axis_data['left_axis']}")
+            print(f"📈 Right Y-axis values (수익률): {y_axis_data['right_axis']}")
+            
+        except Exception as e:
+            print(f"❌ Error extracting dual Y-axis values: {e}")
+        
+        return y_axis_data
+    
+    def extract_dates_from_x_axis_area(self, x_axis_image, screenshot_dir, tab_name):
+        """X축 영역에서 날짜 추출 (범례 제외)"""
+        dates = []
+        
+        try:
+            width, height = x_axis_image.size
+            
+            # 범례를 제외한 순수 X축 레이블 영역만 추출
+            # 범례는 보통 가운데 하단에 있으므로 위쪽 영역만 사용
+            x_labels_only = x_axis_image.crop((
+                int(width * 0.1),    # 왼쪽 여백
+                0,                   # 맨 위부터
+                int(width * 0.9),    # 오른쪽 여백  
+                int(height * 0.6)    # 범례 위쪽까지만
+            ))
+            
+            x_labels_path = f'{screenshot_dir}/{tab_name}_x_labels_only.png'
+            x_labels_only.save(x_labels_path)
+            self.display_image_info(x_labels_path, "순수 X축 레이블 (범례 제외)")
+            
+            # 이미지 전처리 및 OCR
+            dates = self.extract_x_axis_dates(x_labels_only, screenshot_dir, f"{tab_name}_from_x_area")
+            
+        except Exception as e:
+            print(f"❌ Error extracting dates from X-axis area: {e}")
+        
+        return dates
+    
+    def extract_dates_from_bottom_area(self, bottom_image, screenshot_dir, tab_name):
+        """하단 영역(범례 + X축)에서 날짜 추출"""
+        dates = []
+        
+        try:
+            # 하단 영역을 더 정밀하게 처리
+            width, height = bottom_image.size
+            
+            # X축 레이블이 있을 것으로 예상되는 영역만 추출
+            # 범례는 제외하고 X축 날짜 부분만
+            x_axis_area = bottom_image.crop((
+                int(width * 0.1),    # 왼쪽 Y축 제외
+                int(height * 0.3),   # 범례 아래쪽
+                int(width * 0.9),    # 오른쪽 Y축 제외
+                int(height * 0.8)    # 맨 아래 여백 제외
+            ))
+            
+            x_axis_bottom_path = f'{screenshot_dir}/{tab_name}_x_axis_from_bottom.png'
+            x_axis_area.save(x_axis_bottom_path)
+            self.display_image_info(x_axis_bottom_path, "하단에서 추출한 X축 영역")
+            
+            # 이미지 전처리 강화
+            scale_factor = 4  # 더 크게 확대
+            x_axis_large = x_axis_area.resize(
+                (x_axis_area.width * scale_factor, x_axis_area.height * scale_factor), 
+                Image.Resampling.LANCZOS
+            )
+            
+            # 대비와 선명도 극대화
+            enhancer = ImageEnhance.Contrast(x_axis_large)
+            x_axis_enhanced = enhancer.enhance(4.0)  # 대비 더 강하게
+            
+            sharpness_enhancer = ImageEnhance.Sharpness(x_axis_enhanced)
+            x_axis_sharp = sharpness_enhancer.enhance(3.0)  # 선명도 더 강하게
+            
+            # 그레이스케일 변환
+            x_axis_gray = x_axis_sharp.convert('L')
+            
+            # 여러 임계값으로 이진화 시도
+            thresholds = [80, 100, 120, 140, 160]
+            
+            for i, threshold in enumerate(thresholds):
+                binary = x_axis_gray.point(lambda p: 255 if p < threshold else 0)  # 어두운 글자를 흰색으로
+                
+                binary_path = f'{screenshot_dir}/{tab_name}_bottom_binary_{threshold}.png'
+                binary.save(binary_path)
+                
+                # OCR 시도
+                try:
+                    # 날짜에 특화된 OCR 설정
+                    config = r'--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789.'
+                    text = pytesseract.image_to_string(binary, config=config)
+                    
+                    if text.strip():
+                        print(f"🔍 Bottom area OCR (threshold {threshold}): {repr(text)}")
+                        
+                        # 날짜 패턴 찾기
+                        import re
+                        date_matches = re.findall(r'(\d{4})[.\s]*(\d{1,2})[.\s]*(\d{1,2})', text)
+                        
+                        for match in date_matches:
+                            year, month, day = match
+                            try:
+                                if 2020 <= int(year) <= 2030 and 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                                    formatted_date = f"{year}.{month.zfill(2)}.{day.zfill(2)}"
+                                    if formatted_date not in dates:
+                                        dates.append(formatted_date)
+                            except:
+                                pass
+                                
+                except Exception as e:
+                    print(f"❌ OCR failed for threshold {threshold}: {e}")
+            
+            # 날짜 정렬
+            dates = sorted(list(set(dates)))
+            print(f"📅 Dates from bottom area: {dates}")
+            
+        except Exception as e:
+            print(f"❌ Error extracting dates from bottom area: {e}")
+        
+        return dates
     
     async def extract_svg_chart_data(self, page):
         """SVG 요소에서 직접 차트 데이터 추출"""
@@ -663,79 +926,237 @@ class ESGFundScraper:
         
         return dates
     
-    def extract_chart_lines(self, image, screenshot_dir, tab_name):
-        """차트 라인의 좌표 추출 (개선된 방법)"""
+    def extract_dual_axis_lines(self, image, screenshot_dir, tab_name):
+        """듀얼축 차트에서 두 종류의 라인 추출"""
         line_coords = {
-            'setup_amount_line': [],  # 설정액 라인 좌표
-            'return_rate_line': []    # 수익률 라인 좌표
+            'setup_amount_line': [],  # 설정액 라인/영역
+            'return_rate_line': []    # 수익률 라인
         }
         
         try:
             # OpenCV로 이미지 처리
             img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            original_height, original_width = img_cv.shape[:2]
             
-            # 차트 영역만 추출 (축 제외) - 더 정확한 범위
-            height, width = img_cv.shape[:2]
-            chart_area = img_cv[
-                int(height * 0.05):int(height * 0.85),  # Y 범위 (위쪽 여백 줄이고 아래쪽 X축 제외)
-                int(width * 0.08):int(width * 0.92)     # X 범위 (Y축 레이블 제외)
-            ]
+            print(f"📐 Dual-axis chart image size: {original_width}x{original_height}")
+            
+            # 단일 차트에서 순수 차트 영역만 추출
+            # 듀얼축이므로 양쪽 Y축 모두 제외
+            chart_start_y = int(original_height * 0.2)   # 제목 아래
+            chart_end_y = int(original_height * 0.75)    # X축 위
+            chart_start_x = int(original_width * 0.12)   # 왼쪽 Y축 제외
+            chart_end_x = int(original_width * 0.88)     # 오른쪽 Y축 제외
+            
+            # 순수 차트 영역 추출
+            chart_area = img_cv[chart_start_y:chart_end_y, chart_start_x:chart_end_x]
+            
+            if chart_area.size == 0:
+                print("⚠️ Chart area is empty, adjusting boundaries...")
+                chart_start_y = int(original_height * 0.15)
+                chart_end_y = int(original_height * 0.8)
+                chart_area = img_cv[chart_start_y:chart_end_y, chart_start_x:chart_end_x]
+            
+            print(f"📊 Extracted dual-axis chart area: {chart_area.shape[1]}x{chart_area.shape[0]}")
             
             # 차트 영역 저장
-            chart_area_path = f'{screenshot_dir}/{tab_name}_chart_area.png'
+            chart_area_path = f'{screenshot_dir}/{tab_name}_dual_chart_area.png'
             cv2.imwrite(chart_area_path, chart_area)
+            self.display_image_info(chart_area_path, "듀얼축 차트 영역")
             
-            print(f"📊 Chart area extracted: {chart_area_path}")
+            # 듀얼축 차트의 특성을 고려한 라인 감지
+            # 1. 파란색 영역 차트 (설정액) - 면적이 있는 영역
+            blue_mask = self.create_color_mask_for_dual_axis(chart_area, 'blue', 'area')
             
-            # PIL로 변환해서 콘솔 표시
-            chart_area_pil = Image.fromarray(cv2.cvtColor(chart_area, cv2.COLOR_BGR2RGB))
-            chart_area_pil.save(f'{screenshot_dir}/{tab_name}_chart_area_pil.png')
-            self.display_image_info(f'{screenshot_dir}/{tab_name}_chart_area_pil.png', "순수 차트 영역")
+            # 2. 파란색 라인 차트 (수익률) - 얇은 라인
+            line_mask = self.create_color_mask_for_dual_axis(chart_area, 'blue', 'line')
             
-            # 라인 색상별로 추출 (개선된 방법)
-            blue_mask = self.create_color_mask(chart_area, 'blue')
-            red_mask = self.create_color_mask(chart_area, 'red')
-            
-            # 마스크 이미지 저장 및 정보 표시
-            blue_mask_path = f'{screenshot_dir}/{tab_name}_blue_mask.png'
-            red_mask_path = f'{screenshot_dir}/{tab_name}_red_mask.png'
+            # 마스크 저장 및 분석
+            blue_mask_path = f'{screenshot_dir}/{tab_name}_blue_area_mask.png'
+            line_mask_path = f'{screenshot_dir}/{tab_name}_blue_line_mask.png'
             
             cv2.imwrite(blue_mask_path, blue_mask)
-            cv2.imwrite(red_mask_path, red_mask)
+            cv2.imwrite(line_mask_path, line_mask)
             
-            self.display_image_info(blue_mask_path, "파란색 라인 마스크 (설정액)")
-            self.display_image_info(red_mask_path, "빨간색 라인 마스크 (수익률)")
+            self.display_image_info(blue_mask_path, "파란색 영역 마스크 (설정액)")
+            self.display_image_info(line_mask_path, "파란색 라인 마스크 (수익률)")
             
-            # 마스크에서 실제 라인 픽셀 개수 확인
+            # 픽셀 개수 확인
             blue_pixels = cv2.countNonZero(blue_mask)
-            red_pixels = cv2.countNonZero(red_mask)
+            line_pixels = cv2.countNonZero(line_mask)
             
-            print(f"🔵 Blue mask pixels: {blue_pixels}")
-            print(f"🔴 Red mask pixels: {red_pixels}")
+            print(f"🔵 Blue area pixels: {blue_pixels}")
+            print(f"📈 Blue line pixels: {line_pixels}")
             
             # 라인 좌표 추출
-            blue_line_coords = self.extract_line_coordinates(blue_mask, 'blue')
-            red_line_coords = self.extract_line_coordinates(red_mask, 'red')
+            if blue_pixels > 100:  # 충분한 영역이 감지된 경우
+                setup_coords = self.extract_area_boundary_line(blue_mask, 'setup_area')
+                line_coords['setup_amount_line'] = setup_coords
+                print(f"🔵 Setup amount area boundary: {len(setup_coords)} points")
             
-            print(f"🔵 Blue line coordinates (설정액): {len(blue_line_coords)} points")
-            print(f"🔴 Red line coordinates (수익률): {len(red_line_coords)} points")
+            if line_pixels > 50:   # 충분한 라인이 감지된 경우
+                return_coords = self.extract_line_coordinates(line_mask, 'return_line')
+                line_coords['return_rate_line'] = return_coords
+                print(f"📈 Return rate line: {len(return_coords)} points")
             
-            # 좌표가 부족한 경우 대안 방법 시도
-            if len(blue_line_coords) < 5:
-                print("⚠️ Blue line detection insufficient, trying alternative method...")
-                blue_line_coords = self.extract_line_alternative(chart_area, 'blue', screenshot_dir, tab_name)
+            # 감지가 부족한 경우 대안 방법
+            if len(line_coords['setup_amount_line']) < 3 or len(line_coords['return_rate_line']) < 3:
+                print("⚠️ Insufficient line detection, trying edge-based method...")
+                alternative_coords = self.extract_lines_by_edge_detection(chart_area, screenshot_dir, tab_name)
                 
-            if len(red_line_coords) < 5:
-                print("⚠️ Red line detection insufficient, trying alternative method...")
-                red_line_coords = self.extract_line_alternative(chart_area, 'red', screenshot_dir, tab_name)
-            
-            line_coords['setup_amount_line'] = blue_line_coords
-            line_coords['return_rate_line'] = red_line_coords
+                if alternative_coords['setup_amount_line']:
+                    line_coords['setup_amount_line'] = alternative_coords['setup_amount_line']
+                if alternative_coords['return_rate_line']:
+                    line_coords['return_rate_line'] = alternative_coords['return_rate_line']
             
         except Exception as e:
-            print(f"❌ Error extracting chart lines: {e}")
+            print(f"❌ Error extracting dual-axis lines: {e}")
             import traceback
             traceback.print_exc()
+        
+        return line_coords
+    
+    def create_color_mask_for_dual_axis(self, image, color_type, shape_type):
+        """듀얼축 차트를 위한 색상 마스크 생성"""
+        import cv2
+        import numpy as np
+        
+        bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        
+        if color_type == 'blue':
+            if shape_type == 'area':
+                # 면적 차트를 위한 더 넓은 파란색 범위 (연한 파란색 포함)
+                lower_blue1 = np.array([85, 20, 30])    # 매우 연한 파란색
+                upper_blue1 = np.array([135, 255, 255])
+                
+                mask = cv2.inRange(hsv, lower_blue1, upper_blue1)
+                
+                # RGB에서도 파란색 영역 찾기
+                blue_channel = rgb_image[:, :, 2]
+                red_channel = rgb_image[:, :, 0]
+                green_channel = rgb_image[:, :, 1]
+                
+                # 파란색이 다른 색보다 강한 영역 (면적 차트용)
+                blue_dominant = (blue_channel > red_channel + 10) & (blue_channel > green_channel + 10) & (blue_channel > 80)
+                blue_rgb_mask = blue_dominant.astype(np.uint8) * 255
+                
+                mask = cv2.bitwise_or(mask, blue_rgb_mask)
+                
+            else:  # shape_type == 'line'
+                # 라인 차트를 위한 더 진한 파란색 범위
+                lower_blue = np.array([100, 100, 100])   # 진한 파란색만
+                upper_blue = np.array([125, 255, 255])
+                
+                mask = cv2.inRange(hsv, lower_blue, upper_blue)
+                
+                # 라인 검출을 위한 형태학적 연산
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        else:
+            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        
+        return mask
+    
+    def extract_area_boundary_line(self, area_mask, area_name):
+        """면적 차트의 경계선 추출"""
+        coordinates = []
+        
+        try:
+            # 컨투어 찾기
+            contours, _ = cv2.findContours(area_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                # 가장 큰 컨투어 선택
+                largest_contour = max(contours, key=cv2.contourArea)
+                
+                # 컨투어의 상단 경계선만 추출 (면적 차트의 상단 라인)
+                points = largest_contour.reshape(-1, 2)
+                
+                # Y좌표가 가장 작은 점들을 찾아서 상단 경계선 구성
+                min_y_for_x = {}
+                for x, y in points:
+                    if x not in min_y_for_x or y < min_y_for_x[x]:
+                        min_y_for_x[x] = y
+                
+                # X좌표 순으로 정렬하여 라인 구성
+                for x in sorted(min_y_for_x.keys()):
+                    coordinates.append((x, min_y_for_x[x]))
+                
+                print(f"✅ Extracted {len(coordinates)} boundary points for {area_name}")
+                
+        except Exception as e:
+            print(f"❌ Error extracting area boundary: {e}")
+        
+        return coordinates
+    
+    def extract_lines_by_edge_detection(self, chart_area, screenshot_dir, tab_name):
+        """가장자리 검출을 통한 라인 추출 (대안 방법)"""
+        line_coords = {
+            'setup_amount_line': [],
+            'return_rate_line': []
+        }
+        
+        try:
+            # 그레이스케일 변환
+            gray = cv2.cvtColor(chart_area, cv2.COLOR_BGR2GRAY)
+            
+            # 가우시안 블러 적용
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # 캐니 엣지 검출
+            edges = cv2.Canny(blurred, 30, 100)
+            
+            # 엣지 이미지 저장
+            edge_path = f'{screenshot_dir}/{tab_name}_edges.png'
+            cv2.imwrite(edge_path, edges)
+            self.display_image_info(edge_path, "엣지 검출 결과")
+            
+            # 허프 라인 변환
+            lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=15, minLineLength=30, maxLineGap=5)
+            
+            if lines is not None:
+                print(f"🔍 Found {len(lines)} lines using edge detection")
+                
+                # 라인을 상단과 하단으로 분류
+                chart_height = chart_area.shape[0]
+                upper_lines = []
+                lower_lines = []
+                
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    avg_y = (y1 + y2) / 2
+                    
+                    if avg_y < chart_height * 0.7:  # 상단 영역
+                        upper_lines.append(line[0])
+                    else:  # 하단 영역
+                        lower_lines.append(line[0])
+                
+                # 상단 라인들을 연결하여 설정액 라인 구성
+                if upper_lines:
+                    setup_points = []
+                    for line in upper_lines:
+                        x1, y1, x2, y2 = line
+                        setup_points.extend([(x1, y1), (x2, y2)])
+                    
+                    # X좌표로 정렬하고 중복 제거
+                    setup_points = sorted(list(set(setup_points)), key=lambda p: p[0])
+                    line_coords['setup_amount_line'] = setup_points[:20]  # 최대 20개 점
+                
+                # 모든 라인을 수익률 라인으로도 사용 (다른 접근)
+                if lines is not None and len(lines) > 0:
+                    return_points = []
+                    for line in lines:
+                        x1, y1, x2, y2 = line[0]
+                        return_points.extend([(x1, y1), (x2, y2)])
+                    
+                    return_points = sorted(list(set(return_points)), key=lambda p: p[0])
+                    line_coords['return_rate_line'] = return_points[:20]
+                
+                print(f"📊 Edge detection result - Setup: {len(line_coords['setup_amount_line'])}, Return: {len(line_coords['return_rate_line'])}")
+                
+        except Exception as e:
+            print(f"❌ Error in edge detection: {e}")
         
         return line_coords
     
