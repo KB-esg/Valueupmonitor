@@ -71,93 +71,168 @@ class ESGFundScraper:
     def create_image_summary_html(self, screenshot_dir, tab_name):
         """분석된 이미지들의 HTML 요약 파일 생성"""
         try:
+            # 생성된 이미지 파일들 확인
+            image_files = []
+            for file in os.listdir(screenshot_dir):
+                if file.startswith(tab_name) and file.endswith('.png'):
+                    image_files.append(file)
+            
             html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <title>Chart Analysis - {tab_name}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .image-section {{ margin: 20px 0; border: 1px solid #ddd; padding: 15px; }}
-        .image-section h3 {{ color: #333; margin-top: 0; }}
+        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }}
+        .header {{ background: #2c3e50; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+        .image-section {{ margin: 30px 0; border: 1px solid #ddd; padding: 20px; border-radius: 8px; background: #fafafa; }}
+        .image-section h3 {{ color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
         .image-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
-        .image-item {{ text-align: center; }}
-        .image-item img {{ max-width: 100%; height: auto; border: 1px solid #ccc; }}
-        .image-item p {{ margin: 10px 0; font-size: 14px; color: #666; }}
+        .image-item {{ text-align: center; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .image-item img {{ max-width: 100%; height: auto; border: 2px solid #bdc3c7; border-radius: 4px; }}
+        .image-item p {{ margin: 10px 0; font-size: 14px; color: #666; font-weight: bold; }}
         .timestamp {{ color: #888; font-size: 12px; }}
+        .file-list {{ background: #ecf0f1; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+        .file-list h4 {{ margin-top: 0; color: #2c3e50; }}
+        .file-list ul {{ list-style-type: none; padding: 0; }}
+        .file-list li {{ background: white; margin: 5px 0; padding: 8px; border-radius: 4px; font-family: monospace; }}
+        .github-notice {{ background: #e8f4fd; border: 1px solid #3498db; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+        .github-notice h4 {{ color: #2980b9; margin-top: 0; }}
     </style>
 </head>
 <body>
-    <h1>ESG Fund Chart Analysis - {tab_name}</h1>
-    <p class="timestamp">Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    
-    <div class="image-section">
-        <h3>📊 Full Chart</h3>
-        <div class="image-grid">
-            <div class="image-item">
-                <img src="{tab_name}_full_chart.png" alt="Full Chart">
-                <p>전체 차트 이미지</p>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 ESG Fund Chart Analysis - {tab_name}</h1>
+            <p class="timestamp">Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+        
+        <div class="github-notice">
+            <h4>📦 GitHub Actions에서 실행 중</h4>
+            <p>모든 이미지 파일은 <strong>아티팩트</strong>로 저장됩니다.</p>
+            <p>GitHub Actions 실행 완료 후 <strong>Artifacts</strong> 섹션에서 다운로드하여 확인하세요.</p>
+        </div>
+        
+        <div class="file-list">
+            <h4>📁 생성된 이미지 파일들</h4>
+            <ul>
+"""
+            
+            # 파일 목록 추가
+            for file in sorted(image_files):
+                file_path = os.path.join(screenshot_dir, file)
+                if os.path.exists(file_path):
+                    file_size = os.path.getsize(file_path)
+                    html_content += f'                <li>📸 {file} ({file_size:,} bytes)</li>\n'
+            
+            html_content += """
+            </ul>
+        </div>
+        
+        <div class="image-section">
+            <h3>📱 페이지 전체 캡처</h3>
+            <div class="image-grid">
+                <div class="image-item">
+                    <img src="{tab_name}_full_page.png" alt="Full Page" onerror="this.style.display='none'">
+                    <p>전체 페이지 스크린샷</p>
+                </div>
             </div>
         </div>
-    </div>
-    
-    <div class="image-section">
-        <h3>📏 Axis Analysis</h3>
-        <div class="image-grid">
-            <div class="image-item">
-                <img src="{tab_name}_left_y_axis.png" alt="Left Y Axis">
-                <p>왼쪽 Y축 (설정액)</p>
-            </div>
-            <div class="image-item">
-                <img src="{tab_name}_right_y_axis.png" alt="Right Y Axis">
-                <p>오른쪽 Y축 (수익률)</p>
-            </div>
-            <div class="image-item">
-                <img src="{tab_name}_x_axis.png" alt="X Axis">
-                <p>X축 (날짜)</p>
+        
+        <div class="image-section">
+            <h3>📊 차트 영역 캡처</h3>
+            <div class="image-grid">
+                <div class="image-item">
+                    <img src="{tab_name}_chart_exact.png" alt="Exact Chart" onerror="this.style.display='none'">
+                    <p>정확한 차트 영역</p>
+                </div>
+                <div class="image-item">
+                    <img src="{tab_name}_chart_extended.png" alt="Extended Chart" onerror="this.style.display='none'">
+                    <p>확장된 차트 영역 (축 포함)</p>
+                </div>
             </div>
         </div>
-    </div>
-    
-    <div class="image-section">
-        <h3>🎯 Chart Area & Line Detection</h3>
-        <div class="image-grid">
-            <div class="image-item">
-                <img src="{tab_name}_chart_area_pil.png" alt="Chart Area">
-                <p>순수 차트 영역</p>
-            </div>
-            <div class="image-item">
-                <img src="{tab_name}_blue_mask.png" alt="Blue Mask">
-                <p>파란색 라인 마스크 (설정액)</p>
-            </div>
-            <div class="image-item">
-                <img src="{tab_name}_red_mask.png" alt="Red Mask">
-                <p>빨간색 라인 마스크 (수익률)</p>
+        
+        <div class="image-section">
+            <h3>📏 축 분석 결과</h3>
+            <div class="image-grid">
+                <div class="image-item">
+                    <img src="{tab_name}_left_y_axis.png" alt="Left Y Axis" onerror="this.style.display='none'">
+                    <p>왼쪽 Y축 (설정액)</p>
+                </div>
+                <div class="image-item">
+                    <img src="{tab_name}_right_y_axis.png" alt="Right Y Axis" onerror="this.style.display='none'">
+                    <p>오른쪽 Y축 (수익률)</p>
+                </div>
+                <div class="image-item">
+                    <img src="{tab_name}_x_axis_improved.png" alt="X Axis Improved" onerror="this.style.display='none'">
+                    <p>개선된 X축 (날짜)</p>
+                </div>
             </div>
         </div>
-    </div>
-    
-    <div class="image-section">
-        <h3>📋 Analysis Instructions</h3>
-        <ol>
-            <li><strong>Full Chart:</strong> 전체 차트의 모습을 확인</li>
-            <li><strong>Y-Axis:</strong> 왼쪽은 설정액 범위, 오른쪽은 수익률 범위 확인</li>
-            <li><strong>X-Axis:</strong> 날짜 범위 및 OCR 정확도 확인</li>
-            <li><strong>Chart Area:</strong> 실제 데이터 라인이 있는 영역</li>
-            <li><strong>Color Masks:</strong> 각 라인별 색상 분리가 잘 되었는지 확인</li>
-        </ol>
-        <p><strong>⚠️ 주의사항:</strong> 마스크에서 라인이 명확하지 않으면 색상 범위 조정이 필요합니다.</p>
+        
+        <div class="image-section">
+            <h3>🔧 이미지 전처리 결과</h3>
+            <div class="image-grid">
+                <div class="image-item">
+                    <img src="{tab_name}_x_axis_binary.png" alt="X Axis Binary" onerror="this.style.display='none'">
+                    <p>이진화된 X축 (OCR용)</p>
+                </div>
+                <div class="image-item">
+                    <img src="{tab_name}_chart_area_pil.png" alt="Chart Area" onerror="this.style.display='none'">
+                    <p>순수 차트 영역</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="image-section">
+            <h3>🎯 라인 감지 결과</h3>
+            <div class="image-grid">
+                <div class="image-item">
+                    <img src="{tab_name}_blue_mask.png" alt="Blue Mask" onerror="this.style.display='none'">
+                    <p>파란색 라인 마스크 (설정액)</p>
+                </div>
+                <div class="image-item">
+                    <img src="{tab_name}_red_mask.png" alt="Red Mask" onerror="this.style.display='none'">
+                    <p>빨간색 라인 마스크 (수익률)</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="image-section">
+            <h3>📋 분석 체크리스트</h3>
+            <ol>
+                <li><strong>전체 페이지:</strong> 차트가 올바르게 로드되었는지 확인</li>
+                <li><strong>차트 영역:</strong> 정확한 차트 범위가 캡처되었는지 확인</li>
+                <li><strong>Y축 값:</strong> 설정액과 수익률 범위가 OCR로 읽혔는지 확인</li>
+                <li><strong>X축 날짜:</strong> 날짜가 정확히 추출되었는지 확인</li>
+                <li><strong>이진화 이미지:</strong> 텍스트가 명확하게 보이는지 확인</li>
+                <li><strong>라인 마스크:</strong> 차트 라인이 올바르게 감지되었는지 확인</li>
+            </ol>
+            
+            <div class="github-notice">
+                <h4>🔍 문제 해결 가이드</h4>
+                <ul>
+                    <li><strong>날짜 추출 실패:</strong> X축 이미지에서 날짜가 보이는지 확인</li>
+                    <li><strong>라인 감지 실패:</strong> 색상 마스크에서 라인이 보이는지 확인</li>
+                    <li><strong>OCR 오류:</strong> 이진화 이미지에서 텍스트가 명확한지 확인</li>
+                    <li><strong>차트 영역 문제:</strong> 전체 페이지에서 차트 위치 확인</li>
+                </ul>
+            </div>
+        </div>
     </div>
 </body>
 </html>
-"""
+""".format(tab_name=tab_name)
             
             html_path = f'{screenshot_dir}/{tab_name}_analysis_summary.html'
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             
             print(f"📄 HTML 요약 파일 생성: {html_path}")
-            print(f"   🌐 브라우저에서 확인: file://{os.path.abspath(html_path)}")
+            print(f"   🌐 GitHub Actions Artifacts에서 확인 가능")
+            print(f"   📁 총 {len(image_files)}개 이미지 파일 생성됨")
             
             return html_path
             
@@ -193,24 +268,50 @@ class ESGFundScraper:
             if not os.path.exists(screenshot_dir):
                 os.makedirs(screenshot_dir)
             
-            # 전체 차트 스크린샷 (Y축 레이블 포함하여 더 넓게)
-            chart_screenshot_path = f'{screenshot_dir}/{tab_name}_full_chart.png'
+            # 먼저 페이지 전체 스크린샷으로 디버깅
+            full_page_path = f'{screenshot_dir}/{tab_name}_full_page.png'
+            await page.screenshot(path=full_page_path, full_page=True)
+            print(f"📷 Full page screenshot: {full_page_path}")
+            
+            # 차트 영역만 더 정확하게 캡처 (패딩 최소화)
+            chart_screenshot_path = f'{screenshot_dir}/{tab_name}_chart_exact.png'
             await page.screenshot(
                 path=chart_screenshot_path,
                 clip={
-                    'x': max(0, box['x'] - 100),  # 왼쪽 Y축 포함
-                    'y': max(0, box['y'] - 50),   # 위쪽 여백
-                    'width': box['width'] + 200,  # 오른쪽 Y축 포함
-                    'height': box['height'] + 100 # 아래쪽 X축 포함
+                    'x': box['x'],
+                    'y': box['y'], 
+                    'width': box['width'],
+                    'height': box['height']
                 }
             )
             
-            print(f"📷 Chart screenshot saved: {chart_screenshot_path}")
-            self.display_image_info(chart_screenshot_path, "전체 차트 스크린샷")
+            print(f"📷 Exact chart screenshot saved: {chart_screenshot_path}")
+            self.display_image_info(chart_screenshot_path, "정확한 차트 영역")
+            
+            # 더 넓은 영역으로 차트 + 축 캡처
+            extended_chart_path = f'{screenshot_dir}/{tab_name}_chart_extended.png'
+            await page.screenshot(
+                path=extended_chart_path,
+                clip={
+                    'x': max(0, box['x'] - 80),
+                    'y': max(0, box['y'] - 30),
+                    'width': min(1920, box['width'] + 160),
+                    'height': min(1080, box['height'] + 80)
+                }
+            )
+            
+            print(f"📷 Extended chart screenshot saved: {extended_chart_path}")
+            self.display_image_info(extended_chart_path, "확장된 차트 영역 (축 포함)")
             
             # 이미지 전처리 및 분석
-            chart_image = Image.open(chart_screenshot_path)
+            chart_image = Image.open(extended_chart_path)
             chart_data = await self.analyze_chart_image(chart_image, tab_name, screenshot_dir)
+            
+            # SVG 요소에서 직접 데이터 추출 시도
+            svg_data = await self.extract_svg_chart_data(page)
+            if svg_data:
+                print("✅ SVG 데이터 추출 성공!")
+                chart_data.update(svg_data)
             
             # HTML 요약 파일 생성
             self.create_image_summary_html(screenshot_dir, tab_name)
@@ -221,6 +322,82 @@ class ESGFundScraper:
             traceback.print_exc()
         
         return chart_data
+    
+    async def extract_svg_chart_data(self, page):
+        """SVG 요소에서 직접 차트 데이터 추출"""
+        svg_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
+        
+        try:
+            print("🔍 Attempting to extract data from SVG elements...")
+            
+            # X축 텍스트 레이블에서 날짜 추출
+            x_labels = await page.query_selector_all('.highcharts-xaxis-labels text')
+            dates = []
+            for label in x_labels:
+                text = await label.inner_text()
+                if text and '.' in text:  # 날짜 형식 확인
+                    dates.append(text.strip())
+            
+            print(f"📅 Found {len(dates)} dates from SVG: {dates}")
+            
+            # Y축 레이블에서 값 범위 추출
+            y_labels = await page.query_selector_all('.highcharts-yaxis-labels text')
+            left_y_values = []
+            right_y_values = []
+            
+            for i, label in enumerate(y_labels):
+                text = await label.inner_text()
+                if text:
+                    # 텍스트에서 숫자 추출
+                    clean_text = text.replace(',', '').replace('%', '')
+                    try:
+                        value = float(clean_text)
+                        # 위치에 따라 왼쪽/오른쪽 Y축 구분 (대략적)
+                        if i < len(y_labels) // 2:
+                            left_y_values.append(value)
+                        else:
+                            right_y_values.append(value)
+                    except:
+                        pass
+            
+            print(f"📊 Left Y-axis values from SVG: {sorted(left_y_values, reverse=True)}")
+            print(f"📊 Right Y-axis values from SVG: {sorted(right_y_values, reverse=True)}")
+            
+            # SVG path 요소에서 실제 차트 라인 좌표 추출
+            chart_paths = await page.query_selector_all('.highcharts-series path')
+            
+            for i, path in enumerate(chart_paths):
+                d_attr = await path.get_attribute('d')
+                if d_attr:
+                    print(f"📈 Chart path {i}: {d_attr[:100]}...")
+                    # SVG path를 파싱하여 좌표 추출 (복잡한 작업이므로 기본 정보만)
+            
+            # 툴팁에서 현재 표시된 값 추출 시도
+            tooltip = await page.query_selector('.highcharts-tooltip')
+            if tooltip:
+                tooltip_text = await tooltip.inner_text()
+                print(f"💬 Current tooltip: {tooltip_text}")
+            
+            # 레전드에서 시리즈 정보 확인
+            legends = await page.query_selector_all('.highcharts-legend-item text')
+            for legend in legends:
+                legend_text = await legend.inner_text()
+                print(f"📜 Legend: {legend_text}")
+            
+            if dates:
+                svg_data['dates'] = dates
+                # 날짜 수만큼 임시 데이터 생성 (실제 값은 다른 방법으로 추출)
+                svg_data['setup_amounts'] = [None] * len(dates)
+                svg_data['returns'] = [None] * len(dates)
+                
+        except Exception as e:
+            print(f"❌ Error extracting SVG data: {e}")
+        
+        return svg_data
     
     async def analyze_chart_image(self, chart_image, tab_name, screenshot_dir):
         """차트 이미지 분석 및 데이터 추출"""
@@ -329,39 +506,100 @@ class ESGFundScraper:
         return y_axis_data
     
     def extract_x_axis_dates(self, image, screenshot_dir, tab_name):
-        """X축 날짜들 추출"""
+        """X축 날짜들 추출 (개선된 방법)"""
         dates = []
         
         try:
             width, height = image.size
             
-            # X축 영역 (아래쪽)
-            x_axis = image.crop((0, int(height * 0.85), width, height))
-            x_axis_path = f'{screenshot_dir}/{tab_name}_x_axis.png'
+            # X축 영역을 더 정확하게 추출 (차트 하단부)
+            x_axis = image.crop((
+                int(width * 0.1),   # 왼쪽 여백
+                int(height * 0.8),  # 더 위쪽부터
+                int(width * 0.9),   # 오른쪽 여백
+                height              # 끝까지
+            ))
+            x_axis_path = f'{screenshot_dir}/{tab_name}_x_axis_improved.png'
             x_axis.save(x_axis_path)
             
-            print(f"📅 X-axis cropped and saved: {x_axis_path}")
-            self.display_image_info(x_axis_path, "X축 (날짜)")
+            print(f"📅 Improved X-axis cropped and saved: {x_axis_path}")
+            self.display_image_info(x_axis_path, "개선된 X축 (날짜)")
             
-            # OCR로 날짜 추출
-            custom_config = r'--oem 3 --psm 6'
-            x_text = pytesseract.image_to_string(x_axis, lang='kor+eng', config=custom_config)
-            print(f"🔍 X-axis OCR result: {repr(x_text)}")
+            # 이미지 전처리
+            # 1. 대비 향상
+            enhancer = ImageEnhance.Contrast(x_axis)
+            x_axis_enhanced = enhancer.enhance(2.0)
             
-            # 날짜 패턴 찾기
-            date_pattern = r'(\d{4})[.\s]+(\d{1,2})[.\s]+(\d{1,2})'
-            date_matches = re.findall(date_pattern, x_text)
+            # 2. 그레이스케일 변환
+            x_axis_gray = x_axis_enhanced.convert('L')
             
-            for year, month, day in date_matches:
+            # 3. 이진화 (텍스트 추출을 위해)
+            threshold = 128
+            x_axis_binary = x_axis_gray.point(lambda p: p > threshold and 255)
+            
+            binary_path = f'{screenshot_dir}/{tab_name}_x_axis_binary.png'
+            x_axis_binary.save(binary_path)
+            self.display_image_info(binary_path, "이진화된 X축")
+            
+            # 여러 OCR 설정으로 시도
+            ocr_configs = [
+                r'--oem 3 --psm 8',  # 단일 단어
+                r'--oem 3 --psm 7',  # 단일 텍스트 라인
+                r'--oem 3 --psm 6',  # 균일한 텍스트 블록
+                r'--oem 3 --psm 13', # 원시 라인 (숫자/날짜)
+            ]
+            
+            all_dates = []
+            for i, config in enumerate(ocr_configs):
                 try:
-                    # 날짜 형식 통일
-                    formatted_date = f"{year}.{month.zfill(2)}.{day.zfill(2)}"
-                    if formatted_date not in dates:
-                        dates.append(formatted_date)
-                except:
-                    pass
+                    text_result = pytesseract.image_to_string(x_axis_binary, config=config)
+                    print(f"🔍 X-axis OCR attempt {i+1}: {repr(text_result)}")
+                    
+                    # 날짜 패턴들 시도
+                    date_patterns = [
+                        r'(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})',  # YYYY.MM.DD
+                        r'(\d{1,2})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{4})',  # MM.DD.YYYY
+                        r'(\d{4})(\d{2})(\d{2})',  # YYYYMMDD
+                    ]
+                    
+                    for pattern in date_patterns:
+                        matches = re.findall(pattern, text_result)
+                        for match in matches:
+                            try:
+                                if len(match[0]) == 4:  # 첫 번째가 년도
+                                    year, month, day = match
+                                else:  # 마지막이 년도
+                                    month, day, year = match
+                                
+                                # 날짜 유효성 검사
+                                if 2020 <= int(year) <= 2030 and 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                                    formatted_date = f"{year}.{month.zfill(2)}.{day.zfill(2)}"
+                                    if formatted_date not in all_dates:
+                                        all_dates.append(formatted_date)
+                            except:
+                                pass
+                                
+                except Exception as e:
+                    print(f"❌ OCR attempt {i+1} failed: {e}")
             
-            print(f"📅 Extracted dates: {dates}")
+            # 결과 정리
+            dates = sorted(list(set(all_dates)))
+            print(f"📅 Final extracted dates: {dates}")
+            
+            # 날짜가 없으면 기본 날짜 생성 (최근 1개월)
+            if not dates:
+                print("⚠️ No dates found, generating default date range")
+                from datetime import datetime, timedelta
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=30)
+                
+                # 일주일 간격으로 날짜 생성
+                current_date = start_date
+                while current_date <= end_date:
+                    dates.append(current_date.strftime('%Y.%m.%d'))
+                    current_date += timedelta(days=7)
+                    
+                print(f"📅 Generated default dates: {dates}")
             
         except Exception as e:
             print(f"❌ Error extracting X-axis dates: {e}")
