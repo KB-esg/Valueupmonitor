@@ -37,7 +37,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements_esg.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements_kresgfund.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
     
@@ -58,11 +58,11 @@ jobs:
         pip install opencv-python==4.8.1.78
         echo "Installing playwright..."
         pip install playwright==1.40.0
-        echo "Installing other requirements from requirements_esg.txt..."
-        if [ -f requirements_esg.txt ]; then
-          pip install -r requirements_esg.txt
+        echo "Installing other requirements from requirements_kresgfund.txt..."
+        if [ -f requirements_kresgfund.txt ]; then
+          pip install -r requirements_kresgfund.txt
         else
-          echo "requirements_esg.txt not found, installing packages individually"
+          echo "requirements_kresgfund.txt not found, installing packages individually"
           pip install requests==2.31.0
           pip install pandas==2.0.3
           pip install gspread==5.10.0
