@@ -215,36 +215,23 @@ jobs:
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
       run: |
         python -c "
-import requests
-import os
-import glob
-
-bot_token = os.environ.get('TELCO_NEWS_TOKEN')
-chat_id = os.environ.get('TELCO_NEWS_TESTER')
-
-if bot_token and chat_id:
-    # 파일 개수 확인
-    data_files = len(glob.glob('data_backup/*.csv')) if os.path.exists('data_backup') else 0
-    chart_files = len(glob.glob('chart_analysis/*.png')) if os.path.exists('chart_analysis') else 0
-    html_files = len(glob.glob('chart_analysis/*.html')) if os.path.exists('chart_analysis') else 0
-    
-    message = f'''✅ ESG Fund 데이터 수집 성공!
-
-📊 수집 결과:
-• 데이터 파일: {data_files}개 
-• 차트 이미지: {chart_files}개
-• HTML 보고서: {html_files}개
-
-🔍 이미지 확인 방법:
-1. GitHub Actions → 이 실행 → Artifacts
-2. chart-analysis-${{ github.run_number }} 다운로드  
-3. HTML 파일을 브라우저에서 열기
-
-📅 실행 시간: $(date +'%Y-%m-%d %H:%M:%S')'''
-    
-    requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', 
-                  data={'chat_id': chat_id, 'text': message})
-"
+        import requests
+        import os
+        import glob
+        
+        bot_token = os.environ.get('TELCO_NEWS_TOKEN')
+        chat_id = os.environ.get('TELCO_NEWS_TESTER')
+        
+        if bot_token and chat_id:
+            data_files = len(glob.glob('data_backup/*.csv')) if os.path.exists('data_backup') else 0
+            chart_files = len(glob.glob('chart_analysis/*.png')) if os.path.exists('chart_analysis') else 0
+            html_files = len(glob.glob('chart_analysis/*.html')) if os.path.exists('chart_analysis') else 0
+            
+            message = f'✅ ESG Fund 데이터 수집 성공!\n\n📊 수집 결과:\n• 데이터 파일: {data_files}개\n• 차트 이미지: {chart_files}개\n• HTML 보고서: {html_files}개\n\n🔍 이미지 확인 방법:\n1. GitHub Actions → 이 실행 → Artifacts\n2. chart-analysis-${{ github.run_number }} 다운로드\n3. HTML 파일을 브라우저에서 열기'
+            
+            requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', 
+                          data={'chat_id': chat_id, 'text': message})
+        "
       continue-on-error: true
     
     - name: Send failure notification
