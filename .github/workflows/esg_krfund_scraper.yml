@@ -212,6 +212,16 @@ jobs:
         fi
         echo "" >> summary.md
         
+        # 시트별 업데이트 상태 확인
+        echo "## 📋 Sheet Update Status" >> summary.md
+        echo "" >> summary.md
+        echo "Expected sheets to be updated:" >> summary.md
+        echo "- ESG_TOP5펀드" >> summary.md
+        echo "- ESG_신규펀드" >> summary.md
+        echo "- ESG_일별차트" >> summary.md
+        echo "- ESG_차트비교검증" >> summary.md
+        echo "" >> summary.md
+        
         cat summary.md
     
     - name: Upload Summary Report
@@ -226,9 +236,17 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
+        
+        # data_backup 디렉토리의 변경사항만 추가
         git add data_backup/
-        git diff --staged --quiet || git commit -m "Update ESG fund data backup - $(date +'%Y-%m-%d') - Period: ${{ env.COLLECTION_PERIOD }}"
-        git push
+        
+        # 변경사항이 있는 경우에만 커밋
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update ESG fund data backup - $(date +'%Y-%m-%d') - Period: ${{ env.COLLECTION_PERIOD }}"
+          git push
+        fi
       continue-on-error: true  # 백업 실패해도 워크플로우는 성공으로 처리
     
     - name: Send success notification
