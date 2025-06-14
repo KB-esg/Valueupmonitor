@@ -1,4 +1,4 @@
-name: 01_ESG Fund Data Scraper
+name: 01_ESG Fund Data Scraper Enhanced
 
 on:
   schedule:
@@ -40,6 +40,8 @@ jobs:
         ls -la
         echo "Installing numpy first to avoid compatibility issues..."
         pip install numpy==1.24.3
+        echo "Installing opencv-python..."
+        pip install opencv-python==4.8.1.78
         echo "Installing playwright..."
         pip install playwright==1.40.0
         echo "Installing other requirements from requirements_esg.txt..."
@@ -56,12 +58,9 @@ jobs:
           pip install openpyxl==3.1.2
           pip install Pillow==10.1.0
           pip install pytesseract==0.3.10
-          pip install opencv-python==4.8.1.78
         fi
         echo "Verifying installations..."
-        pip show numpy
-        pip show pandas
-        pip show playwright
+        pip show numpy pandas playwright opencv-python
         echo "All installed packages:"
         pip list
     
@@ -70,7 +69,6 @@ jobs:
         echo "Installing Playwright browsers..."
         python -m playwright install chromium
         echo "Installing system dependencies..."
-        # Ubuntu 버전에 맞는 의존성 설치
         sudo apt-get update
         sudo apt-get install -y \
           libnss3 \
@@ -94,6 +92,12 @@ jobs:
           libcairo2 \
           libasound2t64 || true
     
+    - name: Create directories
+      run: |
+        mkdir -p data_backup
+        mkdir -p chart_analysis
+        echo "📁 Created directories for data storage"
+    
     - name: Run ESG Fund Scraper
       env:
         GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
@@ -101,7 +105,99 @@ jobs:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
       run: |
+        echo "🚀 Starting ESG Fund Scraper..."
         python esg_krfund_scraper.py
+        echo "✅ Scraper completed"
+    
+    - name: Check generated files
+      run: |
+        echo "📁 Data backup files:"
+        ls -la data_backup/ || echo "No data_backup directory"
+        echo ""
+        echo "📸 Chart analysis files:"
+        ls -la chart_analysis/ || echo "No chart_analysis directory"
+        echo ""
+        echo "📊 Chart analysis summary:"
+        find chart_analysis/ -name "*.html" -exec echo "Found HTML: {}" \;
+        find chart_analysis/ -name "*.png" | wc -l || echo "0" | xargs echo "PNG files count:"
+    
+    - name: Upload Chart Analysis Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: chart-analysis-${{ github.run_number }}
+        path: chart_analysis/
+        retention-days: 30
+        if-no-files-found: warn
+      continue-on-error: true
+    
+    - name: Upload Data Backup Artifacts  
+      uses: actions/upload-artifact@v4
+      with:
+        name: esg-fund-data-${{ github.run_number }}
+        path: data_backup/
+        retention-days: 30
+        if-no-files-found: warn
+      continue-on-error: true
+    
+    - name: Create Summary Report
+      run: |
+        echo "# 📊 ESG Fund Data Collection Summary" > summary.md
+        echo "" >> summary.md
+        echo "## 📅 Collection Info" >> summary.md
+        echo "- **Date:** $(date +'%Y-%m-%d %H:%M:%S')" >> summary.md
+        echo "- **Workflow:** ${{ github.workflow }}" >> summary.md
+        echo "- **Run Number:** ${{ github.run_number }}" >> summary.md
+        echo "" >> summary.md
+        
+        echo "## 📁 Generated Files" >> summary.md
+        echo "" >> summary.md
+        
+        echo "### 📊 Data Files" >> summary.md
+        if [ -d "data_backup" ]; then
+          ls -la data_backup/ | tail -n +2 | while read line; do
+            echo "- $line" >> summary.md
+          done
+        else
+          echo "- No data backup files generated" >> summary.md
+        fi
+        echo "" >> summary.md
+        
+        echo "### 📸 Chart Analysis Files" >> summary.md
+        if [ -d "chart_analysis" ]; then
+          ls -la chart_analysis/ | tail -n +2 | while read line; do
+            echo "- $line" >> summary.md
+          done
+        else
+          echo "- No chart analysis files generated" >> summary.md
+        fi
+        echo "" >> summary.md
+        
+        echo "## 🔍 How to View Images" >> summary.md
+        echo "" >> summary.md
+        echo "1. Go to the **Actions** tab in this repository" >> summary.md
+        echo "2. Click on this workflow run" >> summary.md
+        echo "3. Scroll down to **Artifacts** section" >> summary.md
+        echo "4. Download \`chart-analysis-${{ github.run_number }}\`" >> summary.md
+        echo "5. Extract the zip file and open \`*_analysis_summary.html\` in your browser" >> summary.md
+        echo "" >> summary.md
+        
+        echo "## 📋 Analysis Status" >> summary.md
+        echo "" >> summary.md
+        png_count=$(find chart_analysis/ -name "*.png" 2>/dev/null | wc -l || echo "0")
+        html_count=$(find chart_analysis/ -name "*.html" 2>/dev/null | wc -l || echo "0")
+        echo "- **PNG Images:** $png_count files" >> summary.md
+        echo "- **HTML Reports:** $html_count files" >> summary.md
+        echo "" >> summary.md
+        
+        cat summary.md
+    
+    - name: Upload Summary Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: summary-report-${{ github.run_number }}
+        path: summary.md
+        retention-days: 30
+      continue-on-error: true
     
     - name: Commit and push backup data
       run: |
@@ -112,18 +208,50 @@ jobs:
         git push
       continue-on-error: true  # 백업 실패해도 워크플로우는 성공으로 처리
     
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: esg-fund-data-${{ github.run_number }}
-        path: data_backup/
-        retention-days: 30  # 30일간 보관
+    - name: Send success notification
+      if: success()
+      env:
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+      run: |
+        python -c "
+import requests
+import os
+import glob
+
+bot_token = os.environ.get('TELCO_NEWS_TOKEN')
+chat_id = os.environ.get('TELCO_NEWS_TESTER')
+
+if bot_token and chat_id:
+    # 파일 개수 확인
+    data_files = len(glob.glob('data_backup/*.csv')) if os.path.exists('data_backup') else 0
+    chart_files = len(glob.glob('chart_analysis/*.png')) if os.path.exists('chart_analysis') else 0
+    html_files = len(glob.glob('chart_analysis/*.html')) if os.path.exists('chart_analysis') else 0
     
-    - name: Send notification on failure
+    message = f'''✅ ESG Fund 데이터 수집 성공!
+
+📊 수집 결과:
+• 데이터 파일: {data_files}개 
+• 차트 이미지: {chart_files}개
+• HTML 보고서: {html_files}개
+
+🔍 이미지 확인 방법:
+1. GitHub Actions → 이 실행 → Artifacts
+2. chart-analysis-${{ github.run_number }} 다운로드  
+3. HTML 파일을 브라우저에서 열기
+
+📅 실행 시간: $(date +'%Y-%m-%d %H:%M:%S')'''
+    
+    requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', 
+                  data={'chat_id': chat_id, 'text': message})
+"
+      continue-on-error: true
+    
+    - name: Send failure notification
       if: failure()
       env:
         TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
         TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
       run: |
-        python -c "import requests, os; bot_token = os.environ.get('TELCO_NEWS_TOKEN'); chat_id = os.environ.get('TELCO_NEWS_TESTER'); requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', data={'chat_id': chat_id, 'text': '❌ ESG Fund 데이터 수집 워크플로우 실패!'}) if bot_token and chat_id else None"
+        python -c "import requests, os; bot_token = os.environ.get('TELCO_NEWS_TOKEN'); chat_id = os.environ.get('TELCO_NEWS_TESTER'); requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', data={'chat_id': chat_id, 'text': '❌ ESG Fund 데이터 수집 워크플로우 실패!\n\n🔍 GitHub Actions에서 로그를 확인하세요.'}) if bot_token and chat_id else None"
       continue-on-error: true
