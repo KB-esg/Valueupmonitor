@@ -9,9 +9,12 @@ import os
 import requests
 import time
 import re
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance
 import pytesseract
 import numpy as np
+import cv2
+import base64
+from io import BytesIO
 
 class ESGFundScraper:
     def __init__(self):
@@ -19,26 +22,151 @@ class ESGFundScraper:
         self.telegram_bot_token = os.environ.get('TELCO_NEWS_TOKEN')
         self.telegram_chat_id = os.environ.get('TELCO_NEWS_TESTER')
         
-    async def fetch_tab_data(self, page, tab_value, tab_name):
-        """특정 탭의 데이터 가져오기"""
-        print(f"Fetching data for {tab_name}...")
-        
-        # 탭 클릭
-        await page.click(f'button[value="{tab_value}"]')
-        await page.wait_for_timeout(3000)  # 데이터 로딩 대기
-        
-        # 데이터 추출
-        data = {
-            'tab_name': tab_name,
-            'top_funds': await self.parse_top_funds(page),
-            'new_funds': await self.parse_new_funds(page),
-            'chart_data': await self.parse_chart_data_with_hover_ocr(page, tab_name)
-        }
-        
-        return data
+    def display_image_info(self, image_path, description=""):
+        """이미지 정보를 표시하고 확인 방법 안내"""
+        try:
+            # PIL로 이미지 열기
+            img = Image.open(image_path)
+            width, height = img.size
+            file_size = os.path.getsize(image_path)
+            
+            print(f"\n📸 {description}: {os.path.basename(image_path)}")
+            print(f"   📏 크기: {width}x{height} pixels")
+            print(f"   💾 파일 크기: {file_size:,} bytes")
+            print(f"   📂 경로: {os.path.abspath(image_path)}")
+            
+            # GitHub Actions 환경에서는 아티팩트로 저장됨을 안내
+            if os.environ.get('GITHUB_ACTIONS'):
+                print(f"   ☁️  GitHub Actions에서 실행 중 - 아티팩트에서 확인 가능")
+            else:
+                print(f"   🖱️  로컬에서 파일을 직접 열어서 확인 가능")
+                
+            # 이미지 히스토그램 간단 분석 (차트 데이터 유무 확인용)
+            img_gray = img.convert('L')
+            histogram = img_gray.histogram()
+            
+            # 밝은 픽셀과 어두운 픽셀 비율로 차트 복잡도 추정
+            bright_pixels = sum(histogram[200:])  # 밝은 픽셀
+            dark_pixels = sum(histogram[:100])    # 어두운 픽셀
+            total_pixels = width * height
+            
+            bright_ratio = bright_pixels / total_pixels * 100
+            dark_ratio = dark_pixels / total_pixels * 100
+            
+            print(f"   🎨 밝은 영역: {bright_ratio:.1f}% | 어두운 영역: {dark_ratio:.1f}%")
+            
+            # 차트 라인 추정 (중간 밝기 픽셀)
+            line_pixels = sum(histogram[100:200])
+            line_ratio = line_pixels / total_pixels * 100
+            print(f"   📈 예상 차트 라인 영역: {line_ratio:.1f}%")
+            
+            if line_ratio > 10:
+                print(f"   ✅ 충분한 차트 데이터가 감지됨")
+            else:
+                print(f"   ⚠️  차트 데이터가 부족할 수 있음")
+                
+        except Exception as e:
+            print(f"❌ Error analyzing image: {e}")
     
-    async def parse_chart_data_with_hover_ocr(self, page, tab_name):
-        """마우스 호버 + 스크린샷 + OCR을 통한 차트 데이터 추출"""
+    def create_image_summary_html(self, screenshot_dir, tab_name):
+        """분석된 이미지들의 HTML 요약 파일 생성"""
+        try:
+            html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chart Analysis - {tab_name}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .image-section {{ margin: 20px 0; border: 1px solid #ddd; padding: 15px; }}
+        .image-section h3 {{ color: #333; margin-top: 0; }}
+        .image-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+        .image-item {{ text-align: center; }}
+        .image-item img {{ max-width: 100%; height: auto; border: 1px solid #ccc; }}
+        .image-item p {{ margin: 10px 0; font-size: 14px; color: #666; }}
+        .timestamp {{ color: #888; font-size: 12px; }}
+    </style>
+</head>
+<body>
+    <h1>ESG Fund Chart Analysis - {tab_name}</h1>
+    <p class="timestamp">Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    
+    <div class="image-section">
+        <h3>📊 Full Chart</h3>
+        <div class="image-grid">
+            <div class="image-item">
+                <img src="{tab_name}_full_chart.png" alt="Full Chart">
+                <p>전체 차트 이미지</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="image-section">
+        <h3>📏 Axis Analysis</h3>
+        <div class="image-grid">
+            <div class="image-item">
+                <img src="{tab_name}_left_y_axis.png" alt="Left Y Axis">
+                <p>왼쪽 Y축 (설정액)</p>
+            </div>
+            <div class="image-item">
+                <img src="{tab_name}_right_y_axis.png" alt="Right Y Axis">
+                <p>오른쪽 Y축 (수익률)</p>
+            </div>
+            <div class="image-item">
+                <img src="{tab_name}_x_axis.png" alt="X Axis">
+                <p>X축 (날짜)</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="image-section">
+        <h3>🎯 Chart Area & Line Detection</h3>
+        <div class="image-grid">
+            <div class="image-item">
+                <img src="{tab_name}_chart_area_pil.png" alt="Chart Area">
+                <p>순수 차트 영역</p>
+            </div>
+            <div class="image-item">
+                <img src="{tab_name}_blue_mask.png" alt="Blue Mask">
+                <p>파란색 라인 마스크 (설정액)</p>
+            </div>
+            <div class="image-item">
+                <img src="{tab_name}_red_mask.png" alt="Red Mask">
+                <p>빨간색 라인 마스크 (수익률)</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="image-section">
+        <h3>📋 Analysis Instructions</h3>
+        <ol>
+            <li><strong>Full Chart:</strong> 전체 차트의 모습을 확인</li>
+            <li><strong>Y-Axis:</strong> 왼쪽은 설정액 범위, 오른쪽은 수익률 범위 확인</li>
+            <li><strong>X-Axis:</strong> 날짜 범위 및 OCR 정확도 확인</li>
+            <li><strong>Chart Area:</strong> 실제 데이터 라인이 있는 영역</li>
+            <li><strong>Color Masks:</strong> 각 라인별 색상 분리가 잘 되었는지 확인</li>
+        </ol>
+        <p><strong>⚠️ 주의사항:</strong> 마스크에서 라인이 명확하지 않으면 색상 범위 조정이 필요합니다.</p>
+    </div>
+</body>
+</html>
+"""
+            
+            html_path = f'{screenshot_dir}/{tab_name}_analysis_summary.html'
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"📄 HTML 요약 파일 생성: {html_path}")
+            print(f"   🌐 브라우저에서 확인: file://{os.path.abspath(html_path)}")
+            
+            return html_path
+            
+        except Exception as e:
+            print(f"❌ Error creating HTML summary: {e}")
+            return None
+    
+    async def extract_chart_data_with_ocr_analysis(self, page, tab_name):
+        """차트 이미지 OCR과 좌표 분석을 통한 데이터 추출"""
         chart_data = {
             'dates': [],
             'setup_amounts': [],
@@ -58,155 +186,421 @@ class ESGFundScraper:
                 print("Could not get chart bounding box")
                 return chart_data
             
-            print(f"Chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
+            print(f"📊 Chart area: x={box['x']}, y={box['y']}, width={box['width']}, height={box['height']}")
             
             # 스크린샷 저장 디렉토리
-            screenshot_dir = 'chart_screenshots'
+            screenshot_dir = 'chart_analysis'
             if not os.path.exists(screenshot_dir):
                 os.makedirs(screenshot_dir)
             
-            # 차트의 중간 높이 (Y축)
-            hover_y = box['y'] + box['height'] / 2
+            # 전체 차트 스크린샷 (Y축 레이블 포함하여 더 넓게)
+            chart_screenshot_path = f'{screenshot_dir}/{tab_name}_full_chart.png'
+            await page.screenshot(
+                path=chart_screenshot_path,
+                clip={
+                    'x': max(0, box['x'] - 100),  # 왼쪽 Y축 포함
+                    'y': max(0, box['y'] - 50),   # 위쪽 여백
+                    'width': box['width'] + 200,  # 오른쪽 Y축 포함
+                    'height': box['height'] + 100 # 아래쪽 X축 포함
+                }
+            )
             
-            # X축을 따라 이동하며 데이터 수집
-            num_points = 15  # 차트를 15개 구간으로 나누어 호버
-            step = box['width'] / num_points
+            print(f"📷 Chart screenshot saved: {chart_screenshot_path}")
+            self.display_image_info(chart_screenshot_path, "전체 차트 스크린샷")
             
-            collected_data = []
+            # 이미지 전처리 및 분석
+            chart_image = Image.open(chart_screenshot_path)
+            chart_data = await self.analyze_chart_image(chart_image, tab_name, screenshot_dir)
             
-            for i in range(num_points):
-                hover_x = box['x'] + (i * step) + 20  # 왼쪽 여백 고려
-                
-                # 마우스를 해당 위치로 이동
-                await page.mouse.move(hover_x, hover_y)
-                await page.wait_for_timeout(500)  # 툴팁이 나타날 시간 대기
-                
-                # 현재 화면 스크린샷
-                screenshot_path = f'{screenshot_dir}/{tab_name}_hover_{i}.png'
-                await page.screenshot(path=screenshot_path)
-                
-                # PIL로 이미지 열기
-                img = Image.open(screenshot_path)
-                
-                # 툴팁이 나타날 가능성이 있는 영역 확대
-                # 마우스 위치 주변 영역을 크롭
-                tooltip_area = img.crop((
-                    max(0, int(hover_x - 150)),
-                    max(0, int(hover_y - 100)),
-                    min(img.width, int(hover_x + 150)),
-                    min(img.height, int(hover_y + 100))
-                ))
-                
-                # 툴팁 영역 저장 (디버깅용)
-                tooltip_path = f'{screenshot_dir}/{tab_name}_tooltip_{i}.png'
-                tooltip_area.save(tooltip_path)
-                
-                # OCR 수행
-                custom_config = r'--oem 3 --psm 6'
-                tooltip_text = pytesseract.image_to_string(tooltip_area, lang='kor+eng', config=custom_config)
-                
-                if tooltip_text.strip():
-                    print(f"Point {i} OCR result: {tooltip_text.strip()}")
-                    
-                    # 데이터 파싱
-                    data_point = {}
-                    lines = tooltip_text.strip().split('\n')
-                    
-                    for line in lines:
-                        # 날짜 패턴 (YYYY.MM.DD)
-                        date_match = re.search(r'(\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})', line)
-                        if date_match:
-                            # 공백 제거하고 점으로 통일
-                            date_str = re.sub(r'\s+', '', date_match.group(1))
-                            date_str = re.sub(r'\.+', '.', date_str)
-                            if len(date_str.split('.')) == 3:
-                                data_point['date'] = date_str
-                        
-                        # 설정액 패턴 (숫자,숫자 억원)
-                        amount_match = re.search(r'([\d,]+\.?\d*)\s*억원', line)
-                        if amount_match:
-                            value = amount_match.group(1).replace(',', '').replace(' ', '')
-                            try:
-                                data_point['setup_amount'] = float(value)
-                            except:
-                                pass
-                        
-                        # 수익률 패턴 (숫자%)
-                        if '수익률' in line or '%' in line:
-                            rate_match = re.search(r'([-+]?\d+\.?\d*)\s*%', line)
-                            if rate_match:
-                                try:
-                                    data_point['return_rate'] = float(rate_match.group(1))
-                                except:
-                                    pass
-                    
-                    if data_point and 'date' in data_point:
-                        # 중복 제거
-                        if data_point['date'] not in [d.get('date') for d in collected_data]:
-                            collected_data.append(data_point)
-                            print(f"Collected data point: {data_point}")
-                
-                # 스크린샷 파일 삭제 (공간 절약)
-                try:
-                    os.remove(screenshot_path)
-                except:
-                    pass
-            
-            # 수집된 데이터 정리
-            if collected_data:
-                # 날짜순 정렬
-                collected_data.sort(key=lambda x: x.get('date', ''))
-                
-                for data in collected_data:
-                    if 'date' in data:
-                        chart_data['dates'].append(data['date'])
-                    if 'setup_amount' in data:
-                        chart_data['setup_amounts'].append(data['setup_amount'])
-                    else:
-                        chart_data['setup_amounts'].append(None)
-                    if 'return_rate' in data:
-                        chart_data['returns'].append(data['return_rate'])
-                    else:
-                        chart_data['returns'].append(None)
-                
-                print(f"Total collected {len(collected_data)} data points through hover + OCR")
-            
-            # 데이터가 없는 경우 X축에서 날짜만이라도 추출
-            if not chart_data['dates']:
-                print("Hover + OCR failed, extracting dates from X-axis")
-                
-                # 전체 차트 영역 OCR
-                full_chart_img = img.crop((
-                    int(box['x']),
-                    int(box['y']),
-                    int(box['x'] + box['width']),
-                    int(box['y'] + box['height'] + 50)
-                ))
-                
-                chart_text = pytesseract.image_to_string(full_chart_img, lang='kor+eng', config=custom_config)
-                
-                # X축 날짜 추출
-                date_pattern = r'(\d{4}[.\s]+\d{1,2}[.\s]+\d{1,2})'
-                dates = re.findall(date_pattern, chart_text)
-                
-                for date_str in dates:
-                    # 공백 제거하고 점으로 통일
-                    clean_date = re.sub(r'\s+', '', date_str)
-                    clean_date = re.sub(r'\.+', '.', clean_date)
-                    if len(clean_date.split('.')) == 3 and clean_date not in chart_data['dates']:
-                        chart_data['dates'].append(clean_date)
-                
-                if chart_data['dates']:
-                    print(f"Extracted {len(chart_data['dates'])} dates from full chart OCR")
-                    chart_data['setup_amounts'] = [None] * len(chart_data['dates'])
-                    chart_data['returns'] = [None] * len(chart_data['dates'])
+            # HTML 요약 파일 생성
+            self.create_image_summary_html(screenshot_dir, tab_name)
             
         except Exception as e:
-            print(f"Error in hover + OCR data collection: {e}")
+            print(f"❌ Error in chart OCR analysis: {e}")
             import traceback
             traceback.print_exc()
         
         return chart_data
+    
+    async def analyze_chart_image(self, chart_image, tab_name, screenshot_dir):
+        """차트 이미지 분석 및 데이터 추출"""
+        chart_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
+        
+        try:
+            # 이미지를 numpy 배열로 변환
+            img_array = np.array(chart_image)
+            
+            # 1. Y축 값들 추출
+            y_axis_values = self.extract_y_axis_values(chart_image, screenshot_dir, tab_name)
+            
+            # 2. X축 날짜들 추출
+            x_axis_dates = self.extract_x_axis_dates(chart_image, screenshot_dir, tab_name)
+            
+            # 3. 차트 라인 좌표 추출
+            line_coordinates = self.extract_chart_lines(chart_image, screenshot_dir, tab_name)
+            
+            # 4. 좌표와 Y축 값을 이용한 실제 값 계산
+            if y_axis_values and line_coordinates and x_axis_dates:
+                calculated_data = self.calculate_values_from_coordinates(
+                    line_coordinates, y_axis_values, x_axis_dates
+                )
+                chart_data.update(calculated_data)
+            
+        except Exception as e:
+            print(f"❌ Error analyzing chart image: {e}")
+        
+        return chart_data
+    
+    def extract_y_axis_values(self, image, screenshot_dir, tab_name):
+        """Y축 값들 추출"""
+        y_axis_data = {
+            'left_axis': [],  # 설정액 (억원)
+            'right_axis': [], # 수익률 (%)
+            'left_coords': [],
+            'right_coords': []
+        }
+        
+        try:
+            width, height = image.size
+            
+            # 왼쪽 Y축 영역 (설정액)
+            left_y_axis = image.crop((0, 0, int(width * 0.15), height))
+            left_y_path = f'{screenshot_dir}/{tab_name}_left_y_axis.png'
+            left_y_axis.save(left_y_path)
+            
+            print(f"📊 Left Y-axis cropped and saved: {left_y_path}")
+            self.display_image_info(left_y_path, "왼쪽 Y축 (설정액)")
+            
+            # 오른쪽 Y축 영역 (수익률)
+            right_y_axis = image.crop((int(width * 0.85), 0, width, height))
+            right_y_path = f'{screenshot_dir}/{tab_name}_right_y_axis.png'
+            right_y_axis.save(right_y_path)
+            
+            print(f"📊 Right Y-axis cropped and saved: {right_y_path}")
+            self.display_image_info(right_y_path, "오른쪽 Y축 (수익률)")
+            
+            # OCR로 Y축 값들 추출
+            custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,%'
+            
+            # 왼쪽 Y축 값들 (설정액)
+            left_text = pytesseract.image_to_string(left_y_axis, config=custom_config)
+            print(f"🔍 Left Y-axis OCR result: {repr(left_text)}")
+            
+            left_values = []
+            for line in left_text.split('\n'):
+                # 숫자 패턴 찾기 (쉼표 포함)
+                numbers = re.findall(r'[\d,]+\.?\d*', line.strip())
+                for num_str in numbers:
+                    try:
+                        value = float(num_str.replace(',', ''))
+                        if value > 1000:  # 설정액은 보통 큰 수
+                            left_values.append(value)
+                    except:
+                        pass
+            
+            # 오른쪽 Y축 값들 (수익률)
+            right_text = pytesseract.image_to_string(right_y_axis, config=custom_config)
+            print(f"🔍 Right Y-axis OCR result: {repr(right_text)}")
+            
+            right_values = []
+            for line in right_text.split('\n'):
+                numbers = re.findall(r'[\d.]+', line.strip())
+                for num_str in numbers:
+                    try:
+                        value = float(num_str)
+                        if 0 <= value <= 10:  # 수익률은 보통 작은 수
+                            right_values.append(value)
+                    except:
+                        pass
+            
+            y_axis_data['left_axis'] = sorted(set(left_values), reverse=True)  # 위에서 아래로
+            y_axis_data['right_axis'] = sorted(set(right_values), reverse=True)
+            
+            print(f"📈 Extracted left Y-axis values (설정액): {y_axis_data['left_axis']}")
+            print(f"📈 Extracted right Y-axis values (수익률): {y_axis_data['right_axis']}")
+            
+        except Exception as e:
+            print(f"❌ Error extracting Y-axis values: {e}")
+        
+        return y_axis_data
+    
+    def extract_x_axis_dates(self, image, screenshot_dir, tab_name):
+        """X축 날짜들 추출"""
+        dates = []
+        
+        try:
+            width, height = image.size
+            
+            # X축 영역 (아래쪽)
+            x_axis = image.crop((0, int(height * 0.85), width, height))
+            x_axis_path = f'{screenshot_dir}/{tab_name}_x_axis.png'
+            x_axis.save(x_axis_path)
+            
+            print(f"📅 X-axis cropped and saved: {x_axis_path}")
+            self.display_image_info(x_axis_path, "X축 (날짜)")
+            
+            # OCR로 날짜 추출
+            custom_config = r'--oem 3 --psm 6'
+            x_text = pytesseract.image_to_string(x_axis, lang='kor+eng', config=custom_config)
+            print(f"🔍 X-axis OCR result: {repr(x_text)}")
+            
+            # 날짜 패턴 찾기
+            date_pattern = r'(\d{4})[.\s]+(\d{1,2})[.\s]+(\d{1,2})'
+            date_matches = re.findall(date_pattern, x_text)
+            
+            for year, month, day in date_matches:
+                try:
+                    # 날짜 형식 통일
+                    formatted_date = f"{year}.{month.zfill(2)}.{day.zfill(2)}"
+                    if formatted_date not in dates:
+                        dates.append(formatted_date)
+                except:
+                    pass
+            
+            print(f"📅 Extracted dates: {dates}")
+            
+        except Exception as e:
+            print(f"❌ Error extracting X-axis dates: {e}")
+        
+        return dates
+    
+    def extract_chart_lines(self, image, screenshot_dir, tab_name):
+        """차트 라인의 좌표 추출"""
+        line_coords = {
+            'setup_amount_line': [],  # 설정액 라인 좌표
+            'return_rate_line': []    # 수익률 라인 좌표
+        }
+        
+        try:
+            # OpenCV로 이미지 처리
+            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            
+            # 차트 영역만 추출 (축 제외)
+            height, width = img_cv.shape[:2]
+            chart_area = img_cv[
+                int(height * 0.1):int(height * 0.8),  # Y 범위
+                int(width * 0.15):int(width * 0.85)   # X 범위
+            ]
+            
+            # 차트 영역 저장
+            chart_area_path = f'{screenshot_dir}/{tab_name}_chart_area.png'
+            cv2.imwrite(chart_area_path, chart_area)
+            
+            print(f"📊 Chart area extracted: {chart_area_path}")
+            
+            # PIL로 변환해서 콘솔 표시
+            chart_area_pil = Image.fromarray(cv2.cvtColor(chart_area, cv2.COLOR_BGR2RGB))
+            chart_area_pil.save(f'{screenshot_dir}/{tab_name}_chart_area_pil.png')
+            self.display_image_info(f'{screenshot_dir}/{tab_name}_chart_area_pil.png', "순수 차트 영역")
+            
+            # 라인 색상별로 추출
+            # 파란색 계열 (설정액 - 면적 차트의 라인)
+            blue_mask = self.create_color_mask(chart_area, 'blue')
+            blue_line_coords = self.extract_line_coordinates(blue_mask, 'blue')
+            
+            # 빨간색/주황색 계열 (수익률 - 라인 차트)
+            red_mask = self.create_color_mask(chart_area, 'red')
+            red_line_coords = self.extract_line_coordinates(red_mask, 'red')
+            
+            # 마스크 이미지 저장
+            cv2.imwrite(f'{screenshot_dir}/{tab_name}_blue_mask.png', blue_mask * 255)
+            cv2.imwrite(f'{screenshot_dir}/{tab_name}_red_mask.png', red_mask * 255)
+            
+            print(f"🔵 Blue line coordinates (설정액): {len(blue_line_coords)} points")
+            print(f"🔴 Red line coordinates (수익률): {len(red_line_coords)} points")
+            
+            line_coords['setup_amount_line'] = blue_line_coords
+            line_coords['return_rate_line'] = red_line_coords
+            
+        except Exception as e:
+            print(f"❌ Error extracting chart lines: {e}")
+        
+        return line_coords
+    
+    def create_color_mask(self, image, color_type):
+        """특정 색상의 마스크 생성"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        if color_type == 'blue':
+            # 파란색 범위
+            lower_blue = np.array([100, 50, 50])
+            upper_blue = np.array([130, 255, 255])
+            mask = cv2.inRange(hsv, lower_blue, upper_blue)
+        elif color_type == 'red':
+            # 빨간색/주황색 범위
+            lower_red1 = np.array([0, 50, 50])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 50, 50])
+            upper_red2 = np.array([180, 255, 255])
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            mask = cv2.bitwise_or(mask1, mask2)
+        else:
+            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        
+        return mask
+    
+    def extract_line_coordinates(self, mask, color_name):
+        """마스크에서 라인 좌표 추출"""
+        coordinates = []
+        
+        try:
+            # 형태학적 연산으로 노이즈 제거
+            kernel = np.ones((3, 3), np.uint8)
+            mask_clean = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel)
+            
+            # 컨투어 찾기
+            contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                # 가장 큰 컨투어 선택 (주요 라인)
+                largest_contour = max(contours, key=cv2.contourArea)
+                
+                # X좌표 순으로 정렬된 포인트들 추출
+                points = largest_contour.reshape(-1, 2)
+                points = points[points[:, 0].argsort()]  # X좌표로 정렬
+                
+                # 중복 X좌표 제거하고 평균 Y좌표 계산
+                unique_points = {}
+                for x, y in points:
+                    if x not in unique_points:
+                        unique_points[x] = []
+                    unique_points[x].append(y)
+                
+                for x in sorted(unique_points.keys()):
+                    avg_y = np.mean(unique_points[x])
+                    coordinates.append((x, avg_y))
+            
+        except Exception as e:
+            print(f"❌ Error extracting {color_name} line coordinates: {e}")
+        
+        return coordinates
+    
+    def calculate_values_from_coordinates(self, line_coordinates, y_axis_values, x_axis_dates):
+        """좌표와 Y축 값을 이용한 실제 값 계산"""
+        calculated_data = {
+            'dates': [],
+            'setup_amounts': [],
+            'returns': []
+        }
+        
+        try:
+            setup_line = line_coordinates.get('setup_amount_line', [])
+            return_line = line_coordinates.get('return_rate_line', [])
+            left_y_values = y_axis_values.get('left_axis', [])
+            right_y_values = y_axis_values.get('right_axis', [])
+            
+            if not (setup_line or return_line) or not x_axis_dates:
+                print("⚠️ Insufficient data for calculation")
+                return calculated_data
+            
+            print(f"🧮 Calculating values from coordinates...")
+            print(f"   Setup line points: {len(setup_line)}")
+            print(f"   Return line points: {len(return_line)}")
+            print(f"   Available dates: {len(x_axis_dates)}")
+            print(f"   Left Y values: {left_y_values}")
+            print(f"   Right Y values: {right_y_values}")
+            
+            # 날짜 기준으로 보간
+            for i, date in enumerate(x_axis_dates):
+                calculated_data['dates'].append(date)
+                
+                # X 좌표 비율 계산 (날짜 인덱스 기반)
+                x_ratio = i / max(1, len(x_axis_dates) - 1)
+                
+                # 설정액 계산
+                if setup_line and left_y_values:
+                    setup_amount = self.interpolate_value_from_line(
+                        setup_line, x_ratio, left_y_values, 'setup'
+                    )
+                    calculated_data['setup_amounts'].append(setup_amount)
+                else:
+                    calculated_data['setup_amounts'].append(None)
+                
+                # 수익률 계산
+                if return_line and right_y_values:
+                    return_rate = self.interpolate_value_from_line(
+                        return_line, x_ratio, right_y_values, 'return'
+                    )
+                    calculated_data['returns'].append(return_rate)
+                else:
+                    calculated_data['returns'].append(None)
+            
+            print(f"✅ Calculated {len(calculated_data['dates'])} data points")
+            
+        except Exception as e:
+            print(f"❌ Error calculating values: {e}")
+        
+        return calculated_data
+    
+    def interpolate_value_from_line(self, line_coords, x_ratio, y_values, value_type):
+        """라인 좌표에서 특정 X 비율에 해당하는 Y값 보간"""
+        try:
+            if not line_coords or not y_values or len(y_values) < 2:
+                return None
+            
+            # X 좌표를 0-1 비율로 정규화
+            x_coords = [coord[0] for coord in line_coords]
+            y_coords = [coord[1] for coord in line_coords]
+            
+            if not x_coords:
+                return None
+            
+            x_min, x_max = min(x_coords), max(x_coords)
+            target_x = x_min + (x_max - x_min) * x_ratio
+            
+            # 가장 가까운 두 점 찾기
+            closest_idx = 0
+            min_distance = abs(x_coords[0] - target_x)
+            
+            for i, x_coord in enumerate(x_coords):
+                distance = abs(x_coord - target_x)
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_idx = i
+            
+            # Y 좌표 가져오기
+            y_coord = y_coords[closest_idx]
+            
+            # Y축 값 범위와 비교하여 실제 값 계산
+            y_min_value = min(y_values)
+            y_max_value = max(y_values)
+            
+            # Y 좌표를 0-1 비율로 정규화 (이미지에서는 위쪽이 0이므로 반전)
+            chart_height = max(y_coords) - min(y_coords) if len(set(y_coords)) > 1 else 1
+            y_ratio = 1 - ((y_coord - min(y_coords)) / chart_height)
+            
+            # 실제 값 계산
+            actual_value = y_min_value + (y_max_value - y_min_value) * y_ratio
+            
+            return round(actual_value, 2)
+            
+        except Exception as e:
+            print(f"❌ Error interpolating {value_type} value: {e}")
+            return None
+    
+    async def fetch_tab_data(self, page, tab_value, tab_name):
+        """특정 탭의 데이터 가져오기"""
+        print(f"🔍 Fetching data for {tab_name}...")
+        
+        # 탭 클릭
+        await page.click(f'button[value="{tab_value}"]')
+        await page.wait_for_timeout(3000)  # 데이터 로딩 대기
+        
+        # 데이터 추출
+        data = {
+            'tab_name': tab_name,
+            'top_funds': await self.parse_top_funds(page),
+            'new_funds': await self.parse_new_funds(page),
+            'chart_data': await self.extract_chart_data_with_ocr_analysis(page, tab_name)
+        }
+        
+        return data
     
     async def parse_top_funds(self, page):
         """Top 펀드 데이터 파싱"""
@@ -291,52 +685,6 @@ class ESGFundScraper:
         
         return new_funds_data
     
-    async def parse_chart_data_from_svg(self, page):
-        """SVG 차트에서 날짜 추출 (X축 레이블)"""
-        chart_data = {
-            'dates': [],
-            'setup_amounts': [],
-            'returns': []
-        }
-        
-        try:
-            # X축 레이블에서 날짜 추출
-            x_axis_texts = await page.query_selector_all('.highcharts-xaxis-labels text')
-            for text_elem in x_axis_texts:
-                date_text = await text_elem.inner_text()
-                if date_text and '.' in date_text:  # 날짜 형식 확인
-                    chart_data['dates'].append(date_text.strip())
-            
-            # Y축 값들 추출 (참고용)
-            y_axis_texts = await page.query_selector_all('.highcharts-yaxis-labels text')
-            setup_amounts_range = []
-            returns_range = []
-            
-            for i, text_elem in enumerate(y_axis_texts):
-                value_text = await text_elem.inner_text()
-                if value_text:
-                    # 첫 번째 Y축은 설정액, 두 번째 Y축은 수익률
-                    value = value_text.replace(',', '').replace('%', '')
-                    try:
-                        if i < 7:  # 첫 번째 Y축 (설정액)
-                            setup_amounts_range.append(float(value))
-                        else:  # 두 번째 Y축 (수익률)
-                            returns_range.append(float(value))
-                    except:
-                        pass
-            
-            print(f"Found {len(chart_data['dates'])} dates from chart")
-            print(f"Date range: {chart_data['dates'][0] if chart_data['dates'] else 'N/A'} ~ "
-                  f"{chart_data['dates'][-1] if chart_data['dates'] else 'N/A'}")
-            
-            # 차트의 path 요소에서 실제 데이터 포인트 추정 (복잡한 작업)
-            # 현재는 날짜만 추출
-            
-        except Exception as e:
-            print(f"Error parsing SVG chart: {e}")
-        
-        return chart_data
-    
     async def scrape_all_tabs(self):
         """모든 탭의 데이터 수집"""
         all_data = {}
@@ -363,7 +711,7 @@ class ESGFundScraper:
                     await page.wait_for_timeout(1000)  # 탭 간 대기
                 
             except Exception as e:
-                print(f"Error during scraping: {e}")
+                print(f"❌ Error during scraping: {e}")
                 await self.send_telegram_message(f"❌ ESG 펀드 데이터 수집 중 오류 발생: {str(e)}")
                 raise
             finally:
@@ -426,7 +774,7 @@ class ESGFundScraper:
                     chart_df['tab_type'] = tab_name
                     chart_df['collection_time'] = collection_time
                     dfs[df_key] = chart_df
-                    print(f"Created chart dataframe for {tab_name} with {min_length} rows")
+                    print(f"✅ Created chart dataframe for {tab_name} with {min_length} rows")
         
         return dfs
     
@@ -438,25 +786,20 @@ class ESGFundScraper:
         
         creds_json = os.environ.get('GOOGLE_SERVICE')
         if not creds_json:
-            print("No Google Sheets credentials found")
-            print("Looking for GOOGLE_SERVICE environment variable")
-            print("Available environment variables:", list(os.environ.keys()))
+            print("❌ No Google Sheets credentials found")
             return []
         
         try:
             creds_dict = json.loads(creds_json)
-            # 서비스 계정 이메일 주소 출력
             service_account_email = creds_dict.get('client_email', 'Unknown')
-            print(f"Using service account: {service_account_email}")
-            print(f"Please make sure this email has edit access to your Google Sheets")
+            print(f"📧 Using service account: {service_account_email}")
             
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             client = gspread.authorize(creds)
             
             sheet_id = os.environ.get('KRFUND_SPREADSHEET_ID')
             if not sheet_id:
-                print("No Google Sheet ID found")
-                print("Available environment variables:", list(os.environ.keys()))
+                print("❌ No Google Sheet ID found")
                 return []
                 
             spreadsheet = client.open_by_key(sheet_id)
@@ -503,15 +846,15 @@ class ESGFundScraper:
                     worksheet.update([combined_df.columns.values.tolist()] + combined_df.values.tolist())
                     
                     updated_sheets.append(sheet_name)
-                    print(f"Successfully updated {sheet_name}")
+                    print(f"✅ Successfully updated {sheet_name}")
                     
                 except Exception as e:
-                    print(f"Error updating {sheet_name}: {e}")
+                    print(f"❌ Error updating {sheet_name}: {e}")
                     
             return updated_sheets
             
         except Exception as e:
-            print(f"Error in save_to_sheets: {e}")
+            print(f"❌ Error in save_to_sheets: {e}")
             return []
     
     def save_backup(self, dfs):
@@ -533,7 +876,7 @@ class ESGFundScraper:
     def send_telegram_message(self, message):
         """Telegram 메시지 전송"""
         if not self.telegram_bot_token or not self.telegram_chat_id:
-            print("Telegram credentials not found")
+            print("❌ Telegram credentials not found")
             return
         
         try:
@@ -546,12 +889,12 @@ class ESGFundScraper:
             response = requests.post(url, data=data)
             response.raise_for_status()
         except Exception as e:
-            print(f"Error sending Telegram message: {e}")
+            print(f"❌ Error sending Telegram message: {e}")
     
     async def run(self):
         """전체 프로세스 실행"""
         start_time = time.time()
-        print(f"Starting ESG Fund data collection at {datetime.now()}")
+        print(f"🚀 Starting ESG Fund data collection at {datetime.now()}")
         
         try:
             # 1. 모든 탭 데이터 수집
@@ -584,13 +927,13 @@ class ESGFundScraper:
 
 *수집 항목:*
 - SRI 펀드
-- ESG 주식형 펀드
+- ESG 주식형 펀드  
 - ESG 채권형 펀드
 
-각 항목별 수익률 TOP5, 설정액증가 TOP5, 신규펀드 데이터 수집 완료"""
+각 항목별 수익률 TOP5, 설정액증가 TOP5, 신규펀드, 일별 차트 데이터 수집 완료"""
             
             self.send_telegram_message(message)
-            print("Data collection completed successfully")
+            print("✅ Data collection completed successfully")
             
         except Exception as e:
             error_message = f"""❌ *ESG 펀드 데이터 수집 실패*
@@ -601,7 +944,7 @@ class ESGFundScraper:
 관리자에게 확인을 요청하세요."""
             
             self.send_telegram_message(error_message)
-            print(f"Data collection failed: {e}")
+            print(f"❌ Data collection failed: {e}")
             raise
 
 if __name__ == "__main__":
