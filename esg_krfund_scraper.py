@@ -1017,25 +1017,97 @@ class ESGFundScraper:
                         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=5000, cols=20)
                     
                     if df_key == 'daily_chart':
-                        # 일별 차트는 특별한 처리 (최신 데이터가 위로)
+                        # 일별 차트 - 기존 차트 참조를 보호하면서 업데이트
                         existing_data = worksheet.get_all_records()
                         
                         if existing_data:
                             existing_df = pd.DataFrame(existing_data)
-                            # 새 데이터와 결합
-                            combined_df = pd.concat([df, existing_df], ignore_index=True)
-                            # 중복 제거 (날짜, 탭, 기간으로)
-                            combined_df = combined_df.drop_duplicates(
-                                subset=['date', 'tab_type', 'collection_period'], 
-                                keep='first'
-                            )
-                            # 날짜 역순 정렬 (최신이 위로)
-                            combined_df = combined_df.sort_values(
-                                by=['collection_date', 'date', 'tab_type'], 
-                                ascending=[False, False, True]
-                            )
+                            
+                            # 기존 데이터에 없는 새 데이터만 필터링
+                            merge_keys = ['date', 'tab_type', 'collection_period']
+                            
+                            # 비교를 위한 키 생성
+                            existing_keys = set()
+                            for _, row in existing_df.iterrows():
+                                key = '|'.join([str(row[k]) for k in merge_keys])
+                                existing_keys.add(key)
+                            
+                            new_rows_list = []
+                            for _, row in df.iterrows():
+                                key = '|'.join([str(row[k]) for k in merge_keys])
+                                if key not in existing_keys:
+                                    new_rows_list.append(row.to_dict())
+                            
+                            if new_rows_list:
+                                new_rows = pd.DataFrame(new_rows_list)
+                                print(f"   📝 Found {len(new_rows)} new rows for daily chart")
+                                
+                                # 옵션 1: 새 데이터만 끝에 추가 (차트 참조 안전)
+                                # 가장 안전하지만 정렬이 깨질 수 있음
+                                if os.environ.get('PRESERVE_CHART_REFS', 'true').lower() == 'true':
+                                    # 기존 데이터 끝에 새 데이터 추가
+                                    row_to_append = len(existing_data) + 2  # 헤더 포함
+                                    
+                                    # 새 데이터를 날짜 내림차순으로 정렬
+                                    new_rows = new_rows.sort_values(
+                                        by=['date', 'tab_type'], 
+                                        ascending=[False, True]
+                                    )
+                                    
+                                    # 새 행 추가
+                                    new_values = new_rows.values.tolist()
+                                    for i in range(len(new_values)):
+                                        for j in range(len(new_values[i])):
+                                            new_values[i][j] = str(new_values[i][j])
+                                    
+                                    # append_rows 사용
+                                    worksheet.append_rows(new_values, value_input_option='RAW')
+                                    print(f"   ✅ Appended {len(new_rows)} new rows (preserving chart references)")
+                                    
+                                    # 정렬 안내 메시지
+                                    print(f"   ℹ️ Note: Data is appended to preserve chart references. Manual sorting may be needed.")
+                                
+                                # 옵션 2: 전체 재정렬 (차트 참조가 깨질 수 있음)
+                                else:
+                                    # 새 데이터와 기존 데이터 결합
+                                    combined_df = pd.concat([new_rows, existing_df], ignore_index=True)
+                                    
+                                    # 전체 데이터를 날짜 내림차순으로 정렬
+                                    combined_df = combined_df.sort_values(
+                                        by=['date', 'tab_type'], 
+                                        ascending=[False, True]
+                                    )
+                                    
+                                    # 시트 업데이트
+                                    worksheet.clear()
+                                    values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                                    
+                                    for i in range(len(values)):
+                                        for j in range(len(values[i])):
+                                            values[i][j] = str(values[i][j])
+                                    
+                                    worksheet.update(values)
+                                    print(f"   ✅ Daily chart updated with total {len(combined_df)} rows (sorted)")
+                            else:
+                                print(f"   ℹ️ No new data to add to daily chart")
+                                continue
+                                
                         else:
+                            # 첫 데이터인 경우
                             combined_df = df
+                            combined_df = combined_df.sort_values(
+                                by=['date', 'tab_type'], 
+                                ascending=[False, True]
+                            )
+                            
+                            worksheet.clear()
+                            values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                            
+                            for i in range(len(values)):
+                                for j in range(len(values[i])):
+                                    values[i][j] = str(values[i][j])
+                            
+                            worksheet.update(values)
                             
                     elif df_key == 'chart_comparison':
                         # 비교 검증 데이터는 매번 새로 쓰기
