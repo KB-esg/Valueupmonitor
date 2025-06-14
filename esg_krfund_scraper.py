@@ -3,7 +3,7 @@ from playwright.async_api import async_playwright
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 import requests
@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageEnhance
 import pytesseract
 import numpy as np
 import cv2
+import glob
 
 class ESGFundScraper:
     def __init__(self):
@@ -153,7 +154,7 @@ class ESGFundScraper:
             
             if chart_data and chart_data.get('dates'):
                 print(f"📊 JavaScript extraction successful!")
-                print(f"   Dates: {chart_data['dates']}")
+                print(f"   Dates: {len(chart_data['dates'])} items")
                 print(f"   Setup amounts count: {len(chart_data.get('setup_amounts', []))}")
                 print(f"   Returns count: {len(chart_data.get('returns', []))}")
                 
@@ -207,12 +208,13 @@ class ESGFundScraper:
             if not os.path.exists(screenshot_dir):
                 os.makedirs(screenshot_dir)
             
-            chart_path = f'{screenshot_dir}/{tab_name}_chart.png'
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            chart_path = f'{screenshot_dir}/{tab_name}_chart_{timestamp}.png'
             await chart_container.screenshot(path=chart_path)
             print(f"📷 Chart screenshot saved: {chart_path}")
             
             # 여기에 OCR 분석 로직 추가 (필요시)
-            # ...
+            # 현재는 이미지만 저장하고 실제 OCR 처리는 하지 않음
             
         except Exception as e:
             print(f"❌ Error in chart image analysis: {e}")
@@ -410,11 +412,15 @@ class ESGFundScraper:
             dfs['new_funds'] = pd.DataFrame(all_new_funds)
             print(f"✅ Created unified new funds dataframe with {len(all_new_funds)} rows")
         
-        # 3. 일별 차트 데이터 (모든 탭 통합)
+        # 3. 일별 차트 데이터 (모든 탭 통합) - 수정된 부분
         all_chart_data = []
         for tab_name, tab_data in all_data.items():
-            chart_data = tab_data.get('chart_data', {})
-            if chart_data.get('dates'):
+            chart_data_wrapper = tab_data.get('chart_data', {})
+            
+            # primary_data를 사용 (JavaScript 데이터 우선, 없으면 OCR 데이터)
+            chart_data = chart_data_wrapper.get('primary_data', {})
+            
+            if chart_data and chart_data.get('dates'):
                 dates = chart_data['dates']
                 setup_amounts = chart_data.get('setup_amounts', [])
                 returns = chart_data.get('returns', [])
@@ -432,12 +438,50 @@ class ESGFundScraper:
                         'setup_amount': setup_amounts[i] if i < len(setup_amounts) else None,
                         'return_rate': returns[i] if i < len(returns) else None,
                         'tab_type': tab_name,
-                        'collection_time': collection_time
+                        'collection_date': collection_date,
+                        'collection_time': collection_time,
+                        'collection_period': self.collection_period,
+                        'period_text': self.period_text_map.get(self.collection_period)
                     })
         
         if all_chart_data:
             dfs['daily_chart'] = pd.DataFrame(all_chart_data)
             print(f"✅ Created unified chart dataframe with {len(all_chart_data)} rows")
+        
+        # 4. 차트 비교 검증 데이터 (JavaScript vs OCR) - 새로 추가
+        all_comparison_data = []
+        for tab_name, tab_data in all_data.items():
+            chart_data_wrapper = tab_data.get('chart_data', {})
+            js_data = chart_data_wrapper.get('js_data', {})
+            ocr_data = chart_data_wrapper.get('ocr_data', {})
+            
+            # JavaScript 데이터
+            if js_data and js_data.get('dates'):
+                for i, date in enumerate(js_data['dates']):
+                    all_comparison_data.append({
+                        'date': date,
+                        'setup_amount': js_data['setup_amounts'][i] if i < len(js_data.get('setup_amounts', [])) else None,
+                        'return_rate': js_data['returns'][i] if i < len(js_data.get('returns', [])) else None,
+                        'tab_type': tab_name,
+                        'method': 'JavaScript',
+                        'collection_time': collection_time
+                    })
+            
+            # OCR 데이터 (현재는 비어있을 것임)
+            if ocr_data and ocr_data.get('dates'):
+                for i, date in enumerate(ocr_data['dates']):
+                    all_comparison_data.append({
+                        'date': date,
+                        'setup_amount': ocr_data['setup_amounts'][i] if i < len(ocr_data.get('setup_amounts', [])) else None,
+                        'return_rate': ocr_data['returns'][i] if i < len(ocr_data.get('returns', [])) else None,
+                        'tab_type': tab_name,
+                        'method': 'OCR',
+                        'collection_time': collection_time
+                    })
+        
+        if all_comparison_data:
+            dfs['chart_comparison'] = pd.DataFrame(all_comparison_data)
+            print(f"✅ Created chart comparison dataframe with {len(all_comparison_data)} rows")
         
         return dfs
     
@@ -495,18 +539,26 @@ class ESGFundScraper:
                             existing_df = pd.DataFrame(existing_data)
                             # 새 데이터와 결합
                             combined_df = pd.concat([df, existing_df], ignore_index=True)
-                            # 중복 제거 (날짜와 탭으로)
-                            combined_df = combined_df.drop_duplicates(subset=['date', 'tab_type'], keep='first')
+                            # 중복 제거 (날짜, 탭, 기간으로)
+                            combined_df = combined_df.drop_duplicates(
+                                subset=['date', 'tab_type', 'collection_period'], 
+                                keep='first'
+                            )
                             # 날짜 역순 정렬 (최신이 위로)
-                            combined_df = combined_df.sort_values(by=['date', 'tab_type'], ascending=[False, True])
+                            combined_df = combined_df.sort_values(
+                                by=['collection_date', 'date', 'tab_type'], 
+                                ascending=[False, False, True]
+                            )
                         else:
                             combined_df = df
                             
                     elif df_key == 'chart_comparison':
                         # 비교 검증 데이터는 매번 새로 쓰기
                         combined_df = df
-                        combined_df = combined_df.sort_values(by=['date', 'tab_type', 'method'], 
-                                                            ascending=[False, True, True])
+                        combined_df = combined_df.sort_values(
+                            by=['date', 'tab_type', 'method'], 
+                            ascending=[False, True, True]
+                        )
                         
                     else:
                         # TOP5와 신규펀드는 기존 로직 유지
@@ -521,28 +573,44 @@ class ESGFundScraper:
                                 key_cols = ['collection_date', 'tab_type', 'fund_name']
                             
                             # 중복 제거 후 결합
-                            combined_df = pd.concat([existing_df, df], ignore_index=True)
-                            combined_df = combined_df.drop_duplicates(subset=key_cols, keep='last')
+                            combined_df = pd.concat([df, existing_df], ignore_index=True)
+                            combined_df = combined_df.drop_duplicates(subset=key_cols, keep='first')
                             # 최신 데이터가 위로 오도록 정렬
-                            combined_df = combined_df.sort_values(by=['collection_date', 'tab_type'], 
-                                                                ascending=[False, True])
+                            combined_df = combined_df.sort_values(
+                                by=['collection_date', 'tab_type'], 
+                                ascending=[False, True]
+                            )
                         else:
                             combined_df = df
                     
                     # 데이터 쓰기
                     worksheet.clear()
-                    worksheet.update([combined_df.columns.values.tolist()] + combined_df.values.tolist())
+                    
+                    # 모든 값을 문자열로 변환하여 저장
+                    combined_df = combined_df.fillna('')  # NaN을 빈 문자열로 변환
+                    values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                    
+                    # 값들을 문자열로 변환
+                    for i in range(len(values)):
+                        for j in range(len(values[i])):
+                            values[i][j] = str(values[i][j])
+                    
+                    worksheet.update(values)
                     
                     updated_sheets.append(sheet_name)
                     print(f"✅ Successfully updated {sheet_name} with {len(combined_df)} rows")
                     
                 except Exception as e:
                     print(f"❌ Error updating {sheet_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     
             return updated_sheets
             
         except Exception as e:
             print(f"❌ Error in save_to_sheets: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def save_backup(self, dfs):
@@ -562,6 +630,38 @@ class ESGFundScraper:
         
         return saved_files
     
+    def cleanup_old_files(self):
+        """24시간 이상 된 파일 삭제"""
+        directories = ['data_backup', 'chart_analysis']
+        deleted_count = 0
+        
+        for directory in directories:
+            if os.path.exists(directory):
+                now = datetime.now()
+                cutoff_time = now - timedelta(hours=24)
+                
+                # 디렉토리 내 파일 확인
+                for filename in os.listdir(directory):
+                    filepath = os.path.join(directory, filename)
+                    
+                    # 파일인 경우만 처리
+                    if os.path.isfile(filepath):
+                        # 파일 수정 시간 확인
+                        file_time = datetime.fromtimestamp(os.path.getmtime(filepath))
+                        
+                        if file_time < cutoff_time:
+                            try:
+                                os.remove(filepath)
+                                deleted_count += 1
+                                print(f"🗑️ Deleted old file: {filepath}")
+                            except Exception as e:
+                                print(f"❌ Error deleting {filepath}: {e}")
+        
+        if deleted_count > 0:
+            print(f"✅ Cleaned up {deleted_count} old files")
+        
+        return deleted_count
+    
     def send_telegram_message(self, message):
         """Telegram 메시지 전송"""
         if not self.telegram_bot_token or not self.telegram_chat_id:
@@ -580,12 +680,77 @@ class ESGFundScraper:
         except Exception as e:
             print(f"❌ Error sending Telegram message: {e}")
     
+    def create_summary_html(self, all_data):
+        """차트 분석 결과를 HTML로 정리"""
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>ESG Fund Chart Analysis - {datetime.now().strftime('%Y-%m-%d %H:%M')}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                h1, h2 {{ color: #333; }}
+                .tab-section {{ margin: 30px 0; padding: 20px; border: 1px solid #ddd; }}
+                .chart-image {{ max-width: 100%; margin: 20px 0; }}
+                .data-summary {{ background: #f5f5f5; padding: 15px; margin: 10px 0; }}
+                .period-info {{ background: #e8f4f8; padding: 10px; margin-bottom: 20px; }}
+            </style>
+        </head>
+        <body>
+            <h1>ESG Fund Chart Analysis Report</h1>
+            <div class="period-info">
+                <strong>Collection Period:</strong> {self.period_text_map.get(self.collection_period)}<br>
+                <strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            </div>
+        """
+        
+        for tab_name, tab_data in all_data.items():
+            html_content += f"""
+            <div class="tab-section">
+                <h2>{tab_name}</h2>
+                <div class="data-summary">
+                    <strong>Top Funds:</strong> {len(tab_data.get('top_funds', []))} items<br>
+                    <strong>New Funds:</strong> {len(tab_data.get('new_funds', []))} items<br>
+            """
+            
+            chart_data = tab_data.get('chart_data', {})
+            if chart_data:
+                primary = chart_data.get('primary_data', {})
+                if primary and primary.get('dates'):
+                    html_content += f"""
+                    <strong>Chart Data Points:</strong> {len(primary.get('dates', []))} dates<br>
+                    <strong>Data Source:</strong> {'JavaScript' if chart_data.get('js_data') else 'OCR'}
+                    """
+            
+            html_content += f"""
+                </div>
+                <img class="chart-image" src="{tab_name}_chart_*.png" alt="{tab_name} Chart">
+            </div>
+            """
+        
+        html_content += """
+        </body>
+        </html>
+        """
+        
+        # HTML 파일 저장
+        html_path = 'chart_analysis/analysis_summary.html'
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        print(f"📄 Created HTML summary: {html_path}")
+        return html_path
+    
     async def run(self):
         """전체 프로세스 실행"""
         start_time = time.time()
         print(f"🚀 Starting ESG Fund data collection at {datetime.now()}")
         
         try:
+            # 0. 오래된 파일 정리
+            deleted_files = self.cleanup_old_files()
+            
             # 1. 모든 탭 데이터 수집
             all_data = await self.scrape_all_tabs()
             
@@ -601,10 +766,13 @@ class ESGFundScraper:
             # 5. 로컬 백업
             saved_files = self.save_backup(dfs)
             
-            # 6. 실행 시간 계산
+            # 6. HTML 요약 생성
+            summary_html = self.create_summary_html(all_data)
+            
+            # 7. 실행 시간 계산
             execution_time = round(time.time() - start_time, 2)
             
-            # 7. 상세 통계
+            # 8. 상세 통계
             stats = {}
             for key, df in dfs.items():
                 if key == 'top_funds':
@@ -614,19 +782,25 @@ class ESGFundScraper:
                 elif key == 'daily_chart':
                     unique_dates = df['date'].nunique() if 'date' in df.columns else 0
                     stats['차트 데이터'] = f"{unique_dates}일치"
+                elif key == 'chart_comparison':
+                    stats['비교 검증 데이터'] = f"{len(df)}개"
             
-            # 8. 성공 메시지 전송
+            # 9. 성공 메시지 전송
             period_text = self.period_text_map.get(self.collection_period, self.collection_period)
             message = f"""✅ *ESG 펀드 데이터 수집 완료*
 
 📅 수집 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 📊 총 레코드: {total_records}개
 📁 업데이트 시트: {len(updated_sheets)}개
+🗑️ 정리된 파일: {deleted_files}개
 ⏱️ 실행 시간: {execution_time}초
 📈 수집 기간: {period_text}
 
 *수집 현황:*
 {chr(10).join([f"• {k}: {v}" for k, v in stats.items()])}
+
+*업데이트된 시트:*
+{chr(10).join([f"• {sheet}" for sheet in updated_sheets])}
 
 *수집 범위:*
 • SRI 펀드
