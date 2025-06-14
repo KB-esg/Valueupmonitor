@@ -19,6 +19,18 @@ class ESGFundScraper:
         self.base_url = "https://www.fundguide.net/hkcenter/esg"
         self.telegram_bot_token = os.environ.get('TELCO_NEWS_TOKEN')
         self.telegram_chat_id = os.environ.get('TELCO_NEWS_TESTER')
+        # 환경 변수에서 기간 설정 가져오기 (기본값: 1개월)
+        self.collection_period = os.environ.get('COLLECTION_PERIOD', '01')
+        self.period_text_map = {
+            '01': '1개월',
+            '03': '3개월',
+            '06': '6개월',
+            'YTD': '연초이후',
+            '12': '1년',
+            '36': '3년',
+            '60': '5년'
+        }
+        print(f"📅 Collection period set to: {self.collection_period} ({self.period_text_map.get(self.collection_period, self.collection_period)})")
         
     async def extract_chart_data_via_javascript(self, page):
         """JavaScript를 통해 Highcharts 데이터 직접 추출"""
@@ -297,9 +309,34 @@ class ESGFundScraper:
         await page.click(f'button[value="{tab_value}"]')
         await page.wait_for_timeout(3000)  # 데이터 로딩 대기
         
+        # 기간 선택 (드롭다운에서 선택)
+        try:
+            # 먼저 현재 선택된 기간 확인
+            current_period = await page.inner_text('#selTerm option[selected]')
+            print(f"📅 Current period: {current_period}")
+            
+            # 원하는 기간이 이미 선택되어 있지 않은 경우에만 변경
+            if self.collection_period != '01':  # 기본값이 아닌 경우
+                print(f"📅 Changing period to: {self.period_text_map.get(self.collection_period)}")
+                
+                # select 요소를 직접 조작
+                await page.select_option('#selTerm', self.collection_period)
+                
+                # 선택 후 차트 데이터 로딩 대기
+                await page.wait_for_timeout(3000)
+                
+                # 변경 확인
+                new_period = await page.inner_text('#selTerm option[selected]')
+                print(f"✅ Period changed to: {new_period}")
+        except Exception as e:
+            print(f"⚠️ Error changing period: {e}")
+            # 오류가 발생해도 계속 진행
+        
         # 데이터 추출
         data = {
             'tab_name': tab_name,
+            'collection_period': self.collection_period,
+            'period_text': self.period_text_map.get(self.collection_period, self.collection_period),
             'top_funds': await self.parse_top_funds(page),
             'new_funds': await self.parse_new_funds(page),
             'chart_data': await self.extract_chart_data(page, tab_name)
@@ -579,12 +616,14 @@ class ESGFundScraper:
                     stats['차트 데이터'] = f"{unique_dates}일치"
             
             # 8. 성공 메시지 전송
+            period_text = self.period_text_map.get(self.collection_period, self.collection_period)
             message = f"""✅ *ESG 펀드 데이터 수집 완료*
 
 📅 수집 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 📊 총 레코드: {total_records}개
 📁 업데이트 시트: {len(updated_sheets)}개
 ⏱️ 실행 시간: {execution_time}초
+📈 수집 기간: {period_text}
 
 *수집 현황:*
 {chr(10).join([f"• {k}: {v}" for k, v in stats.items()])}
