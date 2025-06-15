@@ -693,6 +693,9 @@ def send_telegram_notification(domestic_df, overseas_df):
                 }).reset_index()
                 
                 issuer_groups.columns = ['발행기관', '채권종류', '총발행금액', '채권수']
+                
+                # 총발행금액을 숫자로 변환
+                issuer_groups['총발행금액'] = pd.to_numeric(issuer_groups['총발행금액'], errors='coerce').fillna(0)
                 issuer_groups = issuer_groups.sort_values('총발행금액', ascending=False)
                 
                 for idx, row in issuer_groups.head(10).iterrows():
