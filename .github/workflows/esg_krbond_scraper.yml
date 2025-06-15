@@ -1,4 +1,4 @@
-name: Update KRX ESG Bonds Data
+name: 01_Update KRX ESG Bonds Data
 
 on:
   schedule:
@@ -29,7 +29,7 @@ jobs:
         KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
         GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE }}
       run: |
-        python krx_esg_bonds_scraper.py
+        python esg_krbond_scraper.py
     
     - name: Commit and push if changed
       run: |
