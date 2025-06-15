@@ -1426,8 +1426,13 @@ class ESGFundScraper:
                 elif key == 'chart_comparison':
                     stats['비교 검증 데이터'] = f"{len(df)}개"
             
-            # 9. 성공 메시지 전송
+            # 9. 펀드 지표 계산
+            fund_metrics = self.calculate_fund_metrics(dfs)
+            
+            # 10. 성공 메시지 전송
             period_text = self.period_text_map.get(self.collection_period, self.collection_period)
+            
+            # 기본 메시지
             message = f"""✅ *ESG 펀드 데이터 수집 완료*
 
 📅 수집 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -1438,15 +1443,38 @@ class ESGFundScraper:
 📈 수집 기간: {period_text}
 
 *수집 현황:*
-{chr(10).join([f"• {k}: {v}" for k, v in stats.items()])}
+{chr(10).join([f"• {k}: {v}" for k, v in stats.items()])}"""
 
-*업데이트된 시트:*
-{chr(10).join([f"• {sheet}" for sheet in updated_sheets])}
-
-*수집 범위:*
-• SRI 펀드
-• ESG 주식형 펀드
-• ESG 채권형 펀드"""
+            # 펀드 지표 추가
+            if fund_metrics:
+                message += "\n\n*📊 주간 펀드 동향:*"
+                
+                for fund_name, metrics in fund_metrics.items():
+                    message += f"\n\n**{fund_name}**"
+                    
+                    # 설정액 정보
+                    if metrics['latest_setup_amount'] is not None:
+                        message += f"\n💰 설정액: {metrics['latest_setup_amount']:,.1f}억원"
+                        if metrics['setup_change_pct'] is not None:
+                            if metrics['setup_change_pct'] > 0:
+                                message += f" (📈 +{metrics['setup_change_pct']:.1f}%)"
+                            elif metrics['setup_change_pct'] < 0:
+                                message += f" (📉 {metrics['setup_change_pct']:.1f}%)"
+                            else:
+                                message += f" (➡️ 0.0%)"
+                    
+                    # 수익률 정보
+                    if metrics['weekly_return'] is not None:
+                        if metrics['weekly_return'] > 0:
+                            message += f"\n📊 주간수익률: +{metrics['weekly_return']:.2f}%"
+                        else:
+                            message += f"\n📊 주간수익률: {metrics['weekly_return']:.2f}%"
+                    
+                    # 현재 수익률
+                    if metrics['latest_return_rate'] is not None:
+                        message += f"\n📍 현재수익률: {metrics['latest_return_rate']:.2f}%"
+            
+            message += f"\n\n*수집 범위:*\n• SRI 펀드\n• ESG 주식형 펀드\n• ESG 채권형 펀드"
             
             self.send_telegram_message(message)
             print("✅ Data collection completed successfully")
