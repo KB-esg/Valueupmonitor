@@ -1,4 +1,4 @@
-name: Update KRX ESG Bonds Data
+name: 01_Update KRX ESG Bonds Data
 
 on:
   schedule:
