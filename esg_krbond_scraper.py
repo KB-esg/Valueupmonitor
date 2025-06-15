@@ -1,5 +1,4 @@
-import asyncio
-from playwright.async_api import async_playwright
+import requests
 import pandas as pd
 from datetime import datetime
 import gspread
@@ -10,10 +9,6 @@ import sys
 import time
 from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
-import nest_asyncio
-
-# Jupyter나 이미 실행 중인 이벤트 루프에서도 작동하도록
-nest_asyncio.apply()
 
 def get_monthly_dates(start_date, end_date):
     """시작일과 종료일 사이의 매월 1일 날짜 리스트를 반환합니다."""
@@ -31,67 +26,65 @@ def get_monthly_dates(start_date, end_date):
     
     return dates
 
-async def scrape_krx_esg_bonds_by_date(page, query_date):
+def scrape_krx_esg_bonds_by_date(query_date):
     """특정 날짜의 KRX ESG 채권 현황 데이터를 스크래핑합니다."""
     
+    # 요청 URL과 헤더 설정
+    url = "https://esgbond.krx.co.kr/contents/99/SRI99000001.jspx"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Origin': 'https://esgbond.krx.co.kr',
+        'Referer': 'https://esgbond.krx.co.kr/contents/02/02010000/SRI02010000.jsp',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    
+    # POST 데이터 설정
+    data = {
+        'sri_bnd_tp_cd': 'ALL',  # 전체 채권종류
+        'isu_cdnm': '전체',      # 전체 발행기관
+        'isur_cd': '',
+        'isu_cd': '',
+        'iss_inst_nm': '',
+        'isu_srt_cd': '',
+        'isu_nm': '',
+        'bnd_tp_cd': 'ALL',      # 전체 채권유형
+        'schdate': query_date,   # 조회일자
+        'pagePath': '/contents/02/02010000/SRI02010000.jsp',
+        'code': '02/02010000/sri02010000_02',
+        'pageFirstCall': 'Y'
+    }
+    
     try:
-        # 날짜 입력 필드를 클리어하고 새 날짜 입력
-        date_input = await page.wait_for_selector('#schdatec16a5320fa475530d9583c34fd356ef5')
-        await date_input.click()
-        await date_input.fill('')  # 기존 값 클리어
-        await date_input.fill(query_date)
+        # POST 요청
+        response = requests.post(url, headers=headers, data=data, timeout=30)
+        response.raise_for_status()
         
-        # 조회 버튼 클릭
-        await page.click('#btnid8e296a067a37563370ded05f5a3bf3ec')
+        # JSON 응답 파싱
+        json_data = response.json()
         
-        # 데이터 로딩 대기 (그리드가 업데이트될 때까지)
-        await page.wait_for_timeout(3000)  # 3초 대기
+        # 데이터 추출
+        if 'block1' in json_data:
+            bonds_data = json_data['block1']
+        else:
+            keys = list(json_data.keys())
+            if keys:
+                bonds_data = json_data[keys[0]]
+            else:
+                return pd.DataFrame()
         
-        # 더 안정적인 대기: 특정 요소가 나타날 때까지
-        try:
-            await page.wait_for_selector('.CI-GRID-BODY-TABLE tbody tr', timeout=10000)
-        except:
-            print(f"    → {query_date}: 데이터 없음")
-            return pd.DataFrame()
-        
-        # JavaScript를 통해 데이터 추출
-        data = await page.evaluate('''
-            () => {
-                const rows = document.querySelectorAll('.CI-GRID-BODY-TABLE tbody tr');
-                const data = [];
-                
-                rows.forEach(row => {
-                    const cells = row.querySelectorAll('td');
-                    if (cells.length > 0) {
-                        data.push({
-                            com_abbrv: cells[0]?.textContent?.trim() || '',
-                            isu_cd: cells[1]?.textContent?.trim() || '',
-                            isu_nm: cells[2]?.textContent?.trim() || '',
-                            lst_dt: cells[3]?.textContent?.trim() || '',
-                            iss_dt: cells[4]?.textContent?.trim() || '',
-                            dis_dt: cells[5]?.textContent?.trim() || '',
-                            curr_iso_cd: cells[6]?.textContent?.trim() || '',
-                            iss_amt: cells[7]?.textContent?.trim() || '',
-                            lst_amt: cells[8]?.textContent?.trim() || '',
-                            bnd_tp_nm: cells[9]?.textContent?.trim() || ''
-                        });
-                    }
-                });
-                
-                return data;
-            }
-        ''')
-        
-        if not data:
-            print(f"    → {query_date}: 데이터 없음")
+        if not bonds_data:
             return pd.DataFrame()
         
         # 데이터프레임 생성
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(bonds_data)
         
         # 채권종류 추출 함수
         def extract_bond_type(name):
-            if pd.isna(name) or name == '':
+            if pd.isna(name):
                 return ''
             
             name_str = str(name)
@@ -146,7 +139,7 @@ async def scrape_krx_esg_bonds_by_date(page, query_date):
         date_columns = ['상장일', '발행일', '상환일']
         for col in date_columns:
             if col in df.columns:
-                df[col] = df[col].str.replace('/', '-')
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d')
         
         # 숫자 컬럼 정리
         numeric_columns = ['표면이자율', '발행금액(백만)', '상장금액(백만)']
@@ -159,41 +152,6 @@ async def scrape_krx_esg_bonds_by_date(page, query_date):
     except Exception as e:
         print(f"    → {query_date}: 오류 발생 - {e}")
         return pd.DataFrame()
-
-async def scrape_all_dates(dates_list):
-    """모든 날짜에 대해 데이터를 스크래핑합니다."""
-    
-    async with async_playwright() as p:
-        # 브라우저 시작 (헤드리스 모드)
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        
-        # 웹사이트 접속
-        print("KRX ESG 채권 웹사이트 접속 중...")
-        await page.goto('https://esgbond.krx.co.kr/contents/02/02010000/SRI02010000.jsp')
-        
-        # 초기 로딩 대기
-        await page.wait_for_selector('#btnid8e296a067a37563370ded05f5a3bf3ec', timeout=30000)
-        
-        all_data = []
-        
-        # tqdm으로 진행 상황 표시
-        for date in tqdm(dates_list, desc="데이터 수집 중"):
-            df = await scrape_krx_esg_bonds_by_date(page, date)
-            if not df.empty:
-                all_data.append(df)
-                tqdm.write(f"    → {date}: {len(df)}개 채권 수집 완료")
-            
-            # API 부하 방지를 위한 대기
-            await page.wait_for_timeout(1000)
-        
-        await browser.close()
-        
-        if all_data:
-            # 모든 데이터 병합
-            return pd.concat(all_data, ignore_index=True)
-        else:
-            return pd.DataFrame()
 
 def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
     """Google Sheets를 업데이트합니다."""
@@ -222,6 +180,12 @@ def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
             print(f"스프레드시트에 성공적으로 접근했습니다.")
         except gspread.exceptions.APIError as e:
             print(f"\n권한 오류: Google Sheets에 접근할 수 없습니다.")
+            print(f"해결 방법:")
+            print(f"1. Google Sheets 열기: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+            print(f"2. 공유 버튼 클릭")
+            print(f"3. '{service_account_email}' 이메일 추가")
+            print(f"4. '편집자' 권한 부여")
+            print(f"5. 다시 실행하세요\n")
             raise
         
         # 누적 데이터 워크시트
@@ -290,6 +254,12 @@ def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
                     except Exception as e:
                         print(f"\n배치 업로드 오류: {e}")
                         time.sleep(2)
+                        try:
+                            cumulative_ws.update(range_str, batch_data)
+                            pbar.update(batch_end - i)
+                        except:
+                            print(f"재시도 실패. 계속 진행합니다.")
+                            continue
         
         # 최신 현황 워크시트 업데이트
         try:
@@ -309,8 +279,17 @@ def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
             latest_values = latest_df.astype(str).values.tolist()
             
             # 한 번에 업데이트 (최신 현황은 보통 적음)
-            range_str = f'A2:M{len(latest_values)+1}'
-            current_ws.update(range_str, latest_values)
+            batch_size = 500
+            for i in range(0, len(latest_values), batch_size):
+                batch_end = min(i + batch_size, len(latest_values))
+                batch_data = latest_values[i:batch_end]
+                
+                start_row = i + 2
+                end_row = batch_end + 1
+                
+                range_str = f'A{start_row}:M{end_row}'
+                current_ws.update(range_str, batch_data)
+                time.sleep(1)
         
         # 요약 정보 업데이트
         try:
@@ -409,19 +388,33 @@ def main():
         dates_list = [today]
         print(f"단일 날짜 조회: {today}")
     
-    # 비동기 스크래핑 실행
-    all_data_df = asyncio.run(scrape_all_dates(dates_list))
+    all_data = []
     
-    if all_data_df.empty:
+    # tqdm으로 진행 상황 표시
+    for date in tqdm(dates_list, desc="데이터 수집 중"):
+        df = scrape_krx_esg_bonds_by_date(date)
+        if not df.empty:
+            all_data.append(df)
+            tqdm.write(f"    → {date}: {len(df)}개 채권 수집 완료")
+        else:
+            tqdm.write(f"    → {date}: 데이터 없음")
+        
+        # API 부하 방지를 위한 대기
+        time.sleep(2)
+    
+    if all_data:
+        # 모든 데이터 병합
+        all_data_df = pd.concat(all_data, ignore_index=True)
+        print(f"\n총 수집된 데이터: {len(all_data_df)}개")
+        
+        # 조회일자별 수집 현황
+        print("\n조회일자별 수집 현황:")
+        date_counts = all_data_df['조회일자'].value_counts().sort_index()
+        for date, count in date_counts.items():
+            print(f"  - {date}: {count}개")
+    else:
         print("\n수집된 데이터가 없습니다.")
         sys.exit(1)
-    
-    # 데이터 요약
-    print(f"\n총 수집된 데이터: {len(all_data_df)}개")
-    print("\n조회일자별 수집 현황:")
-    date_counts = all_data_df['조회일자'].value_counts().sort_index()
-    for date, count in date_counts.items():
-        print(f"  - {date}: {count}개")
     
     # Google Sheets 업데이트
     print("\nGoogle Sheets 업데이트 중...")
