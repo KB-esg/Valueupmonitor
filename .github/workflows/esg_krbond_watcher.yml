@@ -1,4 +1,4 @@
-name: KRX ESG 채권 거래 현황 수집
+name: 01_KRX ESG 채권 거래 현황 수집
 
 on:
   schedule:
