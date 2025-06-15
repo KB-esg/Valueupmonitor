@@ -288,7 +288,7 @@ def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_j
             domestic_ws = spreadsheet.add_worksheet(title="국내_누적데이터", rows=100000, cols=20)
         
         # 기존 국내 데이터 처리
-        update_worksheet_data(domestic_ws, domestic_df, "국내")
+        combined_domestic_df = update_worksheet_data(domestic_ws, domestic_df, "국내")
         
         # 2. 국내 최신 현황 워크시트
         try:
@@ -297,75 +297,123 @@ def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_j
             domestic_current_ws = spreadsheet.add_worksheet(title="국내_최신현황", rows=5000, cols=20)
         
         # 가장 최근 조회일자의 국내 데이터만 추출
-        if not domestic_df.empty:
-            latest_date = domestic_df['조회일자'].max()
-            latest_domestic_df = domestic_df[domestic_df['조회일자'] == latest_date].copy()
+        if not combined_domestic_df.empty:
+            latest_date = combined_domestic_df['조회일자'].max()
+            latest_domestic_df = combined_domestic_df[combined_domestic_df['조회일자'] == latest_date].copy()
             
             print(f"\n국내 최신 현황 업데이트 중 (조회일자: {latest_date})")
             update_worksheet_simple(domestic_current_ws, latest_domestic_df)
         
-        # 3. 해외물 워크시트
+        # 3. 해외물 누적 데이터 워크시트
         try:
-            overseas_ws = spreadsheet.worksheet("해외물_채권현황")
+            overseas_cumulative_ws = spreadsheet.worksheet("해외물_누적데이터")
         except:
-            overseas_ws = spreadsheet.add_worksheet(title="해외물_채권현황", rows=5000, cols=20)
+            overseas_cumulative_ws = spreadsheet.add_worksheet(title="해외물_누적데이터", rows=50000, cols=20)
         
-        # 해외물 데이터 업데이트
+        # 해외물 누적 데이터 처리
+        combined_overseas_df = update_overseas_cumulative_data(overseas_cumulative_ws, overseas_df)
+        
+        # 4. 해외물 최신 현황 워크시트
+        try:
+            overseas_current_ws = spreadsheet.worksheet("해외물_최신현황")
+        except:
+            overseas_current_ws = spreadsheet.add_worksheet(title="해외물_최신현황", rows=5000, cols=20)
+        
+        # 해외물 최신 데이터 업데이트
         if not overseas_df.empty:
-            print(f"\n해외물 채권 현황 업데이트 중...")
-            update_worksheet_simple(overseas_ws, overseas_df)
+            print(f"\n해외물 최신 현황 업데이트 중...")
+            update_worksheet_simple(overseas_current_ws, overseas_df)
         
-        # 4. 요약 정보 업데이트
+        # 5. 요약 정보 업데이트
         try:
             summary_ws = spreadsheet.worksheet("요약")
         except:
             summary_ws = spreadsheet.add_worksheet(title="요약", rows=100, cols=10)
         
-        update_summary_sheet(summary_ws, domestic_df, overseas_df)
+        update_summary_sheet(summary_ws, combined_domestic_df, combined_overseas_df)
         
         print(f"\nGoogle Sheets 업데이트 완료:")
-        print(f"- 국내 누적 데이터: {len(domestic_df)}개 행")
-        print(f"- 해외물 채권: {len(overseas_df)}개 행")
+        print(f"- 국내 누적 데이터: {len(combined_domestic_df)}개 행")
+        print(f"- 해외물 누적 데이터: {len(combined_overseas_df)}개 행")
+        print(f"- 해외물 최신 현황: {len(overseas_df)}개 행")
         
     except Exception as e:
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
         raise
 
-def update_worksheet_data(worksheet, new_df, data_type):
-    """워크시트에 누적 데이터를 업데이트합니다."""
+def update_overseas_cumulative_data(worksheet, new_df):
+    """해외물 채권의 누적 데이터를 업데이트합니다."""
     
-    # 기존 데이터 가져오기
-    print(f"\n{data_type} 기존 누적 데이터 확인 중...")
+    # 기존 누적 데이터 가져오기
+    print(f"\n해외물 기존 누적 데이터 확인 중...")
     existing_data = worksheet.get_all_values()
     
     if existing_data and len(existing_data) > 1:
         # 기존 데이터를 DataFrame으로 변환
         existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
-        print(f"기존 {data_type} 누적 데이터: {len(existing_df)}개")
+        print(f"기존 해외물 누적 데이터: {len(existing_df)}개")
         
-        # 새 데이터와 병합 (표준코드와 조회일자 기준 중복 제거)
+        # 새 데이터와 병합
         combined_df = pd.concat([new_df, existing_df], ignore_index=True)
         
-        # 중복 제거
-        if '표준코드' in combined_df.columns:
-            combined_df = combined_df.drop_duplicates(
-                subset=['표준코드', '조회일자'], 
-                keep='first'
+        # 중복 제거를 위한 고유 키 생성 (발행기관 + 채권유형 + 발행금액 + 발행연월)
+        combined_df['unique_key'] = (combined_df['발행기관'].astype(str) + '_' + 
+                                    combined_df['채권유형'].astype(str) + '_' + 
+                                    combined_df['발행금액'].astype(str) + '_' + 
+                                    combined_df['발행연월'].astype(str))
+        
+        # 조회일자를 datetime으로 변환하여 최신 데이터 우선
+        combined_df['조회일자_dt'] = pd.to_datetime(combined_df['조회일자'], format='%Y%m%d', errors='coerce')
+        
+        # unique_key별로 가장 최신 조회일자의 데이터만 유지
+        combined_df = combined_df.sort_values('조회일자_dt', ascending=False)
+        combined_df = combined_df.drop_duplicates(subset=['unique_key'], keep='first')
+        
+        # 임시 컬럼 제거
+        combined_df = combined_df.drop(columns=['unique_key', '조회일자_dt'])
+        
+        # 발행연월과 발행기관으로 정렬
+        combined_df = combined_df.sort_values(['발행연월', '발행기관'], ascending=[False, True])
+        
+        print(f"중복 제거 후 총 해외물 데이터: {len(combined_df)}개")
+        
+        # 현재 데이터에 없지만 누적에는 있는 채권 확인 (상환/만기 채권)
+        if not new_df.empty:
+            current_keys = set(
+                new_df['발행기관'].astype(str) + '_' + 
+                new_df['채권유형'].astype(str) + '_' + 
+                new_df['발행금액'].astype(str) + '_' + 
+                new_df['발행연월'].astype(str)
             )
+            
+            existing_keys = set(
+                existing_df['발행기관'].astype(str) + '_' + 
+                existing_df['채권유형'].astype(str) + '_' + 
+                existing_df['발행금액'].astype(str) + '_' + 
+                existing_df['발행연월'].astype(str)
+            )
+            
+            disappeared_keys = existing_keys - current_keys
+            if disappeared_keys:
+                print(f"현재 리스트에서 사라진 채권: {len(disappeared_keys)}개 (상환/만기 추정)")
+                
+                # 사라진 채권들의 상태 표시를 위해 별도 컬럼 추가
+                combined_df['상태'] = combined_df.apply(
+                    lambda row: '만기/상환' if (
+                        row['발행기관'].astype(str) + '_' + 
+                        row['채권유형'].astype(str) + '_' + 
+                        row['발행금액'].astype(str) + '_' + 
+                        row['발행연월'].astype(str)
+                    ) in disappeared_keys else '활성', 
+                    axis=1
+                )
         else:
-            # 해외물의 경우 발행기관과 채권유형으로 중복 제거
-            combined_df = combined_df.drop_duplicates(
-                subset=['발행기관', '채권유형', '조회일자'], 
-                keep='first'
-            )
-        
-        # 정렬
-        combined_df = combined_df.sort_values(['조회일자', '발행기관'])
-        
-        print(f"중복 제거 후 총 {data_type} 데이터: {len(combined_df)}개")
+            combined_df['상태'] = '활성'
+            
     else:
-        combined_df = new_df
-        print(f"기존 {data_type} 데이터가 없습니다. 새 데이터로 시작합니다.")
+        combined_df = new_df.copy()
+        combined_df['상태'] = '활성'
+        print(f"기존 해외물 데이터가 없습니다. 새 데이터로 시작합니다.")
     
     # 워크시트 업데이트
     update_worksheet_simple(worksheet, combined_df)
@@ -429,6 +477,10 @@ def update_summary_sheet(summary_ws, domestic_df, overseas_df):
     else:
         latest_domestic_df = pd.DataFrame()
     
+    # 해외물 활성 채권 수
+    active_overseas_count = len(overseas_df[overseas_df['상태'] == '활성']) if '상태' in overseas_df.columns else len(overseas_df)
+    expired_overseas_count = len(overseas_df[overseas_df['상태'] == '만기/상환']) if '상태' in overseas_df.columns else 0
+    
     summary_data = [
         ["마지막 업데이트", datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
         [""],
@@ -443,13 +495,21 @@ def update_summary_sheet(summary_ws, domestic_df, overseas_df):
         ["지속가능연계채권", str(len(latest_domestic_df[latest_domestic_df['채권종류'] == '지속가능연계채권']))],
         [""],
         ["해외물 ESG 채권", ""],
-        ["총 채권 수", str(len(overseas_df))],
+        ["총 누적 채권", str(len(overseas_df))],
+        ["활성 채권", str(active_overseas_count)],
+        ["만기/상환 채권", str(expired_overseas_count)],
         [""],
-        ["해외물 채권유형별 현황", "개수"]
+        ["해외물 채권유형별 현황 (활성)", "개수"]
     ]
     
-    # 해외물 채권유형별 현황
-    if not overseas_df.empty:
+    # 해외물 활성 채권유형별 현황
+    if not overseas_df.empty and '상태' in overseas_df.columns:
+        active_overseas_df = overseas_df[overseas_df['상태'] == '활성']
+        if not active_overseas_df.empty:
+            overseas_type_counts = active_overseas_df['채권유형'].value_counts()
+            for bond_type, count in overseas_type_counts.items():
+                summary_data.append([bond_type, str(count)])
+    elif not overseas_df.empty:
         overseas_type_counts = overseas_df['채권유형'].value_counts()
         for bond_type, count in overseas_type_counts.items():
             summary_data.append([bond_type, str(count)])
@@ -517,31 +577,53 @@ def send_telegram_notification(domestic_df, overseas_df):
         # 해외물 채권 정보
         if not overseas_df.empty:
             message += f"\n🌏 해외물 ESG 채권 현황\n"
-            message += f"• 총 {len(overseas_df)}개 채권\n"
+            
+            # 활성/만기 구분
+            if '상태' in overseas_df.columns:
+                active_count = len(overseas_df[overseas_df['상태'] == '활성'])
+                expired_count = len(overseas_df[overseas_df['상태'] == '만기/상환'])
+                message += f"• 활성 채권: {active_count}개\n"
+                message += f"• 만기/상환: {expired_count}개\n"
+                
+                # 최근 발행 채권 (활성 채권 중에서)
+                active_df = overseas_df[overseas_df['상태'] == '활성'].copy()
+            else:
+                active_df = overseas_df.copy()
+                message += f"• 총 {len(overseas_df)}개 채권\n"
             
             # 최근 발행 채권 (발행연월 기준)
-            overseas_df['발행연월_dt'] = pd.to_datetime(
-                overseas_df['발행연월'].astype(str).str[:4] + '-' + 
-                overseas_df['발행연월'].astype(str).str[5:7] + '-01',
-                errors='coerce'
-            )
-            
-            # 최근 6개월 이내 발행
-            six_months_ago = today - timedelta(days=180)
-            recent_overseas = overseas_df[overseas_df['발행연월_dt'] >= six_months_ago]
-            
-            if len(recent_overseas) > 0:
-                message += f"• 최근 6개월 발행: {len(recent_overseas)}개\n"
+            if not active_df.empty:
+                active_df['발행연월_dt'] = pd.to_datetime(
+                    active_df['발행연월'].astype(str).str[:4] + '-' + 
+                    active_df['발행연월'].astype(str).str[5:7] + '-01',
+                    errors='coerce'
+                )
                 
-                # 최근 발행 3개 표시
-                recent_overseas_sorted = recent_overseas.sort_values('발행연월_dt', ascending=False)
-                for idx, row in recent_overseas_sorted.head(3).iterrows():
-                    message += f"  - {row['발행기관']} {row['채권유형']} ({row['발행금액']})\n"
+                # 최근 6개월 이내 발행
+                six_months_ago = today - timedelta(days=180)
+                recent_overseas = active_df[active_df['발행연월_dt'] >= six_months_ago]
+                
+                if len(recent_overseas) > 0:
+                    message += f"• 최근 6개월 발행: {len(recent_overseas)}개\n"
+                    
+                    # 최근 발행 3개 표시
+                    recent_overseas_sorted = recent_overseas.sort_values('발행연월_dt', ascending=False)
+                    message += "\n최근 발행:\n"
+                    for idx, row in recent_overseas_sorted.head(3).iterrows():
+                        message += f"  - {row['발행기관']} {row['채권유형']} ({row['발행금액']})\n"
+                
+                # 새로 추가된 채권 확인 (이전 수집 대비)
+                new_bonds = active_df[active_df['조회일자'] == active_df['조회일자'].max()]
+                if len(new_bonds) > 0 and len(active_df) > len(new_bonds):
+                    message += f"\n🆕 신규 추가: {len(new_bonds)}개\n"
         
         # 전체 통계
         message += f"\n📈 전체 현황:\n"
         message += f"• 국내 ESG 채권: {domestic_df['표준코드'].nunique():,}개\n"
-        message += f"• 해외물 ESG 채권: {len(overseas_df)}개\n"
+        message += f"• 해외물 ESG 채권: {len(overseas_df)}개 "
+        if '상태' in overseas_df.columns:
+            active_count = len(overseas_df[overseas_df['상태'] == '활성'])
+            message += f"(활성: {active_count}개)"
         
         # 텔레그램 메시지 전송
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
