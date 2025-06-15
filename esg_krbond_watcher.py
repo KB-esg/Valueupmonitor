@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+import re
 
 def scrape_krx_esg_trading_html():
     """KRX ESG 채권 거래 현황 페이지를 HTML로 스크래핑합니다."""
@@ -33,72 +34,63 @@ def scrape_krx_esg_trading_html():
         # HTML 파싱
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 테이블 찾기 - 클래스나 ID로 찾기
-        tables = soup.find_all('table')
+        # CI-GRID 형태의 테이블 찾기
+        grid_body = soup.find('tbody', class_='CI-GRID-BODY-TABLE-TBODY')
         
-        # 거래 현황 테이블 찾기 (보통 첫 번째 또는 두 번째 테이블)
-        trading_table = None
-        for table in tables:
-            # 헤더에 '거래량' 또는 '거래대금'이 포함된 테이블 찾기
-            headers_text = ' '.join([th.get_text(strip=True) for th in table.find_all('th')])
-            if '거래량' in headers_text or '거래대금' in headers_text:
-                trading_table = table
-                break
-        
-        if not trading_table:
-            print("거래 현황 테이블을 찾을 수 없습니다.")
+        if not grid_body:
+            print("CI-GRID 테이블을 찾을 수 없습니다.")
             return pd.DataFrame()
         
         # 테이블 데이터 추출
         data = []
-        rows = trading_table.find_all('tr')
+        rows = grid_body.find_all('tr')
         
-        # 헤더 추출
-        header_row = rows[0]
-        headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
-        
-        # 데이터 행 추출
-        for row in rows[1:]:
-            cells = row.find_all(['td', 'th'])
-            if cells:
-                row_data = [cell.get_text(strip=True) for cell in cells]
-                if len(row_data) == len(headers):
+        for row in rows:
+            cells = row.find_all('td')
+            if cells and len(cells) >= 5:
+                # 각 셀의 data-name 속성과 텍스트 추출
+                row_data = {}
+                for cell in cells:
+                    data_name = cell.get('data-name', '')
+                    cell_text = cell.get_text(strip=True)
+                    
+                    if data_name == 'bnd_clss_nm':
+                        row_data['채권종류'] = cell_text
+                    elif data_name == 'acc_trdvol':
+                        # 쉼표 제거 및 float 변환
+                        row_data['거래량'] = float(cell_text.replace(',', '') or '0')
+                    elif data_name == 'acc_trdval':
+                        # 쉼표 제거 및 float 변환
+                        row_data['거래대금'] = float(cell_text.replace(',', '') or '0')
+                    elif data_name == 'isur_cnt':
+                        row_data['발행기관수'] = int(cell_text.replace(',', '') or '0')
+                    elif data_name == 'isu_cnt':
+                        row_data['종목수'] = int(cell_text.replace(',', '') or '0')
+                
+                if row_data:
                     data.append(row_data)
         
+        if not data:
+            print("테이블에서 데이터를 추출할 수 없습니다.")
+            return pd.DataFrame()
+        
         # 데이터프레임 생성
-        df = pd.DataFrame(data, columns=headers)
+        df = pd.DataFrame(data)
         
-        # 데이터 정리
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        # 컬럼명 표준화
-        column_mapping = {
-            '구분': '채권종류',
-            '종류': '채권종류',
-            '채권종류': '채권종류',
-            '거래량': '거래량',
-            '거래대금': '거래대금',
-            '거래대금(백만원)': '거래대금',
-            '발행기관수': '발행기관수',
-            '발행기관': '발행기관수',
-            '종목수': '종목수',
-            '종목': '종목수'
-        }
-        
-        # 컬럼명 변경
-        df.rename(columns=column_mapping, inplace=True)
+        # 거래일자 추가 (HTML에서 날짜 추출 시도)
+        date_input = soup.find('input', {'name': re.compile('schdate|fr_work_dt')})
+        if date_input and date_input.get('value'):
+            date_str = date_input['value']
+            # YYYYMMDD 형식을 YYYY-MM-DD로 변환
+            if len(date_str) == 8:
+                today = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+            else:
+                today = datetime.now().strftime('%Y-%m-%d')
+        else:
+            today = datetime.now().strftime('%Y-%m-%d')
         
         # 거래일자 컬럼 추가
         df.insert(0, '거래일자', today)
-        
-        # 숫자 데이터 정리 (쉼표 제거 및 숫자 변환)
-        numeric_columns = ['거래량', '거래대금', '발행기관수', '종목수']
-        for col in numeric_columns:
-            if col in df.columns:
-                # 쉼표, 원 기호 등 제거
-                df[col] = df[col].astype(str).str.replace(',', '').str.replace('원', '').str.replace('백만', '')
-                # 빈 값이나 '-'를 0으로 변환
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
         
         print(f"HTML 스크래핑 완료: {len(df)}개 행")
         return df
@@ -123,13 +115,14 @@ def scrape_krx_esg_trading_api():
         'X-Requested-With': 'XMLHttpRequest'
     }
     
-    # 현재 날짜 설정
+    # 현재 날짜 설정 (YYYYMMDD 형식)
     today = datetime.now()
     today_str = today.strftime('%Y%m%d')
     
     # POST 데이터 설정
     data = {
-        'schdate': today_str,
+        'fr_work_dt': today_str,
+        'to_work_dt': today_str,
         'pagePath': '/contents/04/04020000/SRI04020000.jsp',
         'code': '04/04020000/sri04020000',
         'pageFirstCall': 'Y'
@@ -147,35 +140,36 @@ def scrape_krx_esg_trading_api():
         trading_data = []
         
         # 가능한 키들 확인
-        for key in ['result', 'block1', 'OutBlock1', 'output']:
-            if key in json_data:
-                if isinstance(json_data[key], list):
-                    raw_data = json_data[key]
-                    break
-                elif isinstance(json_data[key], dict) and 'data' in json_data[key]:
-                    raw_data = json_data[key]['data']
-                    break
-        else:
-            print(f"응답 데이터 구조: {list(json_data.keys())}")
+        raw_data = None
+        for key in json_data.keys():
+            if isinstance(json_data[key], list) and len(json_data[key]) > 0:
+                raw_data = json_data[key]
+                break
+        
+        if not raw_data:
+            print("API 응답에서 데이터를 찾을 수 없습니다.")
             return pd.DataFrame()
         
         # 데이터 파싱
         for item in raw_data:
-            # 채권 종류 확인
-            bond_type = item.get('sri_bnd_tp_nm', item.get('bnd_tp_nm', ''))
-            if not bond_type:
-                bond_type = item.get('tp_nm', '전체')
+            # 채권 종류별 데이터
+            bond_type = item.get('bnd_clss_nm', '')
             
-            record = {
-                '거래일자': today.strftime('%Y-%m-%d'),
-                '채권종류': bond_type,
-                '거래량': int(str(item.get('trd_qty', item.get('qty', 0))).replace(',', '')),
-                '거래대금': int(str(item.get('trd_amt', item.get('amt', 0))).replace(',', '')),
-                '발행기관수': int(str(item.get('isur_cnt', item.get('inst_cnt', 0))).replace(',', '')),
-                '종목수': int(str(item.get('isu_cnt', item.get('item_cnt', 0))).replace(',', ''))
-            }
-            
-            trading_data.append(record)
+            if bond_type:  # 채권종류가 있는 경우만 처리
+                record = {
+                    '거래일자': today.strftime('%Y-%m-%d'),
+                    '채권종류': bond_type,
+                    '거래량': float(str(item.get('acc_trdvol', 0)).replace(',', '')),
+                    '거래대금': float(str(item.get('acc_trdval', 0)).replace(',', '')),
+                    '발행기관수': int(str(item.get('isur_cnt', 0)).replace(',', '')),
+                    '종목수': int(str(item.get('isu_cnt', 0)).replace(',', ''))
+                }
+                
+                trading_data.append(record)
+        
+        if not trading_data:
+            print("API 응답에서 유효한 데이터를 찾을 수 없습니다.")
+            return pd.DataFrame()
         
         # 데이터프레임 생성
         df = pd.DataFrame(trading_data)
@@ -225,9 +219,9 @@ def update_google_sheets(df, spreadsheet_id, credentials_json):
             worksheet = spreadsheet.worksheet(worksheet_name)
         except:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=10000, cols=10)
-            # 헤더 추가
+            # 헤더 추가 (새로운 API 형식)
             headers = ['거래일자', '채권종류', '거래량', '거래대금', '발행기관수', '종목수']
-            worksheet.update('A1', [headers])
+            worksheet.update(values=[headers], range_name='A1')
             
             # 헤더 서식 설정
             worksheet.format('A1:F1', {
@@ -270,10 +264,10 @@ def update_google_sheets(df, spreadsheet_id, credentials_json):
             # 다음 빈 행 찾기
             next_row = len(worksheet.get_all_values()) + 1
             
-            # 데이터 추가
+            # 데이터 추가 (새로운 API 형식)
             values = df.values.tolist()
             cell_range = f'A{next_row}:F{next_row + len(values) - 1}'
-            worksheet.update(cell_range, values)
+            worksheet.update(values=values, range_name=cell_range)
             
             # 숫자 컬럼 서식 설정
             worksheet.format(f'C{next_row}:F{next_row + len(values) - 1}', {
@@ -297,9 +291,9 @@ def update_google_sheets(df, spreadsheet_id, credentials_json):
             daily_summary = summary_df.groupby('거래일자')['거래대금'].sum().reset_index()
             daily_summary.columns = ['거래일자', '전체거래대금']
             
-            # 요약 시트 업데이트
+            # 요약 시트 업데이트 (새로운 API 형식)
             summary_sheet.clear()
-            summary_sheet.update('A1', [daily_summary.columns.tolist()] + daily_summary.values.tolist())
+            summary_sheet.update(values=[daily_summary.columns.tolist()] + daily_summary.values.tolist(), range_name='A1')
             
             # 서식 설정
             summary_sheet.format('A1:B1', {
@@ -308,9 +302,16 @@ def update_google_sheets(df, spreadsheet_id, credentials_json):
                 'horizontalAlignment': 'CENTER'
             })
         
-        # 업데이트 시간 기록
+        # 업데이트 시간 기록 (별도 셀이 아닌 로그 시트에 기록)
+        try:
+            log_sheet = spreadsheet.worksheet("업데이트로그")
+        except:
+            log_sheet = spreadsheet.add_worksheet(title="업데이트로그", rows=1000, cols=3)
+            log_sheet.update(values=[['업데이트시간', '상태', '레코드수']], range_name='A1')
+        
+        log_row = len(log_sheet.get_all_values()) + 1
         update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        worksheet.update(f'H1', f'최종 업데이트: {update_time}')
+        log_sheet.update(values=[[update_time, '성공', len(df)]], range_name=f'A{log_row}')
         
     except Exception as e:
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
