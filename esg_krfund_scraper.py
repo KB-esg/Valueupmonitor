@@ -1474,6 +1474,60 @@ class ESGFundScraper:
                     if metrics['latest_return_rate'] is not None:
                         message += f"\n📍 현재수익률: {metrics['latest_return_rate']:.2f}%"
             
+            # 신규 펀드 정보 추가
+            if 'new_funds' in dfs and not dfs['new_funds'].empty:
+                new_funds_df = dfs['new_funds']
+                # 오늘 날짜의 신규 펀드만 필터링
+                today = datetime.now().strftime('%Y-%m-%d')
+                today_new_funds = new_funds_df[new_funds_df['collection_date'] == today]
+                
+                if not today_new_funds.empty:
+                    message += "\n\n*🆕 신규 출시 펀드:*"
+                    
+                    # 탭 타입별로 그룹화
+                    for tab_type in today_new_funds['tab_type'].unique():
+                        tab_funds = today_new_funds[today_new_funds['tab_type'] == tab_type]
+                        
+                        # 탭 이름 표시
+                        tab_display = {
+                            'SRI': 'SRI',
+                            'ESG_주식': 'ESG 주식형',
+                            'ESG_채권': 'ESG 채권형'
+                        }.get(tab_type, tab_type)
+                        
+                        message += f"\n\n**[{tab_display}]**"
+                        
+                        for _, fund in tab_funds.iterrows():
+                            message += f"\n• {fund['fund_name']}"
+                            message += f"\n  - 운용사: {fund['company']}"
+                            message += f"\n  - 설정일: {fund['setup_date']}"
+                else:
+                    # 이번 주의 신규 펀드 확인 (최근 7일)
+                    week_ago = (datetime.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
+                    week_new_funds = new_funds_df[new_funds_df['collection_date'] >= week_ago]
+                    
+                    if not week_new_funds.empty:
+                        message += "\n\n*🆕 이번 주 신규 출시 펀드:*"
+                        
+                        for tab_type in week_new_funds['tab_type'].unique():
+                            tab_funds = week_new_funds[week_new_funds['tab_type'] == tab_type]
+                            
+                            tab_display = {
+                                'SRI': 'SRI',
+                                'ESG_주식': 'ESG 주식형',
+                                'ESG_채권': 'ESG 채권형'
+                            }.get(tab_type, tab_type)
+                            
+                            message += f"\n\n**[{tab_display}]**"
+                            
+                            # 중복 제거 (펀드명 기준)
+                            unique_funds = tab_funds.drop_duplicates(subset=['fund_name'])
+                            
+                            for _, fund in unique_funds.iterrows():
+                                message += f"\n• {fund['fund_name']}"
+                                message += f"\n  - 운용사: {fund['company']}"
+                                message += f"\n  - 설정일: {fund['setup_date']}"
+            
             message += f"\n\n*수집 범위:*\n• SRI 펀드\n• ESG 주식형 펀드\n• ESG 채권형 펀드"
             
             self.send_telegram_message(message)
