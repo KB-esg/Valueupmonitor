@@ -37,10 +37,12 @@ jobs:
       env:
         KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
         GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE }}
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
         START_DATE: ${{ github.event.inputs.start_date }}
         END_DATE: ${{ github.event.inputs.end_date }}
       run: |
-        python esg_krbond_scraper.py
+        python krx_esg_bonds_scraper.py
     
     - name: Commit and push if changed
       run: |
@@ -48,3 +50,24 @@ jobs:
         git config --local user.name "GitHub Action"
         git add -A
         git diff --quiet && git diff --staged --quiet || (git commit -m "Update KRX ESG bonds data - $(date +'%Y-%m-%d')" && git push)
+    
+    - name: Send failure notification
+      if: failure()
+      env:
+        TELCO_NEWS_TOKEN: ${{ secrets.TELCO_NEWS_TOKEN }}
+        TELCO_NEWS_TESTER: ${{ secrets.TELCO_NEWS_TESTER }}
+      run: |
+        python -c "
+        import requests
+        import os
+        
+        bot_token = os.environ.get('TELCO_NEWS_TOKEN')
+        chat_id = os.environ.get('TELCO_NEWS_TESTER')
+        
+        if bot_token and chat_id:
+            message = '❌ KRX ESG 채권 데이터 수집 실패!\n\n🔍 GitHub Actions에서 로그를 확인하세요.'
+            
+            requests.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', 
+                          data={'chat_id': chat_id, 'text': message})
+        "
+      continue-on-error: true
