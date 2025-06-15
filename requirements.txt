@@ -4,6 +4,8 @@ python-telegram-bot
 requests
 pandas
 gspread
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
 oauth2client
 lxml
 html5lib
