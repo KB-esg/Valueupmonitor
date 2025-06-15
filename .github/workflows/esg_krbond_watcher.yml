@@ -27,7 +27,7 @@ jobs:
     - name: KRX ESG 채권 거래 현황 스크래핑
       env:
         KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
-        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
       run: |
         python esg_krbond_watcher.py
     
