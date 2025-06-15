@@ -905,33 +905,51 @@ class ESGFundScraper:
             # primary_data를 사용 (JavaScript 데이터 우선, 없으면 OCR 데이터)
             chart_data = chart_data_wrapper.get('primary_data', {})
             
+            # primary_data가 없으면 js_data 직접 확인
+            if not chart_data or not chart_data.get('dates'):
+                chart_data = chart_data_wrapper.get('js_data', {})
+            
             if chart_data and chart_data.get('dates'):
                 dates = chart_data['dates']
                 setup_amounts = chart_data.get('setup_amounts', [])
                 returns = chart_data.get('returns', [])
                 
-                # 데이터 길이 맞추기
-                min_length = min(
-                    len(dates), 
-                    len(setup_amounts) if setup_amounts else 0, 
-                    len(returns) if returns else 0
-                )
+                print(f"   📊 Processing {tab_name} chart data:")
+                print(f"      - Dates: {len(dates)}")
+                print(f"      - Setup amounts: {len(setup_amounts)}")
+                print(f"      - Returns: {len(returns)}")
+                
+                # 데이터 길이 맞추기 - 가장 짧은 길이로
+                min_length = len(dates)
+                if setup_amounts:
+                    min_length = min(min_length, len(setup_amounts))
+                if returns:
+                    min_length = min(min_length, len(returns))
+                
+                print(f"      - Using {min_length} data points")
                 
                 for i in range(min_length):
                     all_chart_data.append({
                         'date': dates[i],
-                        'setup_amount': setup_amounts[i] if i < len(setup_amounts) else None,
-                        'return_rate': returns[i] if i < len(returns) else None,
+                        'setup_amount': setup_amounts[i] if i < len(setup_amounts) and setup_amounts else None,
+                        'return_rate': returns[i] if i < len(returns) and returns else None,
                         'tab_type': tab_name,
                         'collection_date': collection_date,
                         'collection_time': collection_time,
                         'collection_period': self.collection_period,
                         'period_text': self.period_text_map.get(self.collection_period)
                     })
+            else:
+                print(f"   ⚠️ No chart data found for {tab_name}")
         
         if all_chart_data:
             dfs['daily_chart'] = pd.DataFrame(all_chart_data)
             print(f"✅ Created unified chart dataframe with {len(all_chart_data)} rows")
+            
+            # 데이터 샘플 출력 (디버깅용)
+            sample_df = dfs['daily_chart'].head(3)
+            print(f"   Sample data:")
+            print(f"   {sample_df[['date', 'setup_amount', 'return_rate', 'tab_type']].to_string()}")
         
         # 4. 차트 비교 검증 데이터 (JavaScript vs OCR) - 새로 추가
         all_comparison_data = []
