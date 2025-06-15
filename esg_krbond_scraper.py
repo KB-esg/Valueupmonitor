@@ -1,6 +1,6 @@
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 import json
@@ -349,6 +349,112 @@ def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
         raise
 
+def send_telegram_notification(all_data_df):
+    """최근 일주일 내 상장한 ESG 채권 정보를 텔레그램으로 전송합니다."""
+    
+    bot_token = os.environ.get('TELCO_NEWS_TOKEN')
+    chat_id = os.environ.get('TELCO_NEWS_TESTER')
+    
+    if not bot_token or not chat_id:
+        print("텔레그램 환경 변수가 설정되지 않았습니다.")
+        return
+    
+    try:
+        # 최신 데이터에서 상장일 기준으로 최근 일주일 데이터 필터링
+        today = datetime.now()
+        week_ago = today - timedelta(days=7)
+        
+        # 상장일을 datetime으로 변환
+        all_data_df['상장일_dt'] = pd.to_datetime(all_data_df['상장일'], errors='coerce')
+        
+        # 최근 일주일 내 상장된 채권 필터링
+        recent_bonds = all_data_df[
+            (all_data_df['상장일_dt'] >= week_ago) & 
+            (all_data_df['상장일_dt'] <= today)
+        ].copy()
+        
+        # 상장일 기준으로 정렬 (최신순)
+        recent_bonds = recent_bonds.sort_values('상장일_dt', ascending=False)
+        
+        # 메시지 작성
+        if len(recent_bonds) > 0:
+            message = f"📊 KRX ESG 채권 업데이트 완료!\n\n"
+            message += f"🗓️ 최근 일주일 신규 상장 ESG 채권 ({len(recent_bonds)}개)\n"
+            message += f"({week_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})\n\n"
+            
+            # 채권종류별 집계
+            bond_type_counts = recent_bonds['채권종류'].value_counts()
+            
+            for bond_type, count in bond_type_counts.items():
+                if bond_type == '녹색채권':
+                    emoji = '🌱'
+                elif bond_type == '사회적채권':
+                    emoji = '🤝'
+                elif bond_type == '지속가능채권':
+                    emoji = '♻️'
+                elif bond_type == '지속가능연계채권':
+                    emoji = '🔗'
+                else:
+                    emoji = '📌'
+                message += f"{emoji} {bond_type}: {count}개\n"
+            
+            message += "\n📋 상세 내역:\n"
+            
+            # 최대 10개까지만 표시
+            for idx, row in recent_bonds.head(10).iterrows():
+                bond_type_emoji = {
+                    '녹색채권': '🌱',
+                    '사회적채권': '🤝',
+                    '지속가능채권': '♻️',
+                    '지속가능연계채권': '🔗'
+                }.get(row['채권종류'], '📌')
+                
+                message += f"\n{bond_type_emoji} [{row['상장일']}]\n"
+                message += f"• 발행기관: {row['발행기관']}\n"
+                message += f"• 종목명: {row['종목명']}\n"
+                message += f"• 발행금액: {row['발행금액(백만)']:,.0f}백만원\n"
+                
+            if len(recent_bonds) > 10:
+                message += f"\n... 외 {len(recent_bonds) - 10}개"
+                
+        else:
+            message = f"📊 KRX ESG 채권 업데이트 완료!\n\n"
+            message += f"🗓️ 최근 일주일({week_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}) 동안\n"
+            message += f"신규 상장된 ESG 채권이 없습니다."
+        
+        # 전체 통계 추가
+        total_bonds = len(all_data_df)
+        unique_bonds = all_data_df['표준코드'].nunique()
+        
+        message += f"\n\n📈 전체 ESG 채권 현황:\n"
+        message += f"• 총 데이터: {total_bonds:,}개\n"
+        message += f"• 고유 채권: {unique_bonds:,}개\n"
+        
+        # 채권종류별 전체 현황
+        total_type_counts = all_data_df[all_data_df['조회일자'] == all_data_df['조회일자'].max()]['채권종류'].value_counts()
+        message += "\n채권종류별 현황:\n"
+        for bond_type, count in total_type_counts.items():
+            if bond_type:  # 빈 값이 아닌 경우만
+                message += f"• {bond_type}: {count}개\n"
+        
+        # 텔레그램 메시지 전송
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = {
+            'chat_id': chat_id,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        
+        response = requests.post(url, data=data)
+        
+        if response.status_code == 200:
+            print("\n✅ 텔레그램 알림 전송 성공!")
+        else:
+            print(f"\n❌ 텔레그램 알림 전송 실패: {response.status_code}")
+            
+    except Exception as e:
+        print(f"\n텔레그램 알림 전송 중 오류 발생: {e}")
+
 def main():
     # 환경 변수 확인
     if 'GITHUB_ACTIONS' in os.environ:
@@ -419,6 +525,10 @@ def main():
     # Google Sheets 업데이트
     print("\nGoogle Sheets 업데이트 중...")
     update_google_sheets(all_data_df, spreadsheet_id, credentials_json)
+    
+    # 텔레그램 알림 전송 (GitHub Actions 환경에서만)
+    if 'GITHUB_ACTIONS' in os.environ:
+        send_telegram_notification(all_data_df)
     
     print("\n✅ 작업이 완료되었습니다.")
 
