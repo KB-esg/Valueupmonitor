@@ -5,6 +5,20 @@ on:
     # 매일 오전 9시 (KST) 실행 - UTC 00:00
     - cron: '0 0 * * *'
   workflow_dispatch:  # 수동 실행 허용
+    inputs:
+      start_date:
+        description: '시작일 (YYYYMMDD 형식, 예: 20250612)'
+        required: false
+        type: string
+      end_date:
+        description: '종료일 (YYYYMMDD 형식, 예: 20250615)'
+        required: false
+        type: string
+      update_existing:
+        description: '기존 데이터 덮어쓰기'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   scrape-and-update:
@@ -28,6 +42,9 @@ jobs:
       env:
         KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
         GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
+        START_DATE: ${{ github.event.inputs.start_date }}
+        END_DATE: ${{ github.event.inputs.end_date }}
+        UPDATE_EXISTING: ${{ github.event.inputs.update_existing }}
       run: |
         python esg_krbond_watcher.py
     
@@ -37,10 +54,15 @@ jobs:
       with:
         script: |
           const date = new Date().toLocaleDateString('ko-KR');
+          const isManual = context.eventName === 'workflow_dispatch';
+          const dateRange = isManual && context.payload.inputs.start_date && context.payload.inputs.end_date 
+            ? ` (${context.payload.inputs.start_date} ~ ${context.payload.inputs.end_date})` 
+            : '';
+          
           github.rest.issues.create({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            title: `[자동] KRX ESG 채권 거래 현황 수집 실패 - ${date}`,
-            body: `KRX ESG 채권 거래 현황 자동 수집 중 오류가 발생했습니다.\n\n워크플로우: ${context.workflow}\n실행 링크: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            title: `[자동] KRX ESG 채권 거래 현황 수집 실패 - ${date}${dateRange}`,
+            body: `KRX ESG 채권 거래 현황 자동 수집 중 오류가 발생했습니다.\n\n실행 유형: ${isManual ? '수동' : '자동 스케줄'}\n${dateRange ? `날짜 범위: ${context.payload.inputs.start_date} ~ ${context.payload.inputs.end_date}\n` : ''}워크플로우: ${context.workflow}\n실행 링크: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             labels: ['bug', 'automation']
           })
