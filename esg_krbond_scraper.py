@@ -108,6 +108,9 @@ def scrape_krx_esg_bonds_by_date(query_date):
         # 수집일시 추가
         df['수집일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        # 데이터구분 추가
+        df['데이터구분'] = '국내'
+        
         # 컬럼명 한글로 변경
         column_mapping = {
             'com_abbrv': '발행기관',
@@ -123,12 +126,12 @@ def scrape_krx_esg_bonds_by_date(query_date):
         }
         
         # 필요한 컬럼만 선택하고 이름 변경
-        columns_to_keep = list(column_mapping.keys()) + ['채권종류', '조회일자', '수집일시']
+        columns_to_keep = list(column_mapping.keys()) + ['채권종류', '조회일자', '수집일시', '데이터구분']
         df = df[df.columns.intersection(columns_to_keep)]
         df.rename(columns=column_mapping, inplace=True)
         
         # 컬럼 순서 재정렬
-        desired_order = ['조회일자', '수집일시', '발행기관', '표준코드', '종목명', 
+        desired_order = ['조회일자', '수집일시', '데이터구분', '발행기관', '표준코드', '종목명', 
                         '채권종류', '상장일', '발행일', '상환일', '표면이자율', 
                         '발행금액(백만)', '상장금액(백만)', '채권유형']
         
@@ -153,7 +156,97 @@ def scrape_krx_esg_bonds_by_date(query_date):
         print(f"    → {query_date}: 오류 발생 - {e}")
         return pd.DataFrame()
 
-def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
+def scrape_krx_overseas_esg_bonds():
+    """한국기업 해외물 ESG채권 데이터를 스크래핑합니다."""
+    
+    # 요청 URL과 헤더 설정
+    url = "https://esgbond.krx.co.kr/contents/99/SRI99000001.jspx"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Origin': 'https://esgbond.krx.co.kr',
+        'Referer': 'https://esgbond.krx.co.kr/contents/02/02030000/SRI02030000.jsp',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    
+    # POST 데이터 설정 (해외물 채권용)
+    data = {
+        'code': '02/02030000/sri02030000_01',
+        'pagePath': '/contents/02/02030000/SRI02030000.jsp'
+    }
+    
+    try:
+        # POST 요청
+        response = requests.post(url, headers=headers, data=data, timeout=30)
+        response.raise_for_status()
+        
+        # JSON 응답 파싱
+        json_data = response.json()
+        
+        # 데이터 추출
+        if 'block1' in json_data:
+            bonds_data = json_data['block1']
+        else:
+            keys = list(json_data.keys())
+            if keys:
+                bonds_data = json_data[keys[0]]
+            else:
+                return pd.DataFrame()
+        
+        if not bonds_data:
+            return pd.DataFrame()
+        
+        # 데이터프레임 생성
+        df = pd.DataFrame(bonds_data)
+        
+        # 조회일자 추가 (오늘 날짜)
+        df['조회일자'] = datetime.now().strftime('%Y%m%d')
+        
+        # 수집일시 추가
+        df['수집일시'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 데이터구분 추가
+        df['데이터구분'] = '해외물'
+        
+        # 채권종류 추출
+        df['채권종류'] = df['isu_nm'].apply(lambda x: x if pd.notna(x) else '')
+        
+        # 컬럼명 한글로 변경
+        column_mapping = {
+            'isur_nm': '발행기관',
+            'isu_nm': '채권유형',
+            'usr_defin_nm1': '발행금액',
+            'isu_dd': '발행연월',
+            'usr_defin_nm2': '만기연월',
+            'usr_defin_nm3': '기간',
+            'usr_defin_nm4': '발행금리',
+            'usr_defin_nm5': '표면금리',
+            'misc_info': '주관사'
+        }
+        
+        # 필요한 컬럼만 선택하고 이름 변경
+        columns_to_keep = list(column_mapping.keys()) + ['채권종류', '조회일자', '수집일시', '데이터구분']
+        df = df[df.columns.intersection(columns_to_keep)]
+        df.rename(columns=column_mapping, inplace=True)
+        
+        # 컬럼 순서 재정렬
+        desired_order = ['조회일자', '수집일시', '데이터구분', '발행기관', '채권유형', 
+                        '채권종류', '발행연월', '만기연월', '기간', '발행금액', 
+                        '발행금리', '표면금리', '주관사']
+        
+        final_columns = [col for col in desired_order if col in df.columns]
+        df = df[final_columns]
+        
+        return df
+        
+    except Exception as e:
+        print(f"해외물 채권 수집 중 오류 발생: {e}")
+        return pd.DataFrame()
+
+def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_json):
     """Google Sheets를 업데이트합니다."""
     
     try:
@@ -188,169 +281,184 @@ def update_google_sheets(all_data_df, spreadsheet_id, credentials_json):
             print(f"5. 다시 실행하세요\n")
             raise
         
-        # 누적 데이터 워크시트
+        # 1. 국내 누적 데이터 워크시트
         try:
-            cumulative_ws = spreadsheet.worksheet("누적데이터")
+            domestic_ws = spreadsheet.worksheet("국내_누적데이터")
         except:
-            cumulative_ws = spreadsheet.add_worksheet(title="누적데이터", rows=100000, cols=20)
+            domestic_ws = spreadsheet.add_worksheet(title="국내_누적데이터", rows=100000, cols=20)
         
-        # 기존 누적 데이터 가져오기
-        print("\n기존 누적 데이터 확인 중...")
-        existing_data = cumulative_ws.get_all_values()
+        # 기존 국내 데이터 처리
+        update_worksheet_data(domestic_ws, domestic_df, "국내")
         
-        if existing_data and len(existing_data) > 1:
-            # 기존 데이터를 DataFrame으로 변환
-            existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
-            print(f"기존 누적 데이터: {len(existing_df)}개")
-            
-            # 새 데이터와 병합 (표준코드와 조회일자 기준 중복 제거)
-            combined_df = pd.concat([all_data_df, existing_df], ignore_index=True)
-            
-            # 중복 제거
-            combined_df = combined_df.drop_duplicates(
-                subset=['표준코드', '조회일자'], 
-                keep='first'
-            )
-            
-            # 정렬
-            combined_df = combined_df.sort_values(['조회일자', '표준코드'])
-            
-            print(f"중복 제거 후 총 데이터: {len(combined_df)}개")
-        else:
-            combined_df = all_data_df
-            print("기존 데이터가 없습니다. 새 데이터로 시작합니다.")
-        
-        # 누적 데이터 업데이트 (tqdm으로 진행 상황 표시)
-        print("\n누적 데이터 업데이트 중...")
-        cumulative_ws.clear()
-        
-        # 헤더 추가
-        headers = combined_df.columns.tolist()
-        cumulative_ws.update('A1', [headers])
-        
-        # 데이터 추가 (배치 처리)
-        if not combined_df.empty:
-            combined_df = combined_df.fillna('')
-            values = combined_df.astype(str).values.tolist()
-            
-            batch_size = 500
-            total_rows = len(values)
-            
-            # tqdm으로 업로드 진행 상황 표시
-            with tqdm(total=total_rows, desc="Google Sheets 업로드") as pbar:
-                for i in range(0, total_rows, batch_size):
-                    batch_end = min(i + batch_size, total_rows)
-                    batch_data = values[i:batch_end]
-                    
-                    start_row = i + 2
-                    end_row = batch_end + 1
-                    
-                    range_str = f'A{start_row}:M{end_row}'
-                    
-                    try:
-                        cumulative_ws.update(range_str, batch_data)
-                        pbar.update(batch_end - i)
-                        time.sleep(1)
-                    except Exception as e:
-                        print(f"\n배치 업로드 오류: {e}")
-                        time.sleep(2)
-                        try:
-                            cumulative_ws.update(range_str, batch_data)
-                            pbar.update(batch_end - i)
-                        except:
-                            print(f"재시도 실패. 계속 진행합니다.")
-                            continue
-        
-        # 최신 현황 워크시트 업데이트
+        # 2. 국내 최신 현황 워크시트
         try:
-            current_ws = spreadsheet.worksheet("최신현황")
+            domestic_current_ws = spreadsheet.worksheet("국내_최신현황")
         except:
-            current_ws = spreadsheet.add_worksheet(title="최신현황", rows=5000, cols=20)
+            domestic_current_ws = spreadsheet.add_worksheet(title="국내_최신현황", rows=5000, cols=20)
         
-        # 가장 최근 조회일자의 데이터만 추출
-        latest_date = combined_df['조회일자'].max()
-        latest_df = combined_df[combined_df['조회일자'] == latest_date].copy()
-        
-        print(f"\n최신 현황 업데이트 중 (조회일자: {latest_date})")
-        current_ws.clear()
-        current_ws.update('A1', [headers])
-        
-        if not latest_df.empty:
-            latest_values = latest_df.astype(str).values.tolist()
+        # 가장 최근 조회일자의 국내 데이터만 추출
+        if not domestic_df.empty:
+            latest_date = domestic_df['조회일자'].max()
+            latest_domestic_df = domestic_df[domestic_df['조회일자'] == latest_date].copy()
             
-            # 한 번에 업데이트 (최신 현황은 보통 적음)
-            batch_size = 500
-            for i in range(0, len(latest_values), batch_size):
-                batch_end = min(i + batch_size, len(latest_values))
-                batch_data = latest_values[i:batch_end]
-                
-                start_row = i + 2
-                end_row = batch_end + 1
-                
-                range_str = f'A{start_row}:M{end_row}'
-                current_ws.update(range_str, batch_data)
-                time.sleep(1)
+            print(f"\n국내 최신 현황 업데이트 중 (조회일자: {latest_date})")
+            update_worksheet_simple(domestic_current_ws, latest_domestic_df)
         
-        # 요약 정보 업데이트
+        # 3. 해외물 워크시트
+        try:
+            overseas_ws = spreadsheet.worksheet("해외물_채권현황")
+        except:
+            overseas_ws = spreadsheet.add_worksheet(title="해외물_채권현황", rows=5000, cols=20)
+        
+        # 해외물 데이터 업데이트
+        if not overseas_df.empty:
+            print(f"\n해외물 채권 현황 업데이트 중...")
+            update_worksheet_simple(overseas_ws, overseas_df)
+        
+        # 4. 요약 정보 업데이트
         try:
             summary_ws = spreadsheet.worksheet("요약")
         except:
             summary_ws = spreadsheet.add_worksheet(title="요약", rows=100, cols=10)
         
-        # 조회일자별 채권 수 계산
-        date_summary = combined_df.groupby('조회일자').size().reset_index(name='채권수')
-        
-        summary_data = [
-            ["마지막 업데이트", datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-            ["총 누적 데이터", str(len(combined_df))],
-            ["고유 채권 수", str(combined_df['표준코드'].nunique())],
-            [""],
-            ["조회일자별 현황", ""]
-        ]
-        
-        # 조회일자별 현황 추가
-        for _, row in date_summary.iterrows():
-            summary_data.append([row['조회일자'], str(row['채권수'])])
-        
-        summary_data.extend([
-            [""],
-            ["최신 채권종류별 현황", "개수"],
-            ["녹색채권", str(len(latest_df[latest_df['채권종류'] == '녹색채권']))],
-            ["사회적채권", str(len(latest_df[latest_df['채권종류'] == '사회적채권']))],
-            ["지속가능채권", str(len(latest_df[latest_df['채권종류'] == '지속가능채권']))],
-            ["지속가능연계채권", str(len(latest_df[latest_df['채권종류'] == '지속가능연계채권']))]
-        ])
-        
-        summary_ws.clear()
-        summary_ws.update('A1', summary_data)
-        
-        # 서식 설정
-        try:
-            cumulative_ws.format('A1:M1', {
-                'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
-                'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
-                'horizontalAlignment': 'CENTER'
-            })
-            
-            current_ws.format('A1:M1', {
-                'backgroundColor': {'red': 0.2, 'green': 0.4, 'blue': 0.2},
-                'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
-                'horizontalAlignment': 'CENTER'
-            })
-        except:
-            print("서식 설정 실패 (무시하고 계속)")
+        update_summary_sheet(summary_ws, domestic_df, overseas_df)
         
         print(f"\nGoogle Sheets 업데이트 완료:")
-        print(f"- 누적 데이터: {len(combined_df)}개 행")
-        print(f"- 최신 현황: {len(latest_df)}개 행")
-        print(f"- 고유 채권: {combined_df['표준코드'].nunique()}개")
+        print(f"- 국내 누적 데이터: {len(domestic_df)}개 행")
+        print(f"- 해외물 채권: {len(overseas_df)}개 행")
         
     except Exception as e:
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
         raise
 
-def send_telegram_notification(all_data_df):
-    """최근 일주일 내 상장한 ESG 채권 정보를 텔레그램으로 전송합니다."""
+def update_worksheet_data(worksheet, new_df, data_type):
+    """워크시트에 누적 데이터를 업데이트합니다."""
+    
+    # 기존 데이터 가져오기
+    print(f"\n{data_type} 기존 누적 데이터 확인 중...")
+    existing_data = worksheet.get_all_values()
+    
+    if existing_data and len(existing_data) > 1:
+        # 기존 데이터를 DataFrame으로 변환
+        existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
+        print(f"기존 {data_type} 누적 데이터: {len(existing_df)}개")
+        
+        # 새 데이터와 병합 (표준코드와 조회일자 기준 중복 제거)
+        combined_df = pd.concat([new_df, existing_df], ignore_index=True)
+        
+        # 중복 제거
+        if '표준코드' in combined_df.columns:
+            combined_df = combined_df.drop_duplicates(
+                subset=['표준코드', '조회일자'], 
+                keep='first'
+            )
+        else:
+            # 해외물의 경우 발행기관과 채권유형으로 중복 제거
+            combined_df = combined_df.drop_duplicates(
+                subset=['발행기관', '채권유형', '조회일자'], 
+                keep='first'
+            )
+        
+        # 정렬
+        combined_df = combined_df.sort_values(['조회일자', '발행기관'])
+        
+        print(f"중복 제거 후 총 {data_type} 데이터: {len(combined_df)}개")
+    else:
+        combined_df = new_df
+        print(f"기존 {data_type} 데이터가 없습니다. 새 데이터로 시작합니다.")
+    
+    # 워크시트 업데이트
+    update_worksheet_simple(worksheet, combined_df)
+    
+    return combined_df
+
+def update_worksheet_simple(worksheet, df):
+    """워크시트에 데이터를 간단히 업데이트합니다."""
+    
+    worksheet.clear()
+    
+    if df.empty:
+        worksheet.update('A1', [['데이터가 없습니다']])
+        return
+    
+    # 헤더 추가
+    headers = df.columns.tolist()
+    worksheet.update('A1', [headers])
+    
+    # 데이터 추가 (배치 처리)
+    df = df.fillna('')
+    values = df.astype(str).values.tolist()
+    
+    batch_size = 500
+    total_rows = len(values)
+    
+    # tqdm으로 업로드 진행 상황 표시
+    with tqdm(total=total_rows, desc="Google Sheets 업로드") as pbar:
+        for i in range(0, total_rows, batch_size):
+            batch_end = min(i + batch_size, total_rows)
+            batch_data = values[i:batch_end]
+            
+            start_row = i + 2
+            end_row = batch_end + 1
+            
+            num_cols = len(headers)
+            end_col = chr(ord('A') + num_cols - 1) if num_cols <= 26 else 'Z'
+            range_str = f'A{start_row}:{end_col}{end_row}'
+            
+            try:
+                worksheet.update(range_str, batch_data)
+                pbar.update(batch_end - i)
+                time.sleep(1)
+            except Exception as e:
+                print(f"\n배치 업로드 오류: {e}")
+                time.sleep(2)
+                try:
+                    worksheet.update(range_str, batch_data)
+                    pbar.update(batch_end - i)
+                except:
+                    print(f"재시도 실패. 계속 진행합니다.")
+                    continue
+
+def update_summary_sheet(summary_ws, domestic_df, overseas_df):
+    """요약 정보를 업데이트합니다."""
+    
+    # 국내 최신 데이터
+    if not domestic_df.empty:
+        latest_date = domestic_df['조회일자'].max()
+        latest_domestic_df = domestic_df[domestic_df['조회일자'] == latest_date]
+    else:
+        latest_domestic_df = pd.DataFrame()
+    
+    summary_data = [
+        ["마지막 업데이트", datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+        [""],
+        ["국내 ESG 채권", ""],
+        ["총 누적 데이터", str(len(domestic_df))],
+        ["고유 채권 수", str(domestic_df['표준코드'].nunique()) if not domestic_df.empty else "0"],
+        [""],
+        ["채권종류별 현황 (최신)", "개수"],
+        ["녹색채권", str(len(latest_domestic_df[latest_domestic_df['채권종류'] == '녹색채권']))],
+        ["사회적채권", str(len(latest_domestic_df[latest_domestic_df['채권종류'] == '사회적채권']))],
+        ["지속가능채권", str(len(latest_domestic_df[latest_domestic_df['채권종류'] == '지속가능채권']))],
+        ["지속가능연계채권", str(len(latest_domestic_df[latest_domestic_df['채권종류'] == '지속가능연계채권']))],
+        [""],
+        ["해외물 ESG 채권", ""],
+        ["총 채권 수", str(len(overseas_df))],
+        [""],
+        ["해외물 채권유형별 현황", "개수"]
+    ]
+    
+    # 해외물 채권유형별 현황
+    if not overseas_df.empty:
+        overseas_type_counts = overseas_df['채권유형'].value_counts()
+        for bond_type, count in overseas_type_counts.items():
+            summary_data.append([bond_type, str(count)])
+    
+    summary_ws.clear()
+    summary_ws.update('A1', summary_data)
+
+def send_telegram_notification(domestic_df, overseas_df):
+    """ESG 채권 정보를 텔레그램으로 전송합니다."""
     
     bot_token = os.environ.get('TELCO_NEWS_TOKEN')
     chat_id = os.environ.get('TELCO_NEWS_TESTER')
@@ -360,82 +468,80 @@ def send_telegram_notification(all_data_df):
         return
     
     try:
-        # 최신 데이터에서 상장일 기준으로 최근 일주일 데이터 필터링
+        # 최근 일주일 내 상장한 국내 채권
         today = datetime.now()
         week_ago = today - timedelta(days=7)
         
-        # 상장일을 datetime으로 변환
-        all_data_df['상장일_dt'] = pd.to_datetime(all_data_df['상장일'], errors='coerce')
+        message = f"📊 KRX ESG 채권 업데이트 완료!\n\n"
         
-        # 최근 일주일 내 상장된 채권 필터링
-        recent_bonds = all_data_df[
-            (all_data_df['상장일_dt'] >= week_ago) & 
-            (all_data_df['상장일_dt'] <= today)
-        ].copy()
-        
-        # 상장일 기준으로 정렬 (최신순)
-        recent_bonds = recent_bonds.sort_values('상장일_dt', ascending=False)
-        
-        # 메시지 작성
-        if len(recent_bonds) > 0:
-            message = f"📊 KRX ESG 채권 업데이트 완료!\n\n"
-            message += f"🗓️ 최근 일주일 신규 상장 ESG 채권 ({len(recent_bonds)}개)\n"
-            message += f"({week_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')})\n\n"
+        # 국내 채권 정보
+        if not domestic_df.empty:
+            domestic_df['상장일_dt'] = pd.to_datetime(domestic_df['상장일'], errors='coerce')
             
-            # 채권종류별 집계
-            bond_type_counts = recent_bonds['채권종류'].value_counts()
+            recent_domestic = domestic_df[
+                (domestic_df['상장일_dt'] >= week_ago) & 
+                (domestic_df['상장일_dt'] <= today)
+            ].copy()
             
-            for bond_type, count in bond_type_counts.items():
-                if bond_type == '녹색채권':
-                    emoji = '🌱'
-                elif bond_type == '사회적채권':
-                    emoji = '🤝'
-                elif bond_type == '지속가능채권':
-                    emoji = '♻️'
-                elif bond_type == '지속가능연계채권':
-                    emoji = '🔗'
-                else:
-                    emoji = '📌'
-                message += f"{emoji} {bond_type}: {count}개\n"
+            recent_domestic = recent_domestic.sort_values('상장일_dt', ascending=False)
             
-            message += "\n📋 상세 내역:\n"
-            
-            # 최대 10개까지만 표시
-            for idx, row in recent_bonds.head(10).iterrows():
-                bond_type_emoji = {
-                    '녹색채권': '🌱',
-                    '사회적채권': '🤝',
-                    '지속가능채권': '♻️',
-                    '지속가능연계채권': '🔗'
-                }.get(row['채권종류'], '📌')
+            if len(recent_domestic) > 0:
+                message += f"🇰🇷 국내 ESG 채권 - 최근 일주일 신규 상장 ({len(recent_domestic)}개)\n"
                 
-                message += f"\n{bond_type_emoji} [{row['상장일']}]\n"
-                message += f"• 발행기관: {row['발행기관']}\n"
-                message += f"• 종목명: {row['종목명']}\n"
-                message += f"• 발행금액: {row['발행금액(백만)']:,.0f}백만원\n"
+                # 채권종류별 집계
+                bond_type_counts = recent_domestic['채권종류'].value_counts()
                 
-            if len(recent_bonds) > 10:
-                message += f"\n... 외 {len(recent_bonds) - 10}개"
+                for bond_type, count in bond_type_counts.items():
+                    if bond_type == '녹색채권':
+                        emoji = '🌱'
+                    elif bond_type == '사회적채권':
+                        emoji = '🤝'
+                    elif bond_type == '지속가능채권':
+                        emoji = '♻️'
+                    elif bond_type == '지속가능연계채권':
+                        emoji = '🔗'
+                    else:
+                        emoji = '📌'
+                    message += f"{emoji} {bond_type}: {count}개\n"
                 
-        else:
-            message = f"📊 KRX ESG 채권 업데이트 완료!\n\n"
-            message += f"🗓️ 최근 일주일({week_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}) 동안\n"
-            message += f"신규 상장된 ESG 채권이 없습니다."
+                # 최대 5개까지만 표시
+                message += "\n상세 내역:\n"
+                for idx, row in recent_domestic.head(5).iterrows():
+                    message += f"• {row['발행기관']} - {row['종목명'][:20]}...\n"
+                
+                if len(recent_domestic) > 5:
+                    message += f"... 외 {len(recent_domestic) - 5}개\n"
+            else:
+                message += f"🇰🇷 국내: 최근 일주일 신규 상장 없음\n"
         
-        # 전체 통계 추가
-        total_bonds = len(all_data_df)
-        unique_bonds = all_data_df['표준코드'].nunique()
+        # 해외물 채권 정보
+        if not overseas_df.empty:
+            message += f"\n🌏 해외물 ESG 채권 현황\n"
+            message += f"• 총 {len(overseas_df)}개 채권\n"
+            
+            # 최근 발행 채권 (발행연월 기준)
+            overseas_df['발행연월_dt'] = pd.to_datetime(
+                overseas_df['발행연월'].astype(str).str[:4] + '-' + 
+                overseas_df['발행연월'].astype(str).str[5:7] + '-01',
+                errors='coerce'
+            )
+            
+            # 최근 6개월 이내 발행
+            six_months_ago = today - timedelta(days=180)
+            recent_overseas = overseas_df[overseas_df['발행연월_dt'] >= six_months_ago]
+            
+            if len(recent_overseas) > 0:
+                message += f"• 최근 6개월 발행: {len(recent_overseas)}개\n"
+                
+                # 최근 발행 3개 표시
+                recent_overseas_sorted = recent_overseas.sort_values('발행연월_dt', ascending=False)
+                for idx, row in recent_overseas_sorted.head(3).iterrows():
+                    message += f"  - {row['발행기관']} {row['채권유형']} ({row['발행금액']})\n"
         
-        message += f"\n\n📈 전체 ESG 채권 현황:\n"
-        message += f"• 총 데이터: {total_bonds:,}개\n"
-        message += f"• 고유 채권: {unique_bonds:,}개\n"
-        
-        # 채권종류별 전체 현황
-        total_type_counts = all_data_df[all_data_df['조회일자'] == all_data_df['조회일자'].max()]['채권종류'].value_counts()
-        message += "\n채권종류별 현황:\n"
-        for bond_type, count in total_type_counts.items():
-            if bond_type:  # 빈 값이 아닌 경우만
-                message += f"• {bond_type}: {count}개\n"
+        # 전체 통계
+        message += f"\n📈 전체 현황:\n"
+        message += f"• 국내 ESG 채권: {domestic_df['표준코드'].nunique():,}개\n"
+        message += f"• 해외물 ESG 채권: {len(overseas_df)}개\n"
         
         # 텔레그램 메시지 전송
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -483,24 +589,25 @@ def main():
     
     print("\nKRX ESG 채권 데이터 스크래핑 시작...")
     
+    # 1. 국내 ESG 채권 데이터 수집
     # 날짜 리스트 생성
     if start_date and end_date:
-        print(f"날짜 범위: {start_date} ~ {end_date}")
+        print(f"\n[국내 채권] 날짜 범위: {start_date} ~ {end_date}")
         dates_list = get_monthly_dates(start_date, end_date)
         print(f"조회할 날짜 ({len(dates_list)}개): {', '.join(dates_list)}")
     else:
         # 날짜 범위가 없으면 오늘 날짜만
         today = datetime.now().strftime('%Y%m%d')
         dates_list = [today]
-        print(f"단일 날짜 조회: {today}")
+        print(f"\n[국내 채권] 단일 날짜 조회: {today}")
     
-    all_data = []
+    domestic_data = []
     
     # tqdm으로 진행 상황 표시
-    for date in tqdm(dates_list, desc="데이터 수집 중"):
+    for date in tqdm(dates_list, desc="국내 채권 수집 중"):
         df = scrape_krx_esg_bonds_by_date(date)
         if not df.empty:
-            all_data.append(df)
+            domestic_data.append(df)
             tqdm.write(f"    → {date}: {len(df)}개 채권 수집 완료")
         else:
             tqdm.write(f"    → {date}: 데이터 없음")
@@ -508,27 +615,35 @@ def main():
         # API 부하 방지를 위한 대기
         time.sleep(2)
     
-    if all_data:
-        # 모든 데이터 병합
-        all_data_df = pd.concat(all_data, ignore_index=True)
-        print(f"\n총 수집된 데이터: {len(all_data_df)}개")
-        
-        # 조회일자별 수집 현황
-        print("\n조회일자별 수집 현황:")
-        date_counts = all_data_df['조회일자'].value_counts().sort_index()
-        for date, count in date_counts.items():
-            print(f"  - {date}: {count}개")
+    if domestic_data:
+        # 모든 국내 데이터 병합
+        domestic_df = pd.concat(domestic_data, ignore_index=True)
+        print(f"\n[국내 채권] 총 수집된 데이터: {len(domestic_df)}개")
     else:
+        print("\n[국내 채권] 수집된 데이터가 없습니다.")
+        domestic_df = pd.DataFrame()
+    
+    # 2. 해외물 ESG 채권 데이터 수집
+    print("\n[해외물 채권] 데이터 수집 중...")
+    overseas_df = scrape_krx_overseas_esg_bonds()
+    
+    if not overseas_df.empty:
+        print(f"[해외물 채권] 수집 완료: {len(overseas_df)}개")
+    else:
+        print("[해외물 채권] 데이터가 없습니다.")
+    
+    # 데이터가 하나도 없으면 종료
+    if domestic_df.empty and overseas_df.empty:
         print("\n수집된 데이터가 없습니다.")
         sys.exit(1)
     
     # Google Sheets 업데이트
     print("\nGoogle Sheets 업데이트 중...")
-    update_google_sheets(all_data_df, spreadsheet_id, credentials_json)
+    update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_json)
     
     # 텔레그램 알림 전송 (GitHub Actions 환경에서만)
     if 'GITHUB_ACTIONS' in os.environ:
-        send_telegram_notification(all_data_df)
+        send_telegram_notification(domestic_df, overseas_df)
     
     print("\n✅ 작업이 완료되었습니다.")
 
