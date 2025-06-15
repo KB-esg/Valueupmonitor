@@ -1,0 +1,39 @@
+name: Update KRX ESG Bonds Data
+
+on:
+  schedule:
+    # 매주 월요일 오전 9시 (한국시간 기준)
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # 수동 실행 가능
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 pandas gspread google-auth google-auth-oauthlib google-auth-httplib2
+    
+    - name: Run KRX ESG Bonds scraper
+      env:
+        KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
+        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE }}
+      run: |
+        python krx_esg_bonds_scraper.py
+    
+    - name: Commit and push if changed
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add -A
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update KRX ESG bonds data - $(date +'%Y-%m-%d')" && git push)
