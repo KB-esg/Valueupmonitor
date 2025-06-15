@@ -682,13 +682,34 @@ def send_telegram_notification(domestic_df, overseas_df):
                         emoji = '📌'
                     message += f"{emoji} {bond_type}: {count}개\n"
                 
-                # 최대 5개까지만 표시
-                message += "\n상세 내역:\n"
-                for idx, row in recent_domestic.head(5).iterrows():
-                    message += f"• {row['발행기관']} - {row['종목명'][:20]}...\n"
+                # 발행기관별로 그룹화하여 표시 (최대 10개 기관)
+                message += "\n발행기관별 내역:\n"
                 
-                if len(recent_domestic) > 5:
-                    message += f"... 외 {len(recent_domestic) - 5}개\n"
+                # 발행기관별로 그룹화
+                issuer_groups = recent_domestic.groupby('발행기관').agg({
+                    '채권종류': 'first',
+                    '발행금액(백만)': 'sum',
+                    '상장일': 'count'
+                }).reset_index()
+                
+                issuer_groups.columns = ['발행기관', '채권종류', '총발행금액', '채권수']
+                issuer_groups = issuer_groups.sort_values('총발행금액', ascending=False)
+                
+                for idx, row in issuer_groups.head(10).iterrows():
+                    bond_type_emoji = {
+                        '녹색채권': '🌱',
+                        '사회적채권': '🤝',
+                        '지속가능채권': '♻️',
+                        '지속가능연계채권': '🔗'
+                    }.get(row['채권종류'], '📌')
+                    
+                    if row['채권수'] > 1:
+                        message += f"• {row['발행기관']} - {row['채권수']}개 채권, 총 {row['총발행금액']:,.0f}백만원\n"
+                    else:
+                        message += f"• {row['발행기관']} - {row['총발행금액']:,.0f}백만원\n"
+                
+                if len(issuer_groups) > 10:
+                    message += f"... 외 {len(issuer_groups) - 10}개 기관\n"
             else:
                 message += f"🇰🇷 국내: 최근 일주일 신규 상장 없음\n"
         
@@ -724,11 +745,27 @@ def send_telegram_notification(domestic_df, overseas_df):
                 if len(recent_overseas) > 0:
                     message += f"• 최근 6개월 발행: {len(recent_overseas)}개\n"
                     
-                    # 최근 발행 3개 표시
+                    # 최근 발행 발행기관별로 표시 (최대 5개)
                     recent_overseas_sorted = recent_overseas.sort_values('발행연월_dt', ascending=False)
-                    message += "\n최근 발행:\n"
-                    for idx, row in recent_overseas_sorted.head(3).iterrows():
-                        message += f"  - {row['발행기관']} {row['채권유형']} ({row['발행금액']})\n"
+                    message += "\n최근 발행 기관:\n"
+                    
+                    # 발행기관별로 그룹화
+                    recent_issuers = recent_overseas_sorted.groupby('발행기관').agg({
+                        '채권유형': lambda x: ', '.join(x.unique()),
+                        '발행금액': lambda x: ', '.join(x),
+                        '발행연월': 'count'
+                    }).reset_index()
+                    
+                    recent_issuers.columns = ['발행기관', '채권유형', '발행금액', '건수']
+                    
+                    for idx, row in recent_issuers.head(5).iterrows():
+                        if row['건수'] > 1:
+                            message += f"  - {row['발행기관']} ({row['건수']}건)\n"
+                        else:
+                            message += f"  - {row['발행기관']} {row['채권유형']} ({row['발행금액']})\n"
+                    
+                    if len(recent_issuers) > 5:
+                        message += f"  ... 외 {len(recent_issuers) - 5}개 기관\n"
                 
                 # 새로 추가된 채권 확인 (이전 수집 대비)
                 new_bonds = active_df[active_df['조회일자'] == active_df['조회일자'].max()]
@@ -738,10 +775,21 @@ def send_telegram_notification(domestic_df, overseas_df):
         # 전체 통계
         message += f"\n📈 전체 현황:\n"
         message += f"• 국내 ESG 채권: {domestic_df['표준코드'].nunique():,}개\n"
-        message += f"• 해외물 ESG 채권: {len(overseas_df)}개 "
+        
+        # 국내 발행기관 수
+        if not domestic_df.empty:
+            domestic_issuers = domestic_df['발행기관'].nunique()
+            message += f"  - 발행기관: {domestic_issuers}개\n"
+        
+        message += f"• 해외물 ESG 채권: {len(overseas_df)}개"
         if '상태' in overseas_df.columns:
             active_count = len(overseas_df[overseas_df['상태'] == '활성'])
-            message += f"(활성: {active_count}개)"
+            message += f" (활성: {active_count}개)"
+        
+        # 해외물 발행기관 수
+        if not overseas_df.empty:
+            overseas_issuers = overseas_df['발행기관'].nunique()
+            message += f"\n  - 발행기관: {overseas_issuers}개"
         
         # 텔레그램 메시지 전송
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
