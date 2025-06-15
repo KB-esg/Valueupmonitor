@@ -1008,12 +1008,15 @@ class ESGFundScraper:
             
             for df_key, df in dfs.items():
                 sheet_name = sheet_mapping.get(df_key, df_key)
+                print(f"\n📋 Processing {sheet_name} (df_key: {df_key})...")
                 
                 try:
                     # 시트 가져오기 또는 생성
                     try:
                         worksheet = spreadsheet.worksheet(sheet_name)
+                        print(f"   ✅ Found existing sheet: {sheet_name}")
                     except:
+                        print(f"   📝 Creating new sheet: {sheet_name}")
                         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=5000, cols=20)
                     
                     if df_key == 'daily_chart':
@@ -1092,8 +1095,6 @@ class ESGFundScraper:
                                     print(f"   ✅ Daily chart updated with {len(combined_df)} total rows")
                             else:
                                 print(f"   ℹ️ No new data to add")
-                                updated_sheets.append(sheet_name)  # 변경 없어도 성공으로 표시
-                                continue
                         else:
                             # 첫 데이터인 경우
                             print(f"   📝 First time data - creating new sheet content")
@@ -1116,14 +1117,28 @@ class ESGFundScraper:
                             
                     elif df_key == 'chart_comparison':
                         # 비교 검증 데이터는 매번 새로 쓰기
+                        print(f"   🔄 Updating chart comparison data")
                         combined_df = df
                         combined_df = combined_df.sort_values(
                             by=['date', 'tab_type', 'method'], 
                             ascending=[False, True, True]
                         )
                         
+                        # 시트 업데이트
+                        worksheet.clear()
+                        combined_df = combined_df.fillna('')
+                        values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                        
+                        for i in range(len(values)):
+                            for j in range(len(values[i])):
+                                values[i][j] = str(values[i][j])
+                        
+                        worksheet.update(values)
+                        print(f"   ✅ Chart comparison updated with {len(combined_df)} rows")
+                        
                     else:
                         # TOP5와 신규펀드는 기존 로직 유지
+                        print(f"   📊 Processing {df_key} data...")
                         existing_data = worksheet.get_all_records()
                         
                         if existing_data:
@@ -1133,6 +1148,8 @@ class ESGFundScraper:
                                 key_cols = ['collection_date', 'tab_type', 'type', 'rank']
                             elif df_key == 'new_funds':
                                 key_cols = ['collection_date', 'tab_type', 'fund_name']
+                            else:
+                                key_cols = list(df.columns)  # 기본값
                             
                             # 중복 제거 후 결합
                             combined_df = pd.concat([df, existing_df], ignore_index=True)
@@ -1142,25 +1159,24 @@ class ESGFundScraper:
                                 by=['collection_date', 'tab_type'], 
                                 ascending=[False, True]
                             )
+                            print(f"   📊 Combined data: {len(df)} new + {len(existing_df)} existing = {len(combined_df)} total")
                         else:
                             combined_df = df
-                    
-                    # 데이터 쓰기
-                    worksheet.clear()
-                    
-                    # 모든 값을 문자열로 변환하여 저장
-                    combined_df = combined_df.fillna('')  # NaN을 빈 문자열로 변환
-                    values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
-                    
-                    # 값들을 문자열로 변환
-                    for i in range(len(values)):
-                        for j in range(len(values[i])):
-                            values[i][j] = str(values[i][j])
-                    
-                    worksheet.update(values)
+                            print(f"   📝 First time data: {len(combined_df)} rows")
+                        
+                        # 데이터 쓰기
+                        worksheet.clear()
+                        combined_df = combined_df.fillna('')
+                        values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                        
+                        for i in range(len(values)):
+                            for j in range(len(values[i])):
+                                values[i][j] = str(values[i][j])
+                        
+                        worksheet.update(values)
+                        print(f"   ✅ {sheet_name} updated successfully")
                     
                     updated_sheets.append(sheet_name)
-                    print(f"✅ Successfully updated {sheet_name} with {len(combined_df)} rows")
                     
                 except Exception as e:
                     print(f"❌ Error updating {sheet_name}: {e}")
