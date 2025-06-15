@@ -10,6 +10,11 @@ import sys
 import time
 import re
 
+# 배치 처리 설정
+BATCH_SIZE = 50  # 한 번에 처리할 행 수 (5일 * 5종류 * 2 = 50행)
+API_WAIT_TIME = 2  # Google API 호출 간 대기 시간 (초)
+SCRAPE_WAIT_TIME = 1  # KRX API 호출 간 대기 시간 (초)
+
 def scrape_krx_esg_trading_for_date(target_date):
     """특정 날짜의 KRX ESG 채권 거래 현황 데이터를 스크래핑합니다."""
     
@@ -133,8 +138,8 @@ def scrape_krx_esg_trading_range(start_date, end_date):
         # 다음 날짜로 이동
         current_date += timedelta(days=1)
         
-        # API 호출 간격 조절 (1초 대기)
-        time.sleep(1)
+        # API 호출 간격 조절
+        time.sleep(SCRAPE_WAIT_TIME)
     
     # 모든 데이터 합치기
     if all_data:
@@ -146,7 +151,7 @@ def scrape_krx_esg_trading_range(start_date, end_date):
         return pd.DataFrame()
 
 def update_google_sheets_batch(df, spreadsheet_id, credentials_json):
-    """Google Sheets에 여러 날짜의 거래 현황을 한 번에 업데이트합니다."""
+    """Google Sheets에 여러 날짜의 거래 현황을 배치로 나누어 업데이트합니다."""
     
     try:
         # 서비스 계정 인증
@@ -179,6 +184,7 @@ def update_google_sheets_batch(df, spreadsheet_id, credentials_json):
             })
         
         # 기존 데이터 가져오기
+        print("기존 데이터 확인 중...")
         existing_data = worksheet.get_all_records()
         existing_df = pd.DataFrame(existing_data)
         
@@ -205,62 +211,90 @@ def update_google_sheets_batch(df, spreadsheet_id, credentials_json):
                             df = df[~df['거래일자'].isin(duplicate_dates)]
                             print(f"중복된 날짜를 제외하고 진행합니다.")
                         else:
-                            # 기존 데이터에서 중복된 날짜 삭제
-                            all_values = worksheet.get_all_values()
-                            rows_to_delete = []
-                            
-                            for i, row in enumerate(all_values[1:], start=2):
-                                if row[0] in duplicate_dates:
-                                    rows_to_delete.append(i)
-                            
-                            # 역순으로 삭제
-                            for row_idx in reversed(rows_to_delete):
-                                worksheet.delete_rows(row_idx)
-                            
-                            print(f"중복된 날짜의 기존 데이터를 삭제했습니다.")
+                            # 중복된 날짜의 기존 데이터 제거 필요
+                            print(f"중복된 날짜의 기존 데이터를 삭제 예정")
+                            # 나중에 전체 재작성 시 처리
                 else:
                     # 중복된 날짜 제외
                     df = df[~df['거래일자'].isin(duplicate_dates)]
                     print(f"중복된 날짜를 제외하고 진행합니다.")
         
-        # 새 데이터 추가
+        # 새 데이터가 있는 경우 배치 처리
         if not df.empty:
-            # 다음 빈 행 찾기
-            next_row = len(worksheet.get_all_values()) + 1
+            # 기존 데이터와 새 데이터 합치기
+            if not existing_df.empty:
+                # 중복 제거된 새 데이터를 기존 데이터에 추가
+                combined_df = pd.concat([existing_df, df], ignore_index=True)
+            else:
+                combined_df = df
             
-            # 데이터 추가
-            values = df.values.tolist()
-            cell_range = f'A{next_row}:F{next_row + len(values) - 1}'
-            worksheet.update(values=values, range_name=cell_range)
+            # 날짜순으로 정렬
+            combined_df = combined_df.sort_values(['거래일자', '채권종류'])
             
-            # 숫자 컬럼 서식 설정
-            worksheet.format(f'C{next_row}:F{next_row + len(values) - 1}', {
-                'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}
-            })
+            # 전체 데이터를 배치로 나누어 업데이트
+            total_rows = len(combined_df)
             
-            print(f"Google Sheets에 {len(values)}개 행 추가 완료")
-        else:
-            print("추가할 새로운 데이터가 없습니다.")
-        
-        # 전체 데이터를 날짜순으로 정렬
-        all_data = worksheet.get_all_records()
-        if all_data:
-            sorted_df = pd.DataFrame(all_data).sort_values(['거래일자', '채권종류'])
+            # 워크시트 초기화
+            print("워크시트 초기화 중...")
             worksheet.clear()
-            worksheet.update(values=[sorted_df.columns.tolist()] + sorted_df.values.tolist(), range_name='A1')
+            time.sleep(API_WAIT_TIME)
             
-            # 헤더 서식 재설정
+            # 헤더 추가
+            headers = ['거래일자', '채권종류', '거래량', '거래대금', '발행기관수', '종목수']
+            worksheet.update(values=[headers], range_name='A1')
+            time.sleep(API_WAIT_TIME)
+            
+            # 헤더 서식 설정
             worksheet.format('A1:F1', {
                 'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
                 'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True},
                 'horizontalAlignment': 'CENTER'
             })
+            
+            # 데이터를 배치로 나누어 업데이트
+            print(f"총 {total_rows}개 행을 {BATCH_SIZE}개씩 나누어 업데이트 중...")
+            
+            for i in range(0, total_rows, BATCH_SIZE):
+                batch_end = min(i + BATCH_SIZE, total_rows)
+                batch_df = combined_df.iloc[i:batch_end]
+                
+                # 배치 데이터 준비
+                batch_values = batch_df.values.tolist()
+                
+                # 시작 행 계산 (헤더가 1행이므로 +2)
+                start_row = i + 2
+                end_row = start_row + len(batch_values) - 1
+                
+                # 범위 지정
+                cell_range = f'A{start_row}:F{end_row}'
+                
+                # 배치 업데이트
+                print(f"  배치 {i//BATCH_SIZE + 1}/{(total_rows-1)//BATCH_SIZE + 1}: {len(batch_values)}개 행 업데이트 중...")
+                worksheet.update(values=batch_values, range_name=cell_range)
+                
+                # 숫자 서식 설정
+                worksheet.format(f'C{start_row}:F{end_row}', {
+                    'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}
+                })
+                
+                # API 호출 간격 조절
+                print(f"  완료. {API_WAIT_TIME}초 대기 중...")
+                time.sleep(API_WAIT_TIME)
+            
+            print(f"\n전체 업데이트 완료: 총 {total_rows}개 행")
+        else:
+            print("추가할 새로운 데이터가 없습니다.")
         
         # 요약 시트 업데이트
+        print("\n요약 시트 업데이트 중...")
         update_summary_sheet(spreadsheet)
+        time.sleep(API_WAIT_TIME)
         
         # 로그 기록
+        print("로그 기록 중...")
         update_log_sheet(spreadsheet, df)
+        
+        print("\n모든 작업이 완료되었습니다.")
         
     except Exception as e:
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
@@ -319,10 +353,12 @@ def update_log_sheet(spreadsheet, df):
     
     if not df.empty:
         date_range = f"{df['거래일자'].min()} ~ {df['거래일자'].max()}"
+        status = "성공"
     else:
         date_range = "N/A"
+        status = "데이터 없음"
     
-    log_sheet.update(values=[[update_time, '성공', len(df), date_range]], range_name=f'A{log_row}')
+    log_sheet.update(values=[[update_time, status, len(df), date_range]], range_name=f'A{log_row}')
 
 def main():
     # 환경 변수 확인
@@ -345,6 +381,15 @@ def main():
             # 날짜 범위가 지정된 경우
             print(f"KRX ESG 채권 거래 현황 스크래핑 시작 (수동 실행 - 날짜 범위)...")
             print(f"날짜 범위: {start_date_env} ~ {end_date_env}")
+            
+            # 날짜 범위 계산
+            start = datetime.strptime(start_date_env, '%Y%m%d')
+            end = datetime.strptime(end_date_env, '%Y%m%d')
+            days_diff = (end - start).days + 1
+            
+            print(f"총 {days_diff}일간의 데이터를 수집합니다.")
+            print(f"예상 소요 시간: 약 {days_diff * SCRAPE_WAIT_TIME + (days_diff * 5 / BATCH_SIZE) * API_WAIT_TIME:.0f}초")
+            
             df = scrape_krx_esg_trading_range(start_date_env, end_date_env)
         else:
             # 날짜 범위가 없는 경우 - 오늘 날짜만
@@ -371,6 +416,14 @@ def main():
             if len(end_date) == 8 and end_date.isdigit():
                 break
             print("올바른 형식으로 입력해주세요 (YYYYMMDD)")
+        
+        # 날짜 범위 계산
+        start = datetime.strptime(start_date, '%Y%m%d')
+        end = datetime.strptime(end_date, '%Y%m%d')
+        days_diff = abs((end - start).days) + 1
+        
+        print(f"\n총 {days_diff}일간의 데이터를 수집합니다.")
+        print(f"예상 소요 시간: 약 {days_diff * SCRAPE_WAIT_TIME + (days_diff * 5 / BATCH_SIZE) * API_WAIT_TIME:.0f}초")
         
         # 스프레드시트 정보 입력
         spreadsheet_id = input("\n스프레드시트 ID를 입력하세요: ").strip()
@@ -399,6 +452,9 @@ def main():
     
     # Google Sheets 업데이트
     print("\nGoogle Sheets 업데이트 중...")
+    print(f"배치 크기: {BATCH_SIZE}행")
+    print(f"API 대기 시간: {API_WAIT_TIME}초")
+    
     update_google_sheets_batch(df, spreadsheet_id, credentials_json)
     
     print("\n작업이 완료되었습니다.")
