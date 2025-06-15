@@ -929,10 +929,25 @@ class ESGFundScraper:
                 print(f"      - Using {min_length} data points")
                 
                 for i in range(min_length):
+                    # 숫자 데이터 변환 함수
+                    def to_numeric(value):
+                        if value is None or value == '':
+                            return None
+                        try:
+                            # 문자열인 경우 숫자로 변환
+                            if isinstance(value, str):
+                                # 쉼표 제거
+                                value = value.replace(',', '')
+                                # 앞뒤 따옴표 제거
+                                value = value.strip("'\"")
+                            return float(value)
+                        except (ValueError, TypeError):
+                            return None
+                    
                     all_chart_data.append({
                         'date': dates[i],
-                        'setup_amount': setup_amounts[i] if i < len(setup_amounts) and setup_amounts else None,
-                        'return_rate': returns[i] if i < len(returns) and returns else None,
+                        'setup_amount': to_numeric(setup_amounts[i]) if i < len(setup_amounts) and setup_amounts else None,
+                        'return_rate': to_numeric(returns[i]) if i < len(returns) and returns else None,
                         'tab_type': tab_name,
                         'collection_date': collection_date,
                         'collection_time': collection_time,
@@ -1079,16 +1094,22 @@ class ESGFundScraper:
                                         ascending=[False, True]
                                     )
                                     
-                                    # 새 행 추가
+                                    # 새 행 추가 - 숫자 형식 보존
                                     new_values = []
                                     for _, row in new_rows.iterrows():
                                         row_values = []
                                         for col in existing_df.columns:
-                                            row_values.append(str(row.get(col, '')))
+                                            value = row.get(col, '')
+                                            # setup_amount와 return_rate는 숫자로 유지
+                                            if col in ['setup_amount', 'return_rate'] and value != '':
+                                                row_values.append(value)  # 숫자 그대로
+                                            else:
+                                                row_values.append(str(value))  # 나머지는 문자열
                                         new_values.append(row_values)
                                     
                                     if new_values:
-                                        worksheet.append_rows(new_values, value_input_option='RAW')
+                                        # USER_ENTERED로 변경하여 Google Sheets가 타입을 자동 인식
+                                        worksheet.append_rows(new_values, value_input_option='USER_ENTERED')
                                         print(f"   ✅ Appended {len(new_rows)} new rows (preserving chart references)")
                                         print(f"   ℹ️ Total rows now: {len(existing_data) + len(new_rows)}")
                                 else:
@@ -1100,16 +1121,29 @@ class ESGFundScraper:
                                         ascending=[False, True]
                                     )
                                     
-                                    # 전체 데이터 다시 쓰기
+                                    # 전체 데이터 다시 쓰기 - 숫자 형식 보존
                                     worksheet.clear()
-                                    combined_df = combined_df.fillna('')
-                                    values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
                                     
-                                    for i in range(len(values)):
-                                        for j in range(len(values[i])):
-                                            values[i][j] = str(values[i][j])
+                                    # 헤더
+                                    headers = combined_df.columns.values.tolist()
                                     
-                                    worksheet.update(values)
+                                    # 데이터 - 숫자 컬럼은 숫자로 유지
+                                    values = [headers]
+                                    for _, row in combined_df.iterrows():
+                                        row_values = []
+                                        for col in combined_df.columns:
+                                            value = row[col]
+                                            # NaN 처리
+                                            if pd.isna(value):
+                                                row_values.append('')
+                                            # setup_amount와 return_rate는 숫자로
+                                            elif col in ['setup_amount', 'return_rate']:
+                                                row_values.append(value)  # 숫자 그대로
+                                            else:
+                                                row_values.append(str(value))
+                                        values.append(row_values)
+                                    
+                                    worksheet.update(values, value_input_option='USER_ENTERED')
                                     print(f"   ✅ Daily chart updated with {len(combined_df)} total rows")
                             else:
                                 print(f"   ℹ️ No new data to add")
@@ -1122,15 +1156,26 @@ class ESGFundScraper:
                                 ascending=[False, True]
                             )
                             
-                            # 빈 값을 문자열로 변환
-                            combined_df = combined_df.fillna('')
-                            values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
+                            # 헤더
+                            headers = combined_df.columns.values.tolist()
                             
-                            for i in range(len(values)):
-                                for j in range(len(values[i])):
-                                    values[i][j] = str(values[i][j])
+                            # 데이터 - 숫자 컬럼은 숫자로 유지
+                            values = [headers]
+                            for _, row in combined_df.iterrows():
+                                row_values = []
+                                for col in combined_df.columns:
+                                    value = row[col]
+                                    # NaN 처리
+                                    if pd.isna(value):
+                                        row_values.append('')
+                                    # setup_amount와 return_rate는 숫자로
+                                    elif col in ['setup_amount', 'return_rate']:
+                                        row_values.append(value)  # 숫자 그대로
+                                    else:
+                                        row_values.append(str(value))
+                                values.append(row_values)
                             
-                            worksheet.update(values)
+                            worksheet.update(values, value_input_option='USER_ENTERED')
                             print(f"   ✅ Created daily chart with {len(combined_df)} rows")
                             
                     elif df_key == 'chart_comparison':
