@@ -1017,8 +1017,13 @@ class ESGFundScraper:
                         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=5000, cols=20)
                     
                     if df_key == 'daily_chart':
-                        # 일별 차트 - 기존 차트 참조를 보호하면서 업데이트
-                        existing_data = worksheet.get_all_records()
+                        # 일별 차트 - 기존 데이터 보존하면서 새 데이터만 추가
+                        try:
+                            existing_data = worksheet.get_all_records()
+                            print(f"   📊 Existing data in daily chart: {len(existing_data)} rows")
+                        except Exception as e:
+                            print(f"   ⚠️ Error reading existing data: {e}")
+                            existing_data = []
                         
                         if existing_data:
                             existing_df = pd.DataFrame(existing_data)
@@ -1029,25 +1034,24 @@ class ESGFundScraper:
                             # 비교를 위한 키 생성
                             existing_keys = set()
                             for _, row in existing_df.iterrows():
-                                key = '|'.join([str(row[k]) for k in merge_keys])
+                                key = '|'.join([str(row.get(k, '')) for k in merge_keys])
                                 existing_keys.add(key)
                             
                             new_rows_list = []
                             for _, row in df.iterrows():
-                                key = '|'.join([str(row[k]) for k in merge_keys])
+                                key = '|'.join([str(row.get(k, '')) for k in merge_keys])
                                 if key not in existing_keys:
                                     new_rows_list.append(row.to_dict())
                             
                             if new_rows_list:
                                 new_rows = pd.DataFrame(new_rows_list)
-                                print(f"   📝 Found {len(new_rows)} new rows for daily chart")
+                                print(f"   📝 Found {len(new_rows)} new rows to add")
                                 
-                                # 옵션 1: 새 데이터만 끝에 추가 (차트 참조 안전)
-                                # 가장 안전하지만 정렬이 깨질 수 있음
-                                if os.environ.get('PRESERVE_CHART_REFS', 'true').lower() == 'true':
-                                    # 기존 데이터 끝에 새 데이터 추가
-                                    row_to_append = len(existing_data) + 2  # 헤더 포함
-                                    
+                                # 차트 참조 보존 모드 확인
+                                preserve_refs = os.environ.get('PRESERVE_CHART_REFS', 'true').lower() == 'true'
+                                
+                                if preserve_refs:
+                                    # 새 데이터를 끝에 추가 (차트 참조 안전)
                                     # 새 데이터를 날짜 내림차순으로 정렬
                                     new_rows = new_rows.sort_values(
                                         by=['date', 'tab_type'], 
@@ -1055,31 +1059,29 @@ class ESGFundScraper:
                                     )
                                     
                                     # 새 행 추가
-                                    new_values = new_rows.values.tolist()
-                                    for i in range(len(new_values)):
-                                        for j in range(len(new_values[i])):
-                                            new_values[i][j] = str(new_values[i][j])
+                                    new_values = []
+                                    for _, row in new_rows.iterrows():
+                                        row_values = []
+                                        for col in existing_df.columns:
+                                            row_values.append(str(row.get(col, '')))
+                                        new_values.append(row_values)
                                     
-                                    # append_rows 사용
-                                    worksheet.append_rows(new_values, value_input_option='RAW')
-                                    print(f"   ✅ Appended {len(new_rows)} new rows (preserving chart references)")
-                                    
-                                    # 정렬 안내 메시지
-                                    print(f"   ℹ️ Note: Data is appended to preserve chart references. Manual sorting may be needed.")
-                                
-                                # 옵션 2: 전체 재정렬 (차트 참조가 깨질 수 있음)
+                                    if new_values:
+                                        worksheet.append_rows(new_values, value_input_option='RAW')
+                                        print(f"   ✅ Appended {len(new_rows)} new rows (preserving chart references)")
+                                        print(f"   ℹ️ Total rows now: {len(existing_data) + len(new_rows)}")
                                 else:
-                                    # 새 데이터와 기존 데이터 결합
-                                    combined_df = pd.concat([new_rows, existing_df], ignore_index=True)
-                                    
-                                    # 전체 데이터를 날짜 내림차순으로 정렬
+                                    # 전체 재정렬 모드
+                                    print(f"   🔄 Re-sorting entire dataset")
+                                    combined_df = pd.concat([existing_df, new_rows], ignore_index=True)
                                     combined_df = combined_df.sort_values(
                                         by=['date', 'tab_type'], 
                                         ascending=[False, True]
                                     )
                                     
-                                    # 시트 업데이트
+                                    # 전체 데이터 다시 쓰기
                                     worksheet.clear()
+                                    combined_df = combined_df.fillna('')
                                     values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
                                     
                                     for i in range(len(values)):
@@ -1087,20 +1089,22 @@ class ESGFundScraper:
                                             values[i][j] = str(values[i][j])
                                     
                                     worksheet.update(values)
-                                    print(f"   ✅ Daily chart updated with total {len(combined_df)} rows (sorted)")
+                                    print(f"   ✅ Daily chart updated with {len(combined_df)} total rows")
                             else:
-                                print(f"   ℹ️ No new data to add to daily chart")
+                                print(f"   ℹ️ No new data to add")
+                                updated_sheets.append(sheet_name)  # 변경 없어도 성공으로 표시
                                 continue
-                                
                         else:
                             # 첫 데이터인 경우
+                            print(f"   📝 First time data - creating new sheet content")
                             combined_df = df
                             combined_df = combined_df.sort_values(
                                 by=['date', 'tab_type'], 
                                 ascending=[False, True]
                             )
                             
-                            worksheet.clear()
+                            # 빈 값을 문자열로 변환
+                            combined_df = combined_df.fillna('')
                             values = [combined_df.columns.values.tolist()] + combined_df.values.tolist()
                             
                             for i in range(len(values)):
@@ -1108,6 +1112,7 @@ class ESGFundScraper:
                                     values[i][j] = str(values[i][j])
                             
                             worksheet.update(values)
+                            print(f"   ✅ Created daily chart with {len(combined_df)} rows")
                             
                     elif df_key == 'chart_comparison':
                         # 비교 검증 데이터는 매번 새로 쓰기
