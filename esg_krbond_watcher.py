@@ -327,7 +327,7 @@ def update_log_sheet(spreadsheet, df):
 def main():
     # 환경 변수 확인
     if 'GITHUB_ACTIONS' in os.environ:
-        # GitHub Actions 환경 - 오늘 날짜만 처리
+        # GitHub Actions 환경
         spreadsheet_id = os.environ.get('KRDEBT_SPREADSHEET_ID')
         credentials_json = os.environ.get('GOOGLE_SERVICE')
         
@@ -337,11 +337,20 @@ def main():
             print(f"GOOGLE_SERVICE: {'설정됨' if credentials_json else '미설정'}")
             sys.exit(1)
         
-        print("KRX ESG 채권 거래 현황 스크래핑 시작 (자동 실행)...")
+        # 날짜 범위 확인 (수동 실행 시)
+        start_date_env = os.environ.get('START_DATE', '').strip()
+        end_date_env = os.environ.get('END_DATE', '').strip()
         
-        # 오늘 날짜 데이터만 수집
-        today = datetime.now()
-        df = scrape_krx_esg_trading_for_date(today)
+        if start_date_env and end_date_env:
+            # 날짜 범위가 지정된 경우
+            print(f"KRX ESG 채권 거래 현황 스크래핑 시작 (수동 실행 - 날짜 범위)...")
+            print(f"날짜 범위: {start_date_env} ~ {end_date_env}")
+            df = scrape_krx_esg_trading_range(start_date_env, end_date_env)
+        else:
+            # 날짜 범위가 없는 경우 - 오늘 날짜만
+            print("KRX ESG 채권 거래 현황 스크래핑 시작 (자동 실행)...")
+            today = datetime.now()
+            df = scrape_krx_esg_trading_for_date(today)
         
     else:
         # 로컬 테스트 환경 - 날짜 범위 입력 받기
