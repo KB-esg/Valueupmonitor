@@ -43,7 +43,7 @@ jobs:
         START_DATE: ${{ github.event.inputs.start_date }}
         END_DATE: ${{ github.event.inputs.end_date }}
       run: |
-        python krx_esg_bonds_scraper.py
+        python esg_krbond_scraper.py
     
     - name: Commit and push if changed
       run: |
