@@ -1,0 +1,46 @@
+name: 01_KRX ESG 채권 거래 현황 수집
+
+on:
+  schedule:
+    # 매일 오전 9시 (KST) 실행 - UTC 00:00
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 수동 실행 허용
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 체크아웃
+      uses: actions/checkout@v3
+    
+    - name: Python 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 의존성 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: KRX ESG 채권 거래 현황 스크래핑
+      env:
+        KRDEBT_SPREADSHEET_ID: ${{ secrets.KRDEBT_SPREADSHEET_ID }}
+        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      run: |
+        python krx_esg_trading_scraper.py
+    
+    - name: 실패 시 이슈 생성
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const date = new Date().toLocaleDateString('ko-KR');
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `[자동] KRX ESG 채권 거래 현황 수집 실패 - ${date}`,
+            body: `KRX ESG 채권 거래 현황 자동 수집 중 오류가 발생했습니다.\n\n워크플로우: ${context.workflow}\n실행 링크: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            labels: ['bug', 'automation']
+          })
