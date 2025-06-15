@@ -321,12 +321,12 @@ def main():
     if 'GITHUB_ACTIONS' in os.environ:
         # GitHub Actions 환경
         spreadsheet_id = os.environ.get('KRDEBT_SPREADSHEET_ID')
-        credentials_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+        credentials_json = os.environ.get('GOOGLE_SERVICE')
         
         if not spreadsheet_id or not credentials_json:
             print("필수 환경 변수가 설정되지 않았습니다.")
             print(f"KRDEBT_SPREADSHEET_ID: {'설정됨' if spreadsheet_id else '미설정'}")
-            print(f"GOOGLE_CREDENTIALS_JSON: {'설정됨' if credentials_json else '미설정'}")
+            print(f"GOOGLE_SERVICE: {'설정됨' if credentials_json else '미설정'}")
             sys.exit(1)
     else:
         # 로컬 테스트 환경
