@@ -504,25 +504,60 @@ class ESGFundScraper:
         """신규 펀드 데이터 파싱"""
         new_funds_data = []
         
-        # 신규 펀드가 없는지 확인
-        no_data = await page.query_selector('#newFundZone .nodata')
-        if no_data:
-            return new_funds_data
-        
-        # 신규 펀드 데이터 가져오기
-        rows = await page.query_selector_all('#newFundZone tr')
-        for row in rows:
-            cols = await row.query_selector_all('td')
-            if len(cols) >= 3:
-                fund_name = await cols[0].inner_text()
-                company = await cols[1].inner_text()
-                setup_date = await cols[2].inner_text()
+        try:
+            # 신규 펀드가 없는지 확인
+            no_data = await page.query_selector('#newFundZone .nodata')
+            if no_data:
+                print("   ℹ️ No new funds found")
+                return new_funds_data
+            
+            # 신규 펀드 테이블 찾기
+            # 테이블 구조가 다를 수 있으므로 여러 방법 시도
+            
+            # 방법 1: tr 태그 직접 찾기
+            rows = await page.query_selector_all('#newFundZone tr')
+            
+            # 방법 2: tbody 안의 tr 찾기
+            if not rows:
+                rows = await page.query_selector_all('#newFundZone tbody tr')
+            
+            # 방법 3: table 안의 모든 tr 찾기
+            if not rows:
+                rows = await page.query_selector_all('#newFundZone table tr')
+            
+            print(f"   📝 Found {len(rows)} rows in new funds zone")
+            
+            for i, row in enumerate(rows):
+                # 헤더 행 건너뛰기
+                if i == 0:
+                    header_text = await row.inner_text()
+                    if '펀드명' in header_text or '운용사' in header_text:
+                        continue
                 
-                new_funds_data.append({
-                    'fund_name': fund_name.strip(),
-                    'company': company.strip(),
-                    'setup_date': setup_date.strip()
-                })
+                cols = await row.query_selector_all('td')
+                if len(cols) >= 3:
+                    fund_name = await cols[0].inner_text()
+                    company = await cols[1].inner_text()
+                    setup_date = await cols[2].inner_text()
+                    
+                    # 빈 데이터 건너뛰기
+                    if fund_name.strip() and company.strip():
+                        new_funds_data.append({
+                            'fund_name': fund_name.strip(),
+                            'company': company.strip(),
+                            'setup_date': setup_date.strip()
+                        })
+                        print(f"      - New fund: {fund_name.strip()}")
+                elif len(cols) > 0:
+                    # 컬럼 수가 다른 경우 디버깅
+                    print(f"      ⚠️ Row {i} has {len(cols)} columns")
+            
+            print(f"   ✅ Parsed {len(new_funds_data)} new funds")
+            
+        except Exception as e:
+            print(f"   ❌ Error parsing new funds: {e}")
+            import traceback
+            traceback.print_exc()
         
         return new_funds_data
     
@@ -1302,6 +1337,75 @@ class ESGFundScraper:
             print(f"✅ Cleaned up {deleted_count} old files")
         
         return deleted_count
+    
+    def calculate_fund_metrics(self, dfs):
+        """각 펀드 유형별 설정액 증감률과 주간 수익률 계산"""
+        metrics = {}
+        
+        if 'daily_chart' not in dfs or dfs['daily_chart'].empty:
+            return metrics
+        
+        df = dfs['daily_chart'].copy()
+        
+        # 날짜를 datetime으로 변환
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 각 탭별로 계산
+        for tab_type in ['SRI', 'ESG_주식', 'ESG_채권']:
+            tab_df = df[df['tab_type'] == tab_type].copy()
+            
+            if tab_df.empty:
+                continue
+            
+            # 날짜순 정렬 (오래된 것부터)
+            tab_df = tab_df.sort_values('date')
+            
+            # 가장 최근 데이터
+            latest = tab_df.iloc[-1]
+            
+            # 1주일 전 데이터 찾기
+            one_week_ago = latest['date'] - pd.Timedelta(days=7)
+            week_ago_data = tab_df[tab_df['date'] <= one_week_ago]
+            
+            if not week_ago_data.empty:
+                week_ago = week_ago_data.iloc[-1]
+                
+                # 설정액 증감률 계산
+                if pd.notna(latest['setup_amount']) and pd.notna(week_ago['setup_amount']) and week_ago['setup_amount'] != 0:
+                    setup_change = ((latest['setup_amount'] - week_ago['setup_amount']) / week_ago['setup_amount']) * 100
+                else:
+                    setup_change = None
+                
+                # 주간 수익률 (return_rate의 차이)
+                if pd.notna(latest['return_rate']) and pd.notna(week_ago['return_rate']):
+                    weekly_return = latest['return_rate'] - week_ago['return_rate']
+                else:
+                    weekly_return = None
+            else:
+                setup_change = None
+                weekly_return = None
+            
+            # 탭 이름 매핑
+            display_name = {
+                'SRI': 'SRI 펀드',
+                'ESG_주식': 'ESG 주식형',
+                'ESG_채권': 'ESG 채권형'
+            }.get(tab_type, tab_type)
+            
+            metrics[display_name] = {
+                'latest_setup_amount': latest['setup_amount'] if pd.notna(latest['setup_amount']) else None,
+                'latest_return_rate': latest['return_rate'] if pd.notna(latest['return_rate']) else None,
+                'setup_change_pct': setup_change,
+                'weekly_return': weekly_return,
+                'latest_date': latest['date'].strftime('%Y-%m-%d')
+            }
+            
+            print(f"   📊 {display_name} 지표:")
+            print(f"      - 최신 설정액: {latest['setup_amount']:.2f}억원" if pd.notna(latest['setup_amount']) else "      - 최신 설정액: N/A")
+            print(f"      - 설정액 증감률: {setup_change:.2f}%" if setup_change is not None else "      - 설정액 증감률: N/A")
+            print(f"      - 주간 수익률: {weekly_return:.2f}%" if weekly_return is not None else "      - 주간 수익률: N/A")
+        
+        return metrics
     
     def send_telegram_message(self, message):
         """Telegram 메시지 전송"""
