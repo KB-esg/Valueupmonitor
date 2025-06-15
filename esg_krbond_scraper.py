@@ -341,6 +341,47 @@ def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_j
         print(f"Google Sheets 업데이트 중 오류 발생: {e}")
         raise
 
+def update_worksheet_data(worksheet, new_df, data_type):
+    """워크시트에 누적 데이터를 업데이트합니다."""
+    
+    # 기존 데이터 가져오기
+    print(f"\n{data_type} 기존 누적 데이터 확인 중...")
+    existing_data = worksheet.get_all_values()
+    
+    if existing_data and len(existing_data) > 1:
+        # 기존 데이터를 DataFrame으로 변환
+        existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
+        print(f"기존 {data_type} 누적 데이터: {len(existing_df)}개")
+        
+        # 새 데이터와 병합 (표준코드와 조회일자 기준 중복 제거)
+        combined_df = pd.concat([new_df, existing_df], ignore_index=True)
+        
+        # 중복 제거
+        if '표준코드' in combined_df.columns:
+            combined_df = combined_df.drop_duplicates(
+                subset=['표준코드', '조회일자'], 
+                keep='first'
+            )
+        else:
+            # 해외물의 경우 발행기관과 채권유형으로 중복 제거
+            combined_df = combined_df.drop_duplicates(
+                subset=['발행기관', '채권유형', '조회일자'], 
+                keep='first'
+            )
+        
+        # 정렬
+        combined_df = combined_df.sort_values(['조회일자', '발행기관'])
+        
+        print(f"중복 제거 후 총 {data_type} 데이터: {len(combined_df)}개")
+    else:
+        combined_df = new_df
+        print(f"기존 {data_type} 데이터가 없습니다. 새 데이터로 시작합니다.")
+    
+    # 워크시트 업데이트
+    update_worksheet_simple(worksheet, combined_df)
+    
+    return combined_df
+
 def update_overseas_cumulative_data(worksheet, new_df):
     """해외물 채권의 누적 데이터를 업데이트합니다."""
     
