@@ -302,7 +302,7 @@ def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_j
             latest_domestic_df = combined_domestic_df[combined_domestic_df['조회일자'] == latest_date].copy()
             
             print(f"\n국내 최신 현황 업데이트 중 (조회일자: {latest_date})")
-            update_worksheet_simple(domestic_current_ws, latest_domestic_df)
+            update_worksheet_simple(domestic_current_ws, latest_domestic_df, force_update=True)
         
         # 3. 해외물 누적 데이터 워크시트
         try:
@@ -322,7 +322,7 @@ def update_google_sheets(domestic_df, overseas_df, spreadsheet_id, credentials_j
         # 해외물 최신 데이터 업데이트
         if not overseas_df.empty:
             print(f"\n해외물 최신 현황 업데이트 중...")
-            update_worksheet_simple(overseas_current_ws, overseas_df)
+            update_worksheet_simple(overseas_current_ws, overseas_df, force_update=True)
         
         # 5. 요약 정보 업데이트
         try:
@@ -384,8 +384,22 @@ def update_worksheet_data(worksheet, new_df, data_type):
                 new_unique_df = pd.DataFrame(new_rows)
                 print(f"  → 신규 추가: {len(new_unique_df)}개")
                 combined_df = pd.concat([existing_df, new_unique_df], ignore_index=True)
+                
+                # 정렬
+                if '조회일자' in combined_df.columns:
+                    # 조회일자를 datetime으로 변환하여 정렬
+                    combined_df['조회일자_temp'] = pd.to_datetime(combined_df['조회일자'], format='%Y%m%d', errors='coerce')
+                    combined_df = combined_df.sort_values(['조회일자_temp', '발행기관'], ascending=[False, True])
+                    combined_df = combined_df.drop(columns=['조회일자_temp'])
+                else:
+                    combined_df = combined_df.sort_values(['발행기관'])
+                
+                print(f"최종 {data_type} 누적 데이터: {len(combined_df)}개")
+                
+                # 워크시트 업데이트 (변경사항이 있을 때만)
+                update_worksheet_simple(worksheet, combined_df)
             else:
-                print(f"  → 신규 채권 없음")
+                print(f"  → 신규 채권 없음 (업데이트 생략)")
                 combined_df = existing_df
         else:
             # 해외물의 경우 발행기관과 채권유형으로 중복 제거
@@ -394,23 +408,20 @@ def update_worksheet_data(worksheet, new_df, data_type):
                 subset=['발행기관', '채권유형', '조회일자'], 
                 keep='first'  # 기존 데이터 우선
             )
-        
-        # 정렬
-        if '조회일자' in combined_df.columns:
-            # 조회일자를 datetime으로 변환하여 정렬
-            combined_df['조회일자_temp'] = pd.to_datetime(combined_df['조회일자'], format='%Y%m%d', errors='coerce')
-            combined_df = combined_df.sort_values(['조회일자_temp', '발행기관'], ascending=[False, True])
-            combined_df = combined_df.drop(columns=['조회일자_temp'])
-        else:
+            
+            # 정렬
             combined_df = combined_df.sort_values(['발행기관'])
-        
-        print(f"최종 {data_type} 누적 데이터: {len(combined_df)}개")
+            
+            print(f"최종 {data_type} 누적 데이터: {len(combined_df)}개")
+            
+            # 워크시트 업데이트
+            update_worksheet_simple(worksheet, combined_df)
     else:
         combined_df = new_df
         print(f"기존 {data_type} 데이터가 없습니다. 새 데이터로 시작합니다.")
-    
-    # 워크시트 업데이트
-    update_worksheet_simple(worksheet, combined_df)
+        
+        # 워크시트 업데이트
+        update_worksheet_simple(worksheet, combined_df)
     
     return combined_df
 
@@ -458,73 +469,87 @@ def update_overseas_cumulative_data(worksheet, new_df):
         print(f"  → 신규 채권: {len(new_keys)}개")
         print(f"  → 만기/상환 추정: {len(disappeared_keys)}개")
         
-        # 결과 DataFrame 구성
-        result_rows = []
-        
-        # 1. 기존 데이터 처리
-        for _, row in existing_df.iterrows():
-            if row['unique_key'] in disappeared_keys:
-                # 사라진 채권은 상태를 '만기/상환'으로 변경
-                row['상태'] = '만기/상환'
-                row['최종확인일'] = new_df['조회일자'].iloc[0] if not new_df.empty else datetime.now().strftime('%Y%m%d')
-            elif row['unique_key'] in current_keys:
-                # 여전히 존재하는 채권은 최신 정보로 업데이트
-                new_row = new_df[new_df['unique_key'] == row['unique_key']].iloc[0]
-                row = new_row.copy()
-                row['상태'] = '활성'
-            # 이미 만기/상환 상태인 채권은 그대로 유지
-            result_rows.append(row)
-        
-        # 2. 신규 채권 추가
-        for key in new_keys:
-            new_row = new_df[new_df['unique_key'] == key].iloc[0].copy()
-            new_row['상태'] = '활성'
-            result_rows.append(new_row)
-        
-        # DataFrame 생성 및 정리
-        combined_df = pd.DataFrame(result_rows)
-        
-        # unique_key 컬럼 제거
-        combined_df = combined_df.drop(columns=['unique_key'])
-        
-        # 정렬 (상태별, 발행연월 역순)
-        combined_df['발행연월_sort'] = pd.to_datetime(
-            combined_df['발행연월'].astype(str).str[:4] + '-' + 
-            combined_df['발행연월'].astype(str).str[5:7] + '-01',
-            errors='coerce'
-        )
-        
-        combined_df = combined_df.sort_values(
-            ['상태', '발행연월_sort', '발행기관'], 
-            ascending=[True, False, True]
-        )
-        
-        combined_df = combined_df.drop(columns=['발행연월_sort'])
-        
-        print(f"최종 해외물 누적 데이터: {len(combined_df)}개 (활성: {len(combined_df[combined_df['상태'] == '활성'])}개)")
-        
+        # 변경사항이 있는 경우만 처리
+        if len(new_keys) > 0 or len(disappeared_keys) > 0:
+            # 결과 DataFrame 구성
+            result_rows = []
+            
+            # 1. 기존 데이터 처리
+            for _, row in existing_df.iterrows():
+                if row['unique_key'] in disappeared_keys:
+                    # 사라진 채권은 상태를 '만기/상환'으로 변경
+                    row['상태'] = '만기/상환'
+                    row['최종확인일'] = new_df['조회일자'].iloc[0] if not new_df.empty else datetime.now().strftime('%Y%m%d')
+                elif row['unique_key'] in current_keys:
+                    # 여전히 존재하는 채권은 최신 정보로 업데이트
+                    new_row = new_df[new_df['unique_key'] == row['unique_key']].iloc[0]
+                    row = new_row.copy()
+                    row['상태'] = '활성'
+                # 이미 만기/상환 상태인 채권은 그대로 유지
+                result_rows.append(row)
+            
+            # 2. 신규 채권 추가
+            for key in new_keys:
+                new_row = new_df[new_df['unique_key'] == key].iloc[0].copy()
+                new_row['상태'] = '활성'
+                result_rows.append(new_row)
+            
+            # DataFrame 생성 및 정리
+            combined_df = pd.DataFrame(result_rows)
+            
+            # unique_key 컬럼 제거
+            combined_df = combined_df.drop(columns=['unique_key'])
+            
+            # 정렬 (상태별, 발행연월 역순)
+            combined_df['발행연월_sort'] = pd.to_datetime(
+                combined_df['발행연월'].astype(str).str[:4] + '-' + 
+                combined_df['발행연월'].astype(str).str[5:7] + '-01',
+                errors='coerce'
+            )
+            
+            combined_df = combined_df.sort_values(
+                ['상태', '발행연월_sort', '발행기관'], 
+                ascending=[True, False, True]
+            )
+            
+            combined_df = combined_df.drop(columns=['발행연월_sort'])
+            
+            print(f"최종 해외물 누적 데이터: {len(combined_df)}개 (활성: {len(combined_df[combined_df['상태'] == '활성'])}개)")
+            
+            # 워크시트 업데이트 (변경사항이 있을 때만)
+            update_worksheet_simple(worksheet, combined_df)
+        else:
+            print(f"  → 변경사항 없음 (업데이트 생략)")
+            combined_df = existing_df
+            combined_df = combined_df.drop(columns=['unique_key'])
+            
     else:
         combined_df = new_df.copy()
         combined_df['상태'] = '활성'
         print(f"기존 해외물 데이터가 없습니다. 새 데이터로 시작합니다.")
-    
-    # 워크시트 업데이트
-    update_worksheet_simple(worksheet, combined_df)
+        
+        # 워크시트 업데이트
+        update_worksheet_simple(worksheet, combined_df)
     
     return combined_df
 
-def update_worksheet_simple(worksheet, df):
+def update_worksheet_simple(worksheet, df, force_update=False):
     """워크시트에 데이터를 간단히 업데이트합니다."""
+    
+    # force_update가 False이고 데이터가 비어있으면 업데이트하지 않음
+    if not force_update and df.empty:
+        print("  → 업데이트할 데이터가 없습니다.")
+        return
     
     worksheet.clear()
     
     if df.empty:
-        worksheet.update('A1', [['데이터가 없습니다']])
+        worksheet.update([['데이터가 없습니다']], 'A1')
         return
     
     # 헤더 추가
     headers = df.columns.tolist()
-    worksheet.update('A1', [headers])
+    worksheet.update([headers], 'A1')
     
     # 데이터 추가 (배치 처리)
     df = df.fillna('')
@@ -547,14 +572,14 @@ def update_worksheet_simple(worksheet, df):
             range_str = f'A{start_row}:{end_col}{end_row}'
             
             try:
-                worksheet.update(range_str, batch_data)
+                worksheet.update(batch_data, range_str)
                 pbar.update(batch_end - i)
                 time.sleep(1)
             except Exception as e:
                 print(f"\n배치 업로드 오류: {e}")
                 time.sleep(2)
                 try:
-                    worksheet.update(range_str, batch_data)
+                    worksheet.update(batch_data, range_str)
                     pbar.update(batch_end - i)
                 except:
                     print(f"재시도 실패. 계속 진행합니다.")
@@ -608,7 +633,7 @@ def update_summary_sheet(summary_ws, domestic_df, overseas_df):
             summary_data.append([bond_type, str(count)])
     
     summary_ws.clear()
-    summary_ws.update('A1', summary_data)
+    summary_ws.update(summary_data, 'A1')
 
 def send_telegram_notification(domestic_df, overseas_df):
     """ESG 채권 정보를 텔레그램으로 전송합니다."""
