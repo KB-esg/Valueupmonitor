@@ -353,26 +353,58 @@ def update_worksheet_data(worksheet, new_df, data_type):
         existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
         print(f"기존 {data_type} 누적 데이터: {len(existing_df)}개")
         
-        # 새 데이터와 병합 (표준코드와 조회일자 기준 중복 제거)
-        combined_df = pd.concat([new_df, existing_df], ignore_index=True)
+        # 데이터 타입 맞추기 (문자열로 통일)
+        for col in existing_df.columns:
+            existing_df[col] = existing_df[col].astype(str)
+        for col in new_df.columns:
+            new_df[col] = new_df[col].astype(str)
         
-        # 중복 제거
-        if '표준코드' in combined_df.columns:
-            combined_df = combined_df.drop_duplicates(
-                subset=['표준코드', '조회일자'], 
-                keep='first'
-            )
+        # 국내 채권의 경우 표준코드와 종목명으로 고유 키 생성
+        if '표준코드' in new_df.columns and '종목명' in new_df.columns:
+            # 기존 데이터의 고유 키 집합 생성
+            existing_keys = set()
+            for _, row in existing_df.iterrows():
+                key = f"{row.get('표준코드', '')}_{row.get('종목명', '')}"
+                existing_keys.add(key)
+            
+            # 새 데이터에서 중복되지 않는 것만 필터링
+            new_rows = []
+            duplicates = 0
+            for _, row in new_df.iterrows():
+                key = f"{row.get('표준코드', '')}_{row.get('종목명', '')}"
+                if key not in existing_keys:
+                    new_rows.append(row)
+                else:
+                    duplicates += 1
+            
+            if duplicates > 0:
+                print(f"  → 중복 제거: {duplicates}개 (이미 존재하는 채권)")
+            
+            if new_rows:
+                new_unique_df = pd.DataFrame(new_rows)
+                print(f"  → 신규 추가: {len(new_unique_df)}개")
+                combined_df = pd.concat([existing_df, new_unique_df], ignore_index=True)
+            else:
+                print(f"  → 신규 채권 없음")
+                combined_df = existing_df
         else:
             # 해외물의 경우 발행기관과 채권유형으로 중복 제거
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
             combined_df = combined_df.drop_duplicates(
                 subset=['발행기관', '채권유형', '조회일자'], 
-                keep='first'
+                keep='first'  # 기존 데이터 우선
             )
         
         # 정렬
-        combined_df = combined_df.sort_values(['조회일자', '발행기관'])
+        if '조회일자' in combined_df.columns:
+            # 조회일자를 datetime으로 변환하여 정렬
+            combined_df['조회일자_temp'] = pd.to_datetime(combined_df['조회일자'], format='%Y%m%d', errors='coerce')
+            combined_df = combined_df.sort_values(['조회일자_temp', '발행기관'], ascending=[False, True])
+            combined_df = combined_df.drop(columns=['조회일자_temp'])
+        else:
+            combined_df = combined_df.sort_values(['발행기관'])
         
-        print(f"중복 제거 후 총 {data_type} 데이터: {len(combined_df)}개")
+        print(f"최종 {data_type} 누적 데이터: {len(combined_df)}개")
     else:
         combined_df = new_df
         print(f"기존 {data_type} 데이터가 없습니다. 새 데이터로 시작합니다.")
@@ -394,63 +426,83 @@ def update_overseas_cumulative_data(worksheet, new_df):
         existing_df = pd.DataFrame(existing_data[1:], columns=existing_data[0])
         print(f"기존 해외물 누적 데이터: {len(existing_df)}개")
         
-        # 새 데이터와 병합
-        combined_df = pd.concat([new_df, existing_df], ignore_index=True)
+        # 데이터 타입 맞추기 (문자열로 통일)
+        for col in existing_df.columns:
+            existing_df[col] = existing_df[col].astype(str)
+        for col in new_df.columns:
+            new_df[col] = new_df[col].astype(str)
         
-        # 중복 제거를 위한 고유 키 생성 (발행기관 + 채권유형 + 발행금액 + 발행연월)
-        combined_df['unique_key'] = (combined_df['발행기관'].astype(str) + '_' + 
-                                    combined_df['채권유형'].astype(str) + '_' + 
-                                    combined_df['발행금액'].astype(str) + '_' + 
-                                    combined_df['발행연월'].astype(str))
+        # 고유 키 생성 (발행기관 + 채권유형 + 발행금액 + 발행연월)
+        existing_df['unique_key'] = (existing_df['발행기관'].astype(str) + '_' + 
+                                    existing_df['채권유형'].astype(str) + '_' + 
+                                    existing_df['발행금액'].astype(str) + '_' + 
+                                    existing_df['발행연월'].astype(str))
         
-        # 조회일자를 datetime으로 변환하여 최신 데이터 우선
-        combined_df['조회일자_dt'] = pd.to_datetime(combined_df['조회일자'], format='%Y%m%d', errors='coerce')
+        new_df['unique_key'] = (new_df['발행기관'].astype(str) + '_' + 
+                              new_df['채권유형'].astype(str) + '_' + 
+                              new_df['발행금액'].astype(str) + '_' + 
+                              new_df['발행연월'].astype(str))
         
-        # unique_key별로 가장 최신 조회일자의 데이터만 유지
-        combined_df = combined_df.sort_values('조회일자_dt', ascending=False)
-        combined_df = combined_df.drop_duplicates(subset=['unique_key'], keep='first')
+        # 기존 채권 중 활성 상태인 것들의 키 집합
+        existing_active_keys = set(existing_df[existing_df.get('상태', '활성') == '활성']['unique_key'])
         
-        # 임시 컬럼 제거
-        combined_df = combined_df.drop(columns=['unique_key', '조회일자_dt'])
+        # 현재 데이터의 키 집합
+        current_keys = set(new_df['unique_key'])
         
-        # 발행연월과 발행기관으로 정렬
-        combined_df = combined_df.sort_values(['발행연월', '발행기관'], ascending=[False, True])
+        # 새로운 채권 (기존에 없던 것)
+        new_keys = current_keys - set(existing_df['unique_key'])
         
-        print(f"중복 제거 후 총 해외물 데이터: {len(combined_df)}개")
+        # 사라진 채권 (기존 활성 중 현재 없는 것)
+        disappeared_keys = existing_active_keys - current_keys
         
-        # 현재 데이터에 없지만 누적에는 있는 채권 확인 (상환/만기 채권)
-        if not new_df.empty:
-            current_keys = set(
-                new_df['발행기관'].astype(str) + '_' + 
-                new_df['채권유형'].astype(str) + '_' + 
-                new_df['발행금액'].astype(str) + '_' + 
-                new_df['발행연월'].astype(str)
-            )
-            
-            existing_keys = set(
-                existing_df['발행기관'].astype(str) + '_' + 
-                existing_df['채권유형'].astype(str) + '_' + 
-                existing_df['발행금액'].astype(str) + '_' + 
-                existing_df['발행연월'].astype(str)
-            )
-            
-            disappeared_keys = existing_keys - current_keys
-            if disappeared_keys:
-                print(f"현재 리스트에서 사라진 채권: {len(disappeared_keys)}개 (상환/만기 추정)")
-                
-                # 사라진 채권들의 상태 표시를 위해 별도 컬럼 추가
-                combined_df['상태'] = combined_df.apply(
-                    lambda row: '만기/상환' if (
-                        row['발행기관'].astype(str) + '_' + 
-                        row['채권유형'].astype(str) + '_' + 
-                        row['발행금액'].astype(str) + '_' + 
-                        row['발행연월'].astype(str)
-                    ) in disappeared_keys else '활성', 
-                    axis=1
-                )
-        else:
-            combined_df['상태'] = '활성'
-            
+        print(f"  → 신규 채권: {len(new_keys)}개")
+        print(f"  → 만기/상환 추정: {len(disappeared_keys)}개")
+        
+        # 결과 DataFrame 구성
+        result_rows = []
+        
+        # 1. 기존 데이터 처리
+        for _, row in existing_df.iterrows():
+            if row['unique_key'] in disappeared_keys:
+                # 사라진 채권은 상태를 '만기/상환'으로 변경
+                row['상태'] = '만기/상환'
+                row['최종확인일'] = new_df['조회일자'].iloc[0] if not new_df.empty else datetime.now().strftime('%Y%m%d')
+            elif row['unique_key'] in current_keys:
+                # 여전히 존재하는 채권은 최신 정보로 업데이트
+                new_row = new_df[new_df['unique_key'] == row['unique_key']].iloc[0]
+                row = new_row.copy()
+                row['상태'] = '활성'
+            # 이미 만기/상환 상태인 채권은 그대로 유지
+            result_rows.append(row)
+        
+        # 2. 신규 채권 추가
+        for key in new_keys:
+            new_row = new_df[new_df['unique_key'] == key].iloc[0].copy()
+            new_row['상태'] = '활성'
+            result_rows.append(new_row)
+        
+        # DataFrame 생성 및 정리
+        combined_df = pd.DataFrame(result_rows)
+        
+        # unique_key 컬럼 제거
+        combined_df = combined_df.drop(columns=['unique_key'])
+        
+        # 정렬 (상태별, 발행연월 역순)
+        combined_df['발행연월_sort'] = pd.to_datetime(
+            combined_df['발행연월'].astype(str).str[:4] + '-' + 
+            combined_df['발행연월'].astype(str).str[5:7] + '-01',
+            errors='coerce'
+        )
+        
+        combined_df = combined_df.sort_values(
+            ['상태', '발행연월_sort', '발행기관'], 
+            ascending=[True, False, True]
+        )
+        
+        combined_df = combined_df.drop(columns=['발행연월_sort'])
+        
+        print(f"최종 해외물 누적 데이터: {len(combined_df)}개 (활성: {len(combined_df[combined_df['상태'] == '활성'])}개)")
+        
     else:
         combined_df = new_df.copy()
         combined_df['상태'] = '활성'
