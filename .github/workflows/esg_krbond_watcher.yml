@@ -2,8 +2,8 @@ name: KRX ESG 채권 거래 현황 수집
 
 on:
   schedule:
-    # 매일 오전 9시 (KST) 실행 - UTC 00:00
-    - cron: '0 0 * * *'
+    # 매일 18시 (KST) 실행 - UTC 09:00
+    - cron: '0 9 * * *'
   workflow_dispatch:  # 수동 실행 허용
     inputs:
       start_date:
