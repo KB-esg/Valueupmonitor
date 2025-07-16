@@ -11,7 +11,7 @@ MSIT 통신 통계 모니터링 시스템 - 모듈화된 클래스 기반 구조
 4. 행 누락 문제 해결 (SKT, KT, LGU+, MVNO 등)
 5. 향상된 오류 처리 및 로깅
 """
-
+import sys
 import os
 import re
 import json
