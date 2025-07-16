@@ -14,3 +14,5 @@ webdriver-manager
 opencv-python
 pytesseract
 playwright
+numpy
+opencv-python
