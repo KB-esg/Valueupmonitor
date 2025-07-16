@@ -13,3 +13,4 @@ selenium-stealth
 webdriver-manager
 opencv-python
 pytesseract
+playwright
