@@ -3804,14 +3804,29 @@ class MSITMonitor:
         self.config = self.config_manager.config
         self.logger = LoggingUtils.setup_enhanced_logging()
         
+        # 초기화 로그
+        self.logger.info("="*50)
+        self.logger.info("MSITMonitor 초기화 시작")
+        self.logger.info(f"Python 버전: {sys.version}")
+        self.logger.info(f"작업 디렉토리: {os.getcwd()}")
+        self.logger.info(f"환경 변수 확인:")
+        self.logger.info(f"  - TELCO_NEWS_TOKEN: {'설정됨' if self.config.telegram_token else '없음'}")
+        self.logger.info(f"  - TELCO_NEWS_TESTER: {'설정됨' if self.config.chat_id else '없음'}")
+        self.logger.info(f"  - MSIT_GSPREAD_ref: {'설정됨' if self.config.gspread_creds else '없음'}")
+        self.logger.info(f"  - MSIT_SPREADSHEET_ID: {self.config.spreadsheet_id or '없음'}")
+        self.logger.info(f"  - DAYS_RANGE: {os.environ.get('DAYS_RANGE', '4')}")
+        self.logger.info(f"  - START_PAGE: {os.environ.get('START_PAGE', '1')}")
+        self.logger.info(f"  - END_PAGE: {os.environ.get('END_PAGE', '5')}")
+        self.logger.info("="*50)
+        
         # 컴포넌트 초기화
-        self.web_driver = None  # 실행 시점에 초기화
+        self.web_driver = None
         self.google_sheets = GoogleSheetsManager(self.config)
         self.telegram = TelegramNotifier(self.config)
         
         # 추출기 초기화
-        self.extractors = []  # 실행 시점에 초기화
-        self.parser = None  # 실행 시점에 초기화
+        self.extractors = []
+        self.parser = None
   
     async def run_monitor(
         self,
@@ -3828,23 +3843,49 @@ class MSITMonitor:
         
         try:
             self.logger.info(f"=== MSIT 통신 통계 모니터링 시작 ===")
-            if reverse_order:
-                self.logger.info(f"검색 범위: 페이지 {end_page}~{start_page} (역순), days_range={days_range}")
-            else:
-                self.logger.info(f"검색 범위: 페이지 {start_page}~{end_page}, days_range={days_range}")
+            self.logger.info(f"실행 파라미터:")
+            self.logger.info(f"  - days_range: {days_range}")
+            self.logger.info(f"  - check_sheets: {check_sheets}")
+            self.logger.info(f"  - start_page: {start_page}")
+            self.logger.info(f"  - end_page: {end_page}")
+            self.logger.info(f"  - start_date: {start_date}")
+            self.logger.info(f"  - end_date: {end_date}")
+            self.logger.info(f"  - reverse_order: {reverse_order}")
             
-            # Google Sheets 클라이언트 초기화 (await 추가)
+            if reverse_order:
+                self.logger.info(f"검색 범위: 페이지 {end_page}~{start_page} (역순)")
+            else:
+                self.logger.info(f"검색 범위: 페이지 {start_page}~{end_page}")
+            
+            # Google Sheets 클라이언트 초기화
             if check_sheets:
-                sheets_initialized = await self.google_sheets.setup_client()  # await 추가
-                if not sheets_initialized:
-                    self.logger.warning("Google Sheets 클라이언트 초기화 실패, 시트 업데이트 건너뜀")
+                self.logger.info("Google Sheets 클라이언트 초기화 시작...")
+                try:
+                    sheets_initialized = await self.google_sheets.setup_client()
+                    if not sheets_initialized:
+                        self.logger.warning("Google Sheets 클라이언트 초기화 실패, 시트 업데이트 건너뜀")
+                        check_sheets = False
+                    else:
+                        self.logger.info("Google Sheets 클라이언트 초기화 성공")
+                except Exception as gs_err:
+                    self.logger.error(f"Google Sheets 초기화 중 오류: {str(gs_err)}")
                     check_sheets = False
             
             # Playwright 초기화
-            async with async_playwright() as playwright:
+            self.logger.info("Playwright 초기화 시작...")
+            playwright = None
+            browser = None
+            context = None
+            page = None
+            
+            try:
+                playwright = await async_playwright().start()
+                self.logger.info("Playwright 시작 완료")
+                
                 # 웹드라이버 초기화
                 self.web_driver = WebDriverManager(self.config)
-                browser, context, page = await self.web_driver.setup_browser(playwright)  # playwright 인스턴스 전달
+                browser, context, page = await self.web_driver.setup_browser(playwright)
+                self.logger.info("브라우저 설정 완료")
                 
                 # 추출기 초기화
                 self.extractors = [
@@ -3853,30 +3894,52 @@ class MSITMonitor:
                     OCRExtractor(self.config)
                 ]
                 self.parser = PageParser(self.config, self.extractors)
+                self.logger.info("추출기 초기화 완료")
                 
                 # 사이트 접속
                 try:
-                    await page.goto(self.config.landing_url)
-                    await page.wait_for_load_state("networkidle")
+                    self.logger.info(f"랜딩 페이지 접속 시도: {self.config.landing_url}")
+                    await page.goto(self.config.landing_url, wait_until='networkidle')
                     self.logger.info("랜딩 페이지 접속 성공")
                     
+                    # 스크린샷 저장
+                    await self.web_driver.take_screenshot("landing_page", page)
+                    
                     # 통계 페이지로 이동
-                    await page.goto(self.config.stats_url)
-                    await page.wait_for_load_state("networkidle")
+                    self.logger.info(f"통계 페이지 접속 시도: {self.config.stats_url}")
+                    await page.goto(self.config.stats_url, wait_until='networkidle')
                     self.logger.info("통계 페이지 접속 성공")
                     
                     # 스크린샷 저장
                     await self.web_driver.take_screenshot("stats_page", page)
                     
-                except Exception as e:
-                    self.logger.error(f"사이트 접속 중 오류: {str(e)}")
-                    return
+                    # 페이지 로드 확인
+                    try:
+                        board_list = await page.wait_for_selector(".board_list", timeout=15000)
+                        if board_list:
+                            self.logger.info("게시물 목록(.board_list) 확인됨")
+                        else:
+                            self.logger.warning("게시물 목록을 찾을 수 없음")
+                    except Exception as board_err:
+                        self.logger.error(f"게시물 목록 확인 실패: {str(board_err)}")
+                        # 페이지 소스 저장 (디버깅용)
+                        page_source = await page.content()
+                        with open("debug_page_source.html", "w", encoding='utf-8') as f:
+                            f.write(page_source)
+                        self.logger.info("디버깅용 페이지 소스 저장: debug_page_source.html")
+                    
+                except Exception as nav_err:
+                    self.logger.error(f"사이트 접속 중 오류: {str(nav_err)}")
+                    await self.web_driver.take_screenshot("error_navigation", page)
+                    raise
                 
                 # 역순 탐색 설정
                 if reverse_order:
                     page_sequence = range(end_page, start_page - 1, -1)
                 else:
                     page_sequence = range(start_page, end_page + 1)
+                
+                self.logger.info(f"페이지 탐색 순서: {list(page_sequence)}")
                 
                 # 전체 결과 추적
                 all_posts = []
@@ -3889,15 +3952,20 @@ class MSITMonitor:
                         self.logger.info("이전 페이지에서 날짜 범위 조건으로 검색 중단")
                         break
                     
-                    self.logger.info(f"페이지 {page_num} 탐색 시작")
+                    self.logger.info(f"{'='*30} 페이지 {page_num} 탐색 시작 {'='*30}")
                     
-                    # 페이지 이동 (page 인자 제거)
-                    page_navigation_success = await self.web_driver.navigate_to_page(page_num)
-                    if not page_navigation_success:
-                        self.logger.warning(f"페이지 {page_num}으로 이동 실패, 다음 페이지로 진행")
-                        continue
+                    # 첫 페이지가 아닌 경우 페이지 이동
+                    if page_num != 1:
+                        page_navigation_success = await self.web_driver.navigate_to_page(page_num)
+                        if not page_navigation_success:
+                            self.logger.warning(f"페이지 {page_num}으로 이동 실패, 다음 페이지로 진행")
+                            continue
+                    
+                    # 페이지 스크린샷
+                    await self.web_driver.take_screenshot(f"page_{page_num}", page)
                     
                     # 페이지 콘텐츠 파싱
+                    self.logger.info(f"페이지 {page_num} 콘텐츠 파싱 시작")
                     page_posts, stats_posts, result_info = await self.parser.parse_page_content(
                         page,
                         page_num=page_num,
@@ -3908,7 +3976,18 @@ class MSITMonitor:
                     )
                     
                     # 파싱 결과 기록
-                    self.logger.info(f"페이지 {page_num} 파싱 결과: {len(page_posts)}개 게시물, {len(stats_posts)}개 통신 통계")
+                    self.logger.info(f"페이지 {page_num} 파싱 결과:")
+                    self.logger.info(f"  - 전체 게시물: {len(page_posts)}개")
+                    self.logger.info(f"  - 통신 통계 게시물: {len(stats_posts)}개")
+                    self.logger.info(f"  - 결과 정보: {result_info}")
+                    
+                    # 게시물 상세 정보 로깅
+                    if page_posts:
+                        self.logger.info("발견된 게시물:")
+                        for i, post in enumerate(page_posts[:5]):  # 처음 5개만
+                            self.logger.info(f"  {i+1}. {post.get('date', '')} - {post.get('title', '')}")
+                        if len(page_posts) > 5:
+                            self.logger.info(f"  ... 외 {len(page_posts)-5}개")
                     
                     # 다음 페이지 진행 여부
                     continue_to_next_page = result_info.get('continue_to_next_page', True)
@@ -3920,37 +3999,45 @@ class MSITMonitor:
                     # 잠시 대기
                     await asyncio.sleep(2)
                 
+                self.logger.info(f"{'='*50}")
+                self.logger.info(f"전체 페이지 탐색 완료:")
+                self.logger.info(f"  - 총 게시물: {len(all_posts)}개")
+                self.logger.info(f"  - 통신 통계 게시물: {len(telecom_stats_posts)}개")
+                
                 # 통신 통계 게시물 처리
                 data_updates = []
                 if check_sheets and telecom_stats_posts:
                     self.logger.info(f"{len(telecom_stats_posts)}개 통신 통계 게시물 처리 시작")
                     data_updates = await self._process_telecom_posts(page, telecom_stats_posts)
-                    
-                # 통합 시트 업데이트
-                if check_sheets and data_updates:
-                    try:
-                        await self.google_sheets._create_consolidated_sheets(data_updates)
-                    except Exception as consol_err:
-                        self.logger.error(f"통합 시트 생성 중 오류: {str(consol_err)}")
-                
-                # 구형 시트 정리 (선택적)
-                if check_sheets and data_updates and self.config.cleanup_old_sheets:
-                    self.logger.info("구형 시트 정리 시작")
-                    removed_count = await self.google_sheets._cleanup_old_sheets()  # await 추가
-                    self.logger.info(f"{removed_count}개 구형 시트 제거 완료")
+                    self.logger.info(f"처리 완료: {len(data_updates)}개 데이터 업데이트")
                 
                 # 텔레그램 알림 전송
                 if all_posts or data_updates:
-                    await self.telegram.send_notification(all_posts, data_updates)
-                    self.logger.info(f"알림 전송 완료: {len(all_posts)}개 게시물, {len(data_updates)}개 업데이트")
+                    self.logger.info("텔레그램 알림 전송 시작")
+                    try:
+                        await self.telegram.send_notification(all_posts, data_updates)
+                        self.logger.info(f"알림 전송 완료: {len(all_posts)}개 게시물, {len(data_updates)}개 업데이트")
+                    except Exception as tg_err:
+                        self.logger.error(f"텔레그램 알림 전송 실패: {str(tg_err)}")
                 else:
                     self.logger.info(f"최근 {days_range}일 내 새 게시물이 없습니다")
                 
-                # 브라우저 종료
-                await context.close()
-                await browser.close()
-        
+            finally:
+                # 리소스 정리
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
+                if browser:
+                    await browser.close()
+                if playwright:
+                    await playwright.stop()
+                self.logger.info("브라우저 리소스 정리 완료")
+                
         except Exception as e:
+            self.logger.error(f"모니터링 실행 중 치명적 오류: {str(e)}")
+            import traceback
+            self.logger.error(f"스택 트레이스:\n{traceback.format_exc()}")
             await self._handle_errors(e, "모니터링 실행")
         
         finally:
@@ -3958,84 +4045,52 @@ class MSITMonitor:
             end_time = time.time()
             self.logger.info(f"총 실행 시간: {end_time - start_time:.2f}초")
             self.logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
+            
+            # 로그 파일 위치 출력
+            self.logger.info(f"로그 파일: msit_monitor_detailed.log")
+            
+            # 스크린샷 목록 출력
+            screenshots_dir = Path("./screenshots")
+            if screenshots_dir.exists():
+                screenshots = list(screenshots_dir.glob("*.png"))
+                if screenshots:
+                    self.logger.info(f"저장된 스크린샷 {len(screenshots)}개:")
+                    for ss in screenshots[:5]:
+                        self.logger.info(f"  - {ss.name}")
+                    if len(screenshots) > 5:
+                        self.logger.info(f"  ... 외 {len(screenshots)-5}개")
+
+async def main():
+    """메인 실행 함수"""
+    try:
+        # 환경 변수 파싱
+        days_range = int(os.environ.get('DAYS_RANGE', '4'))
+        start_page = int(os.environ.get('START_PAGE', '1'))
+        end_page = int(os.environ.get('END_PAGE', '5'))
+        check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
+        check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
+        start_date = os.environ.get('START_DATE', '')
+        end_date = os.environ.get('END_DATE', '')
+        reverse_order_str = os.environ.get('REVERSE_ORDER', 'true').lower()
+        reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
+        
+        # 모니터 실행
+        monitor = MSITMonitor()
+        await monitor.run_monitor(
+            days_range=days_range,
+            check_sheets=check_sheets,
+            start_page=start_page,
+            end_page=end_page,
+            start_date=start_date if start_date else None,
+            end_date=end_date if end_date else None,
+            reverse_order=reverse_order
+        )
     
-    async def _process_telecom_posts(
-        self, 
-        page: Page,
-        telecom_posts: List[Dict]
-    ) -> List[Dict]:
-        """통신 통계 게시물 처리"""
-        data_updates = []
-        
-        for i, post in enumerate(telecom_posts):
-            try:
-                self.logger.info(f"게시물 {i+1}/{len(telecom_posts)} 처리 중: {post.get('title', '')}")
-                
-                # 바로보기 링크 파라미터 추출
-                file_params = await self.parser.find_view_link_params(page, post)
-                
-                if not file_params:
-                    self.logger.warning(f"바로보기 링크 파라미터 추출 실패: {post.get('title', '')}")
-                    continue
-                
-                # 문서 데이터 추출
-                sheets_data = await self.parser.extract_document_data(page, file_params)
-                
-                if sheets_data and any(not df.empty for df in sheets_data.values()):
-                    # 추출 성공
-                    self.logger.info(f"데이터 추출 성공: {post.get('title', '')}, {len(sheets_data)}개 시트")
-                    
-                    # 업데이트 데이터 준비
-                    update_data = {
-                        'sheets': sheets_data,
-                        'post_info': post
-                    }
-                    
-                    if 'date' in file_params:
-                        update_data['date'] = file_params['date']
-                    
-                    # Google Sheets 업데이트
-                    success = await self.google_sheets.update_sheets([update_data])  # await 추가
-                    if success:
-                        self.logger.info(f"Google Sheets 업데이트 성공: {post.get('title', '')}")
-                        data_updates.append(update_data)
-                    else:
-                        self.logger.warning(f"Google Sheets 업데이트 실패: {post.get('title', '')}")
-                else:
-                    self.logger.warning(f"데이터 추출 실패 또는 빈 데이터: {post.get('title', '')}")
-                
-                # API 제한 방지
-                await asyncio.sleep(2)
-                
-            except Exception as e:
-                await self._handle_errors(e, f"게시물 처리: {post.get('title', '')}")
-        
-        return data_updates
-    
-    async def _handle_errors(self, error: Exception, context: str):
-        """오류 처리"""
-        self.logger.error(f"{context} 중 오류 발생: {str(error)}")
-        
-        # 스택 트레이스 로깅
-        import traceback
-        self.logger.error(f"스택 트레이스: {traceback.format_exc()}")
-        
-        # 중요 오류는 텔레그램으로 알림
-        try:
-            error_msg = f"⚠️ MSIT 모니터링 오류 ({context}):\n{str(error)}"
-            if len(error_msg) > 500:
-                error_msg = error_msg[:500] + "..."
-                
-            await self.telegram.send_notification(
-                posts=[{
-                    'title': f"모니터링 오류: {context}",
-                    'date': datetime.now().strftime('%Y-%m-%d'),
-                    'department': 'System Error',
-                    'url': ''
-                }]
-            )
-        except Exception as notify_err:
-            self.logger.error(f"오류 알림 전송 실패: {str(notify_err)}")
+    except Exception as e:
+        logging.error(f"메인 함수 오류: {str(e)}", exc_info=True)
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 # ================================
 # 주요 개선사항 및 수정 포인트
