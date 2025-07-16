@@ -72,14 +72,10 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    - name: Install Chrome
+    - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-        google-chrome --version  # 디버깅용 버전 출력
-
-    - name: Install Xvfb
-      run: sudo apt-get install -y xvfb
+        sudo apt-get install -y xvfb
 
     - name: Install Tesseract OCR
       run: |
@@ -93,11 +89,14 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then
-          pip install -r requirements.txt
-        else
-          pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager pytesseract opencv-python pillow numpy
-        fi
+        # Playwright 기반 dependencies 설치
+        pip install playwright beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib pytesseract opencv-python pillow numpy
+
+    - name: Install Playwright browsers
+      run: |
+        # Playwright 브라우저 설치 (중요!)
+        playwright install chromium
+        playwright install-deps
 
     - name: Create directories
       run: |
@@ -126,6 +125,7 @@ jobs:
         CLEANUP_OLD_SHEETS: ${{ github.event.inputs.cleanup_old_sheets || 'false' }}
         PYTHONIOENCODING: utf-8
       run: |
+        # Xvfb 시작 (headless 환경을 위해)
         export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
         sleep 2
@@ -133,70 +133,6 @@ jobs:
         # 모니터링 스크립트 실행
         echo "모니터링 스크립트 실행..."
         python msit_monitor.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
-
-    - name: Create simple capture script
-      run: |
-        echo "import os, sys, time" > simple_capture.py
-        echo "from selenium import webdriver" >> simple_capture.py
-        echo "from selenium.webdriver.chrome.service import Service" >> simple_capture.py
-        echo "from selenium.webdriver.chrome.options import Options" >> simple_capture.py
-        echo "from webdriver_manager.chrome import ChromeDriverManager" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "def capture_url(url, output_path):" >> simple_capture.py
-        echo "    options = Options()" >> simple_capture.py
-        echo "    options.add_argument('--no-sandbox')" >> simple_capture.py
-        echo "    options.add_argument('--disable-dev-shm-usage')" >> simple_capture.py
-        echo "    options.add_argument('--headless')" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "    try:" >> simple_capture.py
-        echo "        print(f\"URL 접속: {url}\")" >> simple_capture.py
-        echo "        driver.get(url)" >> simple_capture.py
-        echo "        time.sleep(10)  # 로딩 대기" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "        # 스크린샷 저장" >> simple_capture.py
-        echo "        driver.save_screenshot(output_path)" >> simple_capture.py
-        echo "        print(f\"스크린샷 저장 완료: {output_path}\")" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "        # 페이지 소스 저장" >> simple_capture.py
-        echo "        with open('document_content.html', 'w', encoding='utf-8') as f:" >> simple_capture.py
-        echo "            f.write(driver.page_source)" >> simple_capture.py
-        echo "        print(\"HTML 내용 저장 완료\")" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "        return True" >> simple_capture.py
-        echo "    except Exception as e:" >> simple_capture.py
-        echo "        print(f\"오류 발생: {str(e)}\")" >> simple_capture.py
-        echo "        return False" >> simple_capture.py
-        echo "    finally:" >> simple_capture.py
-        echo "        driver.quit()" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "if __name__ == \"__main__\":" >> simple_capture.py
-        echo "    if len(sys.argv) < 2:" >> simple_capture.py
-        echo "        print(\"사용법: python simple_capture.py <URL> [output_path]\")" >> simple_capture.py
-        echo "        sys.exit(1)" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "    url = sys.argv[1]" >> simple_capture.py
-        echo "    output_path = sys.argv[2] if len(sys.argv) > 2 else \"document_screenshot.png\"" >> simple_capture.py
-        echo "" >> simple_capture.py
-        echo "    success = capture_url(url, output_path)" >> simple_capture.py
-        echo "    if not success:" >> simple_capture.py
-        echo "        sys.exit(1)" >> simple_capture.py
-
-    - name: Take screenshots of document (if URL exists)
-      if: always()
-      run: |
-        export DISPLAY=:99
-        
-        # 로그 파일에서 바로보기 URL 추출
-        DOCUMENT_VIEW_URL=$(grep -o "바로보기 URL: [^ ]*" *.log 2>/dev/null | head -1 | sed 's/바로보기 URL: //')
-        
-        if [ -n "$DOCUMENT_VIEW_URL" ]; then
-          echo "바로보기 URL 발견: $DOCUMENT_VIEW_URL"
-          python simple_capture.py "$DOCUMENT_VIEW_URL" "html_content/document_screenshot.png"
-        else
-          echo "바로보기 URL을 찾을 수 없음"
-        fi
 
     - name: Archive artifacts
       if: always()
