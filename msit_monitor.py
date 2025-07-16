@@ -464,10 +464,19 @@ class WebDriverManager:
         self.page: Optional[Page] = None
         self.logger = logging.getLogger('msit_monitor')
     
-    async def setup_browser(self) -> Tuple[Browser, BrowserContext, Page]:
-        """브라우저 및 페이지 설정"""
+    async def setup_browser(self, playwright_instance=None) -> Tuple[Browser, BrowserContext, Page]:
+        """브라우저 및 페이지 설정
+        
+        Args:
+            playwright_instance: 외부에서 전달된 playwright 인스턴스 (선택사항)
+        """
         try:
-            self.playwright = await async_playwright().start()
+            # playwright 인스턴스 설정
+            if playwright_instance:
+                self.playwright = playwright_instance
+            else:
+                # 자체적으로 playwright 시작
+                self.playwright = await async_playwright().start()
             
             # Chrome 브라우저 시작 옵션 설정
             browser_args = [
@@ -529,7 +538,8 @@ class WebDriverManager:
                 await self.browser.close()
                 self.browser = None
             
-            if self.playwright:
+            # 외부에서 전달받은 playwright가 아닌 경우에만 stop
+            if self.playwright and not hasattr(self, '_external_playwright'):
                 await self.playwright.stop()
                 self.playwright = None
                 
@@ -3786,7 +3796,6 @@ class TelegramNotifier:
 #  7. Main 클래스
 ##################################################################################
 
-
 class MSITMonitor:
     """MSIT 모니터링 메인 클래스"""
     
@@ -3824,9 +3833,9 @@ class MSITMonitor:
             else:
                 self.logger.info(f"검색 범위: 페이지 {start_page}~{end_page}, days_range={days_range}")
             
-            # Google Sheets 클라이언트 초기화
+            # Google Sheets 클라이언트 초기화 (await 추가)
             if check_sheets:
-                sheets_initialized = self.google_sheets.setup_client()
+                sheets_initialized = await self.google_sheets.setup_client()  # await 추가
                 if not sheets_initialized:
                     self.logger.warning("Google Sheets 클라이언트 초기화 실패, 시트 업데이트 건너뜀")
                     check_sheets = False
@@ -3835,7 +3844,7 @@ class MSITMonitor:
             async with async_playwright() as playwright:
                 # 웹드라이버 초기화
                 self.web_driver = WebDriverManager(self.config)
-                browser, context, page = await self.web_driver.setup_browser(playwright)
+                browser, context, page = await self.web_driver.setup_browser(playwright)  # playwright 인스턴스 전달
                 
                 # 추출기 초기화
                 self.extractors = [
@@ -3882,8 +3891,8 @@ class MSITMonitor:
                     
                     self.logger.info(f"페이지 {page_num} 탐색 시작")
                     
-                    # 페이지 이동
-                    page_navigation_success = await self.web_driver.navigate_to_page(page, page_num)
+                    # 페이지 이동 (page 인자 제거)
+                    page_navigation_success = await self.web_driver.navigate_to_page(page_num)
                     if not page_navigation_success:
                         self.logger.warning(f"페이지 {page_num}으로 이동 실패, 다음 페이지로 진행")
                         continue
@@ -3927,7 +3936,7 @@ class MSITMonitor:
                 # 구형 시트 정리 (선택적)
                 if check_sheets and data_updates and self.config.cleanup_old_sheets:
                     self.logger.info("구형 시트 정리 시작")
-                    removed_count = self.google_sheets._cleanup_old_sheets()
+                    removed_count = await self.google_sheets._cleanup_old_sheets()  # await 추가
                     self.logger.info(f"{removed_count}개 구형 시트 제거 완료")
                 
                 # 텔레그램 알림 전송
@@ -3986,7 +3995,7 @@ class MSITMonitor:
                         update_data['date'] = file_params['date']
                     
                     # Google Sheets 업데이트
-                    success = self.google_sheets.update_sheets([update_data])
+                    success = await self.google_sheets.update_sheets([update_data])  # await 추가
                     if success:
                         self.logger.info(f"Google Sheets 업데이트 성공: {post.get('title', '')}")
                         data_updates.append(update_data)
@@ -4027,38 +4036,6 @@ class MSITMonitor:
             )
         except Exception as notify_err:
             self.logger.error(f"오류 알림 전송 실패: {str(notify_err)}")
-
-async def main():
-    """메인 실행 함수"""
-    try:
-        # 환경 변수 파싱
-        days_range = int(os.environ.get('DAYS_RANGE', '4'))
-        start_page = int(os.environ.get('START_PAGE', '1'))
-        end_page = int(os.environ.get('END_PAGE', '5'))
-        check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
-        check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
-        start_date = os.environ.get('START_DATE', '')
-        end_date = os.environ.get('END_DATE', '')
-        reverse_order_str = os.environ.get('REVERSE_ORDER', 'true').lower()
-        reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
-        
-        # 모니터 실행
-        monitor = MSITMonitor()
-        await monitor.run_monitor(
-            days_range=days_range,
-            check_sheets=check_sheets,
-            start_page=start_page,
-            end_page=end_page,
-            start_date=start_date if start_date else None,
-            end_date=end_date if end_date else None,
-            reverse_order=reverse_order
-        )
-    
-    except Exception as e:
-        logging.error(f"메인 함수 오류: {str(e)}", exc_info=True)
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 # ================================
 # 주요 개선사항 및 수정 포인트
