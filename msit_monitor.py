@@ -280,6 +280,7 @@ class DateUtils:
                 '%Y/%m/%d',    # "YYYY/MM/DD" 형식
                 '%Y.%m.%d',    # "YYYY.MM.DD" 형식
                 '%Y년 %m월 %d일',  # "YYYY년 MM월 DD일" 형식
+                '%b %d %Y', #Jun 13 2025
             ]
             
             for date_format in date_formats:
