@@ -99,6 +99,11 @@ jobs:
           pip install selenium beautifulsoup4 python-telegram-bot requests pandas gspread oauth2client lxml html5lib selenium-stealth webdriver-manager pytesseract opencv-python pillow numpy
         fi
 
+    - name: Install Playwright browsers  # 이 단계만 추가
+      run: |
+        playwright install chromium
+        playwright install-deps        
+
     - name: Create directories
       run: |
         mkdir -p downloads
