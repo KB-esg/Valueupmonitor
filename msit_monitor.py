@@ -1918,7 +1918,7 @@ class PageParser:
                     else:
                         return await self
 
-async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
+    async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
        """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
        try:
            if not post.get('post_id'):
