@@ -1827,51 +1827,7 @@ class ViewLinkExtractor:
                 'date': date_info,
                 'post_info': post
             }
-    
-    async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
-        """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
-        try:
-            if not post.get('post_id'):
-                self.logger.error(f"직접 URL 접근 불가 {post['title']} - post_id 누락")
-                return None
-                
-            self.logger.info(f"게시물 직접 URL 접근 시도: {post['title']}")
-            
-            # 게시물 상세 URL 구성
-            post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
-            
-            # 현재 URL 저장
-            current_url = page.url
-            
-            # 게시물 상세 페이지 접속
-            await page.goto(post_url)
-            await page.wait_for_timeout(3000)  # 페이지 로드 대기
-            
-            # 페이지 로드 확인
-            try:
-                await page.wait_for_selector(".view_head", timeout=10000)
-                self.logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
-            except Exception:
-                self.logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
-            
-            # 바로보기 링크 찾기
-            view_link_params = await self._extract_view_link_params(page, post)
-            
-            # 원래 페이지로 돌아가기
-            await page.goto(current_url)
-            
-            return view_link_params
-            
-        except Exception as e:
-            self.logger.error(f"직접 URL 접근 중 오류: {str(e)}")
-            
-            try:
-                # 원래 페이지로 돌아가기
-                await page.goto(current_url)
-            except:
-                pass
-                
-            return None
+  
     
 
 
@@ -1894,9 +1850,9 @@ class DocumentDataExtractor:
             
             # 1. Synap 뷰어 데이터 추출 시도
             if 'atch_file_no' in file_params and 'file_ord' in file_params:
-                # 바로보기 URL 구성
+                # 문서 뷰어 URL 구성
                 view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
-                self.logger.info(f"바로보기 URL: {view_url}")
+                self.logger.info(f"문서 뷰어 URL: {view_url}")
                 
                 # 페이지 로드
                 await page.goto(view_url)
