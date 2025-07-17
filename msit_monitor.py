@@ -1737,10 +1737,29 @@ class ViewLinkExtractor:
         post_link_selector = f'a[onclick*="fn_detail(\'{post["post_id"]}\')"]'
         try:
             post_link = await page.wait_for_selector(post_link_selector, timeout=10000)
+            if not post_link:
+                self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
+                return None
+    
+    # 게시물 링크 클릭
+            await post_link.click(delay=1000)  # 클릭 딜레이 추가
+            await page.wait_for_load_state('networkidle')
+    
+    # 게시물 내용 페이지 로드 확인
+            try:
+                await page.wait_for_selector('.board_view', timeout=10000)
+            except TimeoutError:
+                self.logger.warning(f"게시물 내용 페이지 로드 실패: {post['title']}")
+                return None
+    
         except TimeoutError:
             self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
             return None
-    
+
+
+
+
+        
     # 게시물 링크 클릭
         await post_link.click()
         await page.wait_for_load_state('networkidle')
