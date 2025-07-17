@@ -1,4 +1,4 @@
-name: MSIT Telco Service Monitoring
+name: MSIT Telco Service Monitoring (Old)
 
 on:
   schedule:
