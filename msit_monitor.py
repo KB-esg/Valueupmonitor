@@ -1730,22 +1730,24 @@ class ViewLinkExtractor:
         # 현재 URL 저장
         current_url = page.url
         
-        # 게시물 상세 페이지 URL 직접 접근
-        post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
-        await page.goto(post_url)
+        # 게시물 목록 페이지로 돌아가기
+        await page.goto(self.config.stats_url, wait_until='networkidle')
         
-        # 페이지 로드 대기
-        try:
-            await page.wait_for_selector('.view_head', timeout=10000)
-        except Exception as e:
-            self.logger.warning(f"게시물 상세 페이지 로드 실패: {post['title']}, {str(e)}")
+        # 게시물 링크 찾기
+        post_link = await page.query_selector(f"a[onclick*='{post['post_id']}']")
+        if not post_link:
+            self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
             return None
         
-        # 바로보기 링크 찾기
+        # 게시물 링크 클릭
+        await post_link.click()
+        await page.wait_for_load_state('networkidle')
+        
+        # 바로보기 링크 파라미터 추출
         view_link_params = await self._extract_view_link_params(page, post)
         
         # 원래 페이지로 돌아가기
-        await page.goto(current_url)
+        await page.goto(current_url, wait_until='networkidle')
         
         return view_link_params
     
