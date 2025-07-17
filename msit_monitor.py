@@ -266,7 +266,7 @@ class LoggingUtils:
 class DateUtils:
     """날짜 관련 유틸리티 클래스"""
     
-}-{month}-{day}")
+            f"{year}-{month}-{day}"
             
             logger = logging.getLogger('msit_monitor')
             logger.warning(f"알 수 없는 날짜 형식: {date_str}")
