@@ -157,6 +157,14 @@ jobs:
         echo "ARTIFACT_NAME=monitoring-artifacts-${TIMESTAMP}" >> $GITHUB_ENV
         echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
 
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.ARTIFACT_PATH }}
+        if-no-files-found: ignore
+
     - name: Create Release
       if: always()
       uses: softprops/action-gh-release@v1
