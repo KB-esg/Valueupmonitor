@@ -1734,7 +1734,8 @@ class ViewLinkExtractor:
         await page.goto(self.config.stats_url, wait_until='networkidle')
         
         # 게시물 링크 찾기
-        post_link = await page.query_selector(f"a[onclick*='{post['post_id']}']")
+        post_link_selector = f'a[onclick*="{post["post_id"]}"]'
+        post_link = await page.query_selector(post_link_selector)
         if not post_link:
             self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
             return None
@@ -1743,33 +1744,51 @@ class ViewLinkExtractor:
         await post_link.click()
         await page.wait_for_load_state('networkidle')
         
-        # 바로보기 버튼 찾기
-        view_button = await page.query_selector("a.view[title='새창 열림']")
-        if not view_button:
-            self.logger.warning(f"바로보기 버튼을 찾을 수 없음: {post['title']}")
+        # 바로보기 링크 찾기
+        view_link_selector = 'a.view[onclick*="getExtension_path"]'
+        view_link = await page.query_selector(view_link_selector)
+        if not view_link:
+            self.logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
             return None
-
-
-        # 바로보기 버튼 클릭
-        await view_button.click()
+        
+        # 바로보기 링크 클릭
+        await view_link.click()
         await page.wait_for_load_state('networkidle')
-
-
-        # 현재 URL에서 파라미터 추출
-        current_url = page.url
-        url_params = urllib.parse.parse_qs(urllib.parse.urlparse(current_url).query)
-    
-        atch_file_no = url_params.get('atchFileNo', [None])[0]
-        file_ord = url_params.get('fileOrdr', [None])[0]
-    
+        
+        # 문서 뷰어 페이지로 전환
+        await page.wait_for_timeout(2000)  # 2초 대기
+        viewer_page = await page.expect_popup()
+        
+        # 문서 뷰어 iframe 대기
+        await viewer_page.wait_for_selector('#SynapDocViewerFrame', timeout=5000)
+        
+        # 문서 뷰어 iframe으로 전환
+        iframe = await viewer_page.frame('#SynapDocViewerFrame')
+        if not iframe:
+            self.logger.warning(f"문서 뷰어 iframe을 찾을 수 없음: {post['title']}")
+            return None
+        
+        # iframe 내부 콘텐츠 확인
+        content = await iframe.content()
+        if not content:
+            self.logger.warning(f"문서 뷰어 내용을 찾을 수 없음: {post['title']}")
+            return None
+        
+        # 파라미터 추출
+        url = viewer_page.url
+        parsed_url = urllib.parse.urlparse(url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        
+        atch_file_no = query_params.get('atchFileNo', [None])[0]
+        file_ord = query_params.get('fileOrdr', [None])[0]
+        
         if not atch_file_no or not file_ord:
             self.logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
             return None
-    
+        
         # 날짜 정보 추출
         date_info = DateUtils.extract_date_from_title(post['title'])
-
-
+        
         # 원래 페이지로 돌아가기
         await page.goto(current_url, wait_until='networkidle')
         
