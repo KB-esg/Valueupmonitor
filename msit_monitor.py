@@ -1743,13 +1743,42 @@ class ViewLinkExtractor:
         await post_link.click()
         await page.wait_for_load_state('networkidle')
         
-        # 바로보기 링크 파라미터 추출
-        view_link_params = await self._extract_view_link_params(page, post)
-        
+        # 바로보기 버튼 찾기
+        view_button = await page.query_selector("a.view[title='새창 열림']")
+        if not view_button:
+            self.logger.warning(f"바로보기 버튼을 찾을 수 없음: {post['title']}")
+            return None
+
+
+        # 바로보기 버튼 클릭
+        await view_button.click()
+        await page.wait_for_load_state('networkidle')
+
+
+        # 현재 URL에서 파라미터 추출
+        current_url = page.url
+        url_params = urllib.parse.parse_qs(urllib.parse.urlparse(current_url).query)
+    
+        atch_file_no = url_params.get('atchFileNo', [None])[0]
+        file_ord = url_params.get('fileOrdr', [None])[0]
+    
+        if not atch_file_no or not file_ord:
+            self.logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
+            return None
+    
+        # 날짜 정보 추출
+        date_info = DateUtils.extract_date_from_title(post['title'])
+
+
         # 원래 페이지로 돌아가기
         await page.goto(current_url, wait_until='networkidle')
         
-        return view_link_params
+        return {
+            'atch_file_no': atch_file_no,
+            'file_ord': file_ord,
+            'date': date_info,
+            'post_info': post
+        }
     
     async def _extract_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
         """바로보기 링크 파라미터 추출"""
@@ -1850,8 +1879,11 @@ class DocumentDataExtractor:
             
             # 1. Synap 뷰어 데이터 추출 시도
             if 'atch_file_no' in file_params and 'file_ord' in file_params:
+                atch_file_no = file_params['atch_file_no']
+                file_ord = file_params['file_ord']
+                
                 # 문서 뷰어 URL 구성
-                view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+                view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={atch_file_no}&fileOrdr={file_ord}"
                 self.logger.info(f"문서 뷰어 URL: {view_url}")
                 
                 # 페이지 로드
@@ -1859,7 +1891,7 @@ class DocumentDataExtractor:
                 await page.wait_for_timeout(5000)  # 초기 대기
                 
                 # 스크린샷 저장
-                await page.screenshot(path=f"document_view_{file_params['atch_file_no']}_{file_params['file_ord']}.png")
+                await page.screenshot(path=f"document_view_{atch_file_no}_{file_ord}.png")
                 
                 # 추출 시도 순서대로 진행
                 for extractor in self.extractors:
@@ -1892,6 +1924,7 @@ class DocumentDataExtractor:
             self.logger.error(f"문서 데이터 추출 오류: {str(e)}")
             # 오류 발생 시 placeholder 반환
             return self._create_placeholder_dataframe(file_params)
+    
 
     def _ensure_all_operators_included(self, sheets_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """통신사 행 누락 문제 해결 - 이동통계 관련 시트에 SKT, KT, LGU+, MVNO 등 추가"""
