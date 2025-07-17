@@ -1634,205 +1634,83 @@ class OCRExtractor(BaseExtractor):
 #  5. 페이지 파싱 클래스 
 ##################################################################################
 
-class PageParser:
-    """페이지 파싱 클래스"""
+class PostExtractor:
+    """게시물 정보 추출 클래스"""
     
-    def __init__(self, config: MonitorConfig, extractors: List[BaseExtractor]):
+    def __init__(self, config: MonitorConfig):
         self.config = config
-        self.extractors = extractors
         self.logger = logging.getLogger(self.__class__.__name__)
     
-    async def parse_page_content(
-        self, 
-        page: Page, 
-        page_num: int, 
-        days_range: Optional[int] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        reverse_order: bool = True
-    ) -> Tuple[List[Dict], List[Dict], Dict]:
-        """페이지 콘텐츠 파싱"""
-        all_posts = []
-        telecom_stats_posts = []
-        
-        # 결과 정보를 담을 딕셔너리
-        result_info = {
-            'current_page_complete': True,
-            'skip_remaining_in_page': False,
-            'continue_to_next_page': True,
-            'oldest_date_found': None,
-            'newest_date_found': None,
-            'total_posts': 0,
-            'filtered_posts': 0,
-            'messages': []
-        }
-        
+    async def extract_post_info(self, post_elem) -> Optional[Dict]:
+        """게시물 정보 추출"""
         try:
-            # 날짜 객체로 변환
-            start_date_obj = None
-            end_date_obj = None
+            # 날짜 정보 추출
+            date_elem = await post_elem.query_selector(".date, div.date, td.date, .post-date")
+            if not date_elem:
+                return None
             
-            if start_date:
-                try:
-                    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-                except ValueError:
-                    self.logger.warning(f"잘못된 시작 날짜 형식: {start_date}")
-                    result_info['messages'].append(f"잘못된 시작 날짜 형식: {start_date}")
-                    
-            if end_date:
-                try:
-                    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-                except ValueError:
-                    self.logger.warning(f"잘못된 종료 날짜 형식: {end_date}")
-                    result_info['messages'].append(f"잘못된 종료 날짜 형식: {end_date}")
+            date_str = await date_elem.text_content()
+            date_str = date_str.strip()
             
-            # days_range를 사용하는 경우 start_date_obj 계산
-            if days_range and not start_date_obj:
-                # 한국 시간대 고려 (UTC+9)
-                korea_tz = datetime.now() + timedelta(hours=9)
-                start_date_obj = (korea_tz - timedelta(days=days_range)).date()
-                self.logger.info(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
-                result_info['messages'].append(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
+            if not date_str or date_str == '등록일':
+                return None
             
-            # 페이지 로드 대기
-            try:
-                await page.wait_for_selector(".board_list", timeout=15000)
-                
-                # 추가 대기 (JS 로딩 등)
-                await page.wait_for_timeout(3000)
-            except Exception as wait_err:
-                self.logger.error(f"페이지 로드 시간 초과: {str(wait_err)}")
-                result_info['current_page_complete'] = False
-                result_info['continue_to_next_page'] = True
-                result_info['messages'].append("페이지 로드 시간 초과")
-                return [], [], result_info
+            self.logger.info(f"날짜 문자열 발견: {date_str}")
             
-            # 스크린샷 저장 (디버깅용)
-            await page.screenshot(path=f"parsed_page_{page_num}.png")
+            # 게시물 날짜 파싱
+            post_date = DateUtils.parse_post_date(date_str)
+            if not post_date:
+                self.logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
+                return None
             
-            # 게시물 목록 추출
-            posts = await page.query_selector_all("div.toggle:not(.thead), table.board_list tr:not(.thead), .board_list li")
+            # 제목 추출
+            title_elem = await post_elem.query_selector("p.title, .title, td.title, .subject a, a.nttInfoBtn")
+            if not title_elem:
+                return None
             
-            if not posts:
-                self.logger.warning("게시물을 찾을 수 없음")
-                result_info['messages'].append("게시물을 찾을 수 없음")
-                return [], [], result_info
-                
-            result_info['total_posts'] = len(posts)
-            self.logger.info(f"{len(posts)}개 게시물 항목 발견")
+            title = await title_elem.text_content()
+            title = title.strip()
             
-            # 각 게시물 처리
-            for post_idx, post_elem in enumerate(posts):
-                try:
-                    # 날짜 정보 추출
-                    date_elem = await post_elem.query_selector(".date, div.date, td.date, .post-date")
-                    if not date_elem:
-                        continue
-                        
-                    date_str = await date_elem.text_content()
-                    date_str = date_str.strip()
-                    
-                    if not date_str or date_str == '등록일':
-                        continue
-                        
-                    self.logger.info(f"날짜 문자열 발견: {date_str}")
-                    
-                    # 게시물 날짜 파싱
-                    post_date = DateUtils.parse_post_date(date_str)
-                    if not post_date:
-                        self.logger.warning(f"날짜 파싱 실패: {date_str}, 건너뜀")
-                        continue
-                    
-                    # 날짜 정보 업데이트
-                    if result_info['oldest_date_found'] is None or post_date < result_info['oldest_date_found']:
-                        result_info['oldest_date_found'] = post_date
-                        
-                    if result_info['newest_date_found'] is None or post_date > result_info['newest_date_found']:
-                        result_info['newest_date_found'] = post_date
-                    
-                    # 날짜 범위 확인
-                    include_post = True
-                    
-                    if start_date_obj and post_date < start_date_obj:
-                        include_post = False
-                        
-                        # 역순 탐색 시에는 현재 페이지의 나머지 게시물만 건너뛰고 다음 페이지로 계속 진행
-                        if reverse_order:
-                            result_info['skip_remaining_in_page'] = True
-                            self.logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
-                            result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
-                            break  # 현재 페이지 루프 종료
-                        # 정순 탐색 시에는 모든 페이지 탐색 중단
-                        else:
-                            result_info['continue_to_next_page'] = False
-                            self.logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
-                            result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
-                    
-                    # 종료 날짜 이후인지 확인
-                    if end_date_obj and post_date > end_date_obj:
-                        include_post = False
-                    
-                    # 필터링 조건에 맞지 않으면 다음 게시물로
-                    if not include_post:
-                        continue
-                        
-                    # 필터링 조건을 통과한 게시물 처리
-                    result_info['filtered_posts'] += 1
-                    
-                    # 제목 추출
-                    title_elem = await post_elem.query_selector("p.title, .title, td.title, .subject a, a.nttInfoBtn")
-                    if not title_elem:
-                        continue
-                        
-                    title = await title_elem.text_content()
-                    title = title.strip()
-                    
-                    # 게시물 ID 추출
-                    post_id = None
-                    onclick = await title_elem.get_attribute('onclick')
-                    if onclick:
-                        match = re.search(r"fn_detail\((\d+)\)", onclick)
-                        if match:
-                            post_id = match.group(1)
-                    
-                    # 게시물 URL 생성
-                    post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post_id}" if post_id else None
-                    
-                    # 부서 정보 추출
-                    dept_elem = await post_elem.query_selector("dd[id*='td_CHRG_DEPT_NM'], .dept, td.dept, .department")
-                    dept_text = await dept_elem.text_content() if dept_elem else "부서 정보 없음"
-                    dept_text = dept_text.strip()
-                    
-                    # 게시물 정보 딕셔너리 생성
-                    post_info = {
-                        'title': title,
-                        'date': date_str,
-                        'post_date': post_date,
-                        'department': dept_text,
-                        'url': post_url,
-                        'post_id': post_id
-                    }
-                    
-                    # 모든 게시물 리스트에 추가
-                    all_posts.append(post_info)
-                    
-                    # 통신 통계 게시물인지 확인
-                    if DataUtils.is_telecom_stats_post(title, self.config.report_types):
-                        self.logger.info(f"통신 통계 게시물 발견: {title}")
-                        telecom_stats_posts.append(post_info)
-                        
-                except Exception as post_err:
-                    self.logger.error(f"게시물 {post_idx+1} 처리 중 오류: {str(post_err)}")
-                    continue
+            # 게시물 ID 추출
+            post_id = None
+            onclick = await title_elem.get_attribute('onclick')
+            if onclick:
+                match = re.search(r"fn_detail\((\d+)\)", onclick)
+                if match:
+                    post_id = match.group(1)
             
-            return all_posts, telecom_stats_posts, result_info
+            # 게시물 URL 생성
+            post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post_id}" if post_id else None
+            
+            # 부서 정보 추출
+            dept_elem = await post_elem.query_selector("dd[id*='td_CHRG_DEPT_NM'], .dept, td.dept, .department")
+            dept_text = await dept_elem.text_content() if dept_elem else "부서 정보 없음"
+            dept_text = dept_text.strip()
+            
+            # 게시물 정보 딕셔너리 생성
+            post_info = {
+                'title': title,
+                'date': date_str,
+                'post_date': post_date,
+                'department': dept_text,
+                'url': post_url,
+                'post_id': post_id
+            }
+            
+            return post_info
             
         except Exception as e:
-            self.logger.error(f"페이지 파싱 중 오류: {str(e)}")
-            result_info['current_page_complete'] = False
-            result_info['messages'].append(f"페이지 파싱 중 오류: {str(e)}")
-            return [], [], result_info
-    
+            self.logger.error(f"게시물 정보 추출 중 오류: {str(e)}")
+            return None
+
+
+class ViewLinkExtractor:
+    """바로보기 링크 파라미터 추출 클래스"""
+
+    def __init__(self, config: MonitorConfig):
+        self.config = config
+        self.logger = logging.getLogger(self.__class__.__name__)
+
     async def find_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
         """바로보기 링크 파라미터 찾기"""
         if not post.get('post_id'):
@@ -1916,392 +1794,496 @@ class PageParser:
                     if attempt < max_retries - 1:
                         continue
                     else:
-                        return await self
-
+                        return await self._direct_access_view_link_params(page, post)
+                
+                # 바로보기 링크 찾기
+                view_link_params = await self._extract_view_link_params(page, post)
+                
+                # 원래 페이지로 돌아가기
+                await page.goto(current_url)
+                
+                return view_link_params
+                
+            except Exception as e:
+                self.logger.error(f"게시물 링크 처리 중 오류: {str(e)}")
+                
+                # 실패 시 직접 URL로 접근 시도
+                if attempt < max_retries - 1:
+                    self.logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
+                    await page.wait_for_timeout(retry_delay * 1000)
+                    continue
+                else:
+                    # 직접 URL 접근 방식으로 대체
+                    self.logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
+                    return await self._direct_access_view_link_params(page, post)
+        
+        # 모든 재시도 실패
+        self.logger.error(f"게시물 링크 처리 실패: {post['title']}")
+        return None
+    
     async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
-       """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
-       try:
-           if not post.get('post_id'):
-               self.logger.error(f"직접 URL 접근 불가 {post['title']} - post_id 누락")
-               return None
-               
-           self.logger.info(f"게시물 직접 URL 접근 시도: {post['title']}")
-           
-           # 게시물 상세 URL 구성
-           post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
-           
-           # 현재 URL 저장
-           current_url = page.url
-           
-           # 게시물 상세 페이지 접속
-           await page.goto(post_url)
-           await page.wait_for_timeout(3000)  # 페이지 로드 대기
-           
-           # 페이지 로드 확인
-           try:
-               await page.wait_for_selector(".view_head", timeout=10000)
-               self.logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
-           except Exception:
-               self.logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
-           
-           # 바로보기 링크 찾기
-           try:
-               # 여러 선택자로 바로보기 링크 찾기
-               view_link = await page.query_selector("a.view[title='새창 열림']")
-               
-               # onclick 속성으로 찾기
-               if not view_link:
-                   view_link = await page.query_selector("a[onclick*='getExtension_path']")
-               
-               # 텍스트로 찾기
-               if not view_link:
-                   view_link = await page.query_selector("a:has-text('바로보기'), a:has-text('보기'), a:has-text('첨부파일')")
-               
-               if view_link:
-                   onclick = await view_link.get_attribute('onclick')
-                   href = await view_link.get_attribute('href')
-                   
-                   self.logger.info(f"바로보기 링크 발견, onclick: {onclick}, href: {href}")
-                   
-                   # getExtension_path('49234', '1') 형식에서 매개변수 추출
-                   if onclick and 'getExtension_path' in onclick:
-                       match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick)
-                       if match:
-                           atch_file_no = match.group(1)
-                           file_ord = match.group(2)
-                           
-                           # 날짜 정보 추출
-                           date_info = DateUtils.extract_date_from_title(post['title'])
-                           
-                           return {
-                               'atch_file_no': atch_file_no,
-                               'file_ord': file_ord,
-                               'date': date_info,
-                               'post_info': post
-                           }
-                   
-                   # 직접 다운로드 URL인 경우 처리
-                   elif href and any(ext in href for ext in ['.xls', '.xlsx', '.pdf', '.hwp', '.doc', '.docx']):
-                       self.logger.info(f"직접 다운로드 링크 발견: {href}")
-                       
-                       # 날짜 정보 추출
-                       date_info = DateUtils.extract_date_from_title(post['title'])
-                       
-                       return {
-                           'download_url': href,
-                           'date': date_info,
-                           'post_info': post
-                       }
-               
-               # 바로보기 링크를 찾을 수 없는 경우
-               self.logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
-               
-               # 게시물 내용 추출 시도
-               content = await page.text_content("div.view_cont, .view_content, .bbs_content")
-               
-               # 날짜 정보 추출
-               date_info = DateUtils.extract_date_from_title(post['title'])
-               
-               return {
-                   'content': content or "내용 없음",
-                   'date': date_info,
-                   'post_info': post
-               }
-               
-           except Exception as link_err:
-               self.logger.error(f"바로보기 링크 찾기 중 오류: {str(link_err)}")
-               
-               # 오류 발생 시에도 날짜 정보 추출 시도
-               date_info = DateUtils.extract_date_from_title(post['title'])
-               
-               return {
-                   'content': f"오류 발생: {str(link_err)}",
-                   'date': date_info,
-                   'post_info': post
-               }
-           
-           # 원래 페이지로 돌아가기
-           await page.goto(current_url)
-           
-           return None
-           
-       except Exception as e:
-           self.logger.error(f"직접 URL 접근 중 오류: {str(e)}")
-           
-           try:
-               # 원래 페이지로 돌아가기
-               await page.goto(current_url)
-           except:
-               pass
-               
-           return None
-   
+        """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
+        try:
+            if not post.get('post_id'):
+                self.logger.error(f"직접 URL 접근 불가 {post['title']} - post_id 누락")
+                return None
+                
+            self.logger.info(f"게시물 직접 URL 접근 시도: {post['title']}")
+            
+            # 게시물 상세 URL 구성
+            post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+            
+            # 현재 URL 저장
+            current_url = page.url
+            
+            # 게시물 상세 페이지 접속
+            await page.goto(post_url)
+            await page.wait_for_timeout(3000)  # 페이지 로드 대기
+            
+            # 페이지 로드 확인
+            try:
+                await page.wait_for_selector(".view_head", timeout=10000)
+                self.logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
+            except Exception:
+                self.logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
+            
+            # 바로보기 링크 찾기
+            view_link_params = await self._extract_view_link_params(page, post)
+            
+            # 원래 페이지로 돌아가기
+            await page.goto(current_url)
+            
+            return view_link_params
+            
+        except Exception as e:
+            self.logger.error(f"직접 URL 접근 중 오류: {str(e)}")
+            
+            try:
+                # 원래 페이지로 돌아가기
+                await page.goto(current_url)
+            except:
+                pass
+                
+            return None
+    
+    async def _extract_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
+        """바로보기 링크 파라미터 추출"""
+        try:
+            # 여러 선택자로 바로보기 링크 찾기
+            view_link = await page.query_selector("a.view[title='새창 열림']")
+            
+            # onclick 속성으로 찾기
+            if not view_link:
+                view_link = await page.query_selector("a[onclick*='getExtension_path']")
+            
+            # 텍스트로 찾기
+            if not view_link:
+                view_link = await page.query_selector("a:has-text('바로보기'), a:has-text('보기'), a:has-text('첨부파일')")
+            
+            if view_link:
+                onclick = await view_link.get_attribute('onclick')
+                href = await view_link.get_attribute('href')
+                
+                self.logger.info(f"바로보기 링크 발견, onclick: {onclick}, href: {href}")
+                
+                # getExtension_path('49234', '1') 형식에서 매개변수 추출
+                if onclick and 'getExtension_path' in onclick:
+                    match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick)
+                    if match:
+                        atch_file_no = match.group(1)
+                        file_ord = match.group(2)
+                        
+                        # 날짜 정보 추출
+                        date_info = DateUtils.extract_date_from_title(post['title'])
+                        
+                        return {
+                            'atch_file_no': atch_file_no,
+                            'file_ord': file_ord,
+                            'date': date_info,
+                            'post_info': post
+                        }
+                
+                # 직접 다운로드 URL인 경우 처리
+                elif href and any(ext in href for ext in ['.xls', '.xlsx', '.pdf', '.hwp', '.doc', '.docx']):
+                    self.logger.info(f"직접 다운로드 링크 발견: {href}")
+                    
+                    # 날짜 정보 추출
+                    date_info = DateUtils.extract_date_from_title(post['title'])
+                    
+                    return {
+                        'download_url': href,
+                        'date': date_info,
+                        'post_info': post
+                    }
+            
+            # 바로보기 링크를 찾을 수 없는 경우
+            self.logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+            
+            # 게시물 내용 추출 시도
+            content = await page.text_content("div.view_cont, .view_content, .bbs_content")
+            
+            # 날짜 정보 추출
+            date_info = DateUtils.extract_date_from_title(post['title'])
+            
+            return {
+                'content': content or "내용 없음",
+                'date': date_info,
+                'post_info': post
+            }
+            
+        except Exception as e:
+            self.logger.error(f"바로보기 링크 추출 중 오류: {str(e)}")
+            
+            # 오류 발생 시에도 날짜 정보 추출 시도
+            date_info = DateUtils.extract_date_from_title(post['title'])
+            
+            return {
+                'content': f"오류 발생: {str(e)}",
+                'date': date_info,
+                'post_info': post
+                }
+
+
+class DocumentDataExtractor:
+    """문서 데이터 추출 클래스"""
+    def __init__(self, config: MonitorConfig, extractors: List[BaseExtractor]):
+        self.config = config
+        self.extractors = extractors
+        self.logger = logging.getLogger(self.__class__.__name__)
+
     async def extract_document_data(self, page: Page, file_params: Dict) -> Optional[Dict[str, pd.DataFrame]]:
-       """문서 데이터 추출 (통합된 추출 로직)"""
-       try:
-           if not file_params:
-               self.logger.error("파일 파라미터가 없습니다.")
-               return None
-               
-           extracted_data = None
-           
-           # 1. Synap 뷰어 데이터 추출 시도
-           if 'atch_file_no' in file_params and 'file_ord' in file_params:
-               # 바로보기 URL 구성
-               view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
-               self.logger.info(f"바로보기 URL: {view_url}")
-               
-               # 페이지 로드
-               await page.goto(view_url)
-               await page.wait_for_timeout(5000)  # 초기 대기
-               
-               # 스크린샷 저장
-               await page.screenshot(path=f"document_view_{file_params['atch_file_no']}_{file_params['file_ord']}.png")
-               
-               # 추출 시도 순서대로 진행
-               for extractor in self.extractors:
-                   self.logger.info(f"{extractor.__class__.__name__} 추출기로 시도")
-                   extracted_data = await extractor.extract(page)
-                   
-                   if extracted_data and any(not df.empty for df in extracted_data.values()):
-                       self.logger.info(f"{extractor.__class__.__name__} 추출 성공: {len(extracted_data)}개 시트")
-                       break
-                       
-               # 특정 행이 누락되는 문제 해결 - 통신사 행 추가
-               if extracted_data:
-                   extracted_data = self._ensure_all_operators_included(extracted_data)
-           
-           # 2. 텍스트 콘텐츠만 있는 경우
-           elif 'content' in file_params:
-               self.logger.info("텍스트 콘텐츠로 처리")
-               extracted_data = self._extract_from_text_content(file_params['content'], file_params)
-           
-           # 3. 직접 다운로드 URL인 경우
-           elif 'download_url' in file_params:
-               self.logger.info(f"다운로드 URL로 처리: {file_params['download_url']}")
-               # 다운로드 로직 구현 필요
-               # 현재는 placeholder 반환
-               extracted_data = self._create_placeholder_dataframe(file_params)
-           
-           return extracted_data
-           
-       except Exception as e:
-           self.logger.error(f"문서 데이터 추출 오류: {str(e)}")
-           # 오류 발생 시 placeholder 반환
-           return self._create_placeholder_dataframe(file_params)
-   
+        """문서 데이터 추출 (통합된 추출 로직)"""
+        try:
+            if not file_params:
+                self.logger.error("파일 파라미터가 없습니다.")
+            return None
+            
+            extracted_data = None
+        
+            # 1. Synap 뷰어 데이터 추출 시도
+            if 'atch_file_no' in file_params and 'file_ord' in file_params:
+                # 바로보기 URL 구성
+                view_url = f"https://www.msit.go.kr/bbs/documentView.do?atchFileNo={file_params['atch_file_no']}&fileOrdr={file_params['file_ord']}"
+                self.logger.info(f"바로보기 URL: {view_url}")
+            
+            # 페이지 로드
+                await page.goto(view_url)
+                await page.wait_for_timeout(5000)  # 초기 대기
+            
+            # 스크린샷 저장
+                await page.screenshot(path=f"document_view_{file_params['atch_file_no']}_{file_params['file_ord']}.png")
+            
+            # 추출 시도 순서대로 진행
+                for extractor in self.extractors:
+                    self.logger.info(f"{extractor.__class__.__name__} 추출기로 시도")
+                    extracted_data = await extractor.extract(page)
+                
+                    if extracted_data and any(not df.empty for df in extracted_data.values()):
+                        self.logger.info(f"{extractor.__class__.__name__} 추출 성공: {len(extracted_data)}개 시트")
+                        break
+                    
+            # 특정 행이 누락되는 문제 해결 - 통신사 행 추가
+                if extracted_data:
+                    extracted_data = self._ensure_all_operators_included(extracted_data)
+        
+        # 2. 텍스트 콘텐츠만 있는 경우
+            elif 'content' in file_params:
+                self.logger.info("텍스트 콘텐츠로 처리")
+                extracted_data = self._extract_from_text_content(file_params['content'], file_params)
+        
+        # 3. 직접 다운로드 URL인 경우
+            elif 'download_url' in file_params:
+                self.logger.info(f"다운로드 URL로 처리: {file_params['download_url']}")
+                # 다운로드 로직 구현 필요
+            # 현재는 placeholder 반환
+                extracted_data = self._create_placeholder_dataframe(file_params)
+        
+            return extracted_data
+        
+        except Exception as e:
+            self.logger.error(f"문서 데이터 추출 오류: {str(e)}")
+        # 오류 발생 시 placeholder 반환
+            return self._create_placeholder_dataframe(file_params)
+
     def _ensure_all_operators_included(self, sheets_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-       """통신사 행 누락 문제 해결 - 이동통계 관련 시트에 SKT, KT, LGU+, MVNO 등 추가"""
-       try:
-           # 수정된 시트 데이터
-           modified_sheets = {}
-           
-           for sheet_name, df in sheets_data.items():
-               if df.empty or df.shape[1] < 2:
-                   modified_sheets[sheet_name] = df
-                   continue
-               
-               # 이동통계 관련 시트인지 확인
-               if any(keyword in sheet_name.lower() for keyword in ['이동전화', '무선', '통신사', '가입자']):
-                   # 첫 번째 열 확인 (항목/구분/통신사 등)
-                   first_col = df.columns[0]
-                   
-                   # 주요 통신사 이름 목록
-                   operators = ['SKT', 'SK텔레콤', 'KT', '케이티', 'LGU+', 'LG유플러스', 'MVNO', '알뜰폰']
-                   
-                   # 추가해야 할 통신사 확인
-                   missing_operators = []
-                   for op in operators:
-                       if not any(op.lower() in str(val).lower() for val in df[first_col]):
-                           missing_operators.append(op)
-                   
-                   if missing_operators:
-                       self.logger.info(f"시트 '{sheet_name}'에 누락된 통신사 발견: {missing_operators}")
-                       
-                       # 빈 행 추가
-                       for op in missing_operators:
-                           # 새 행 생성
-                           new_row = pd.Series([''] * len(df.columns), index=df.columns)
-                           new_row[first_col] = op
-                           
-                           # 적절한 위치에 삽입
-                           df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                       
-                       self.logger.info(f"누락된 통신사 행 추가 완료: {sheet_name}")
-               
-               modified_sheets[sheet_name] = df
-           
-           return modified_sheets
-           
-       except Exception as e:
-           self.logger.error(f"통신사 행 추가 중 오류: {str(e)}")
-           return sheets_data
-   
+        """통신사 행 누락 문제 해결 - 이동통계 관련 시트에 SKT, KT, LGU+, MVNO 등 추가"""
+        try:
+            # 수정된 시트 데이터
+            modified_sheets = {}
+        
+            for sheet_name, df in sheets_data.items():
+                if df.empty or df.shape[1] < 2:
+                    modified_sheets[sheet_name] = df
+                    continue
+            
+            # 이동통계 관련 시트인지 확인
+                if any(keyword in sheet_name.lower() for keyword in ['이동전화', '무선', '통신사', '가입자']):
+                    # 첫 번째 열 확인 (항목/구분/통신사 등)
+                    first_col = df.columns[0]
+                
+                # 주요 통신사 이름 목록
+                    operators = ['SKT', 'SK텔레콤', 'KT', '케이티', 'LGU+', 'LG유플러스', 'MVNO', '알뜰폰']
+                
+                # 추가해야 할 통신사 확인
+                    missing_operators = []
+                    for op in operators:
+                        if not any(op.lower() in str(val).lower() for val in df[first_col]):
+                            missing_operators.append(op)
+                
+                    if missing_operators:
+                        self.logger.info(f"시트 '{sheet_name}'에 누락된 통신사 발견: {missing_operators}")
+                    
+                    # 빈 행 추가
+                        for op in missing_operators:
+                            # 새 행 생성
+                            new_row = pd.Series([''] * len(df.columns), index=df.columns)
+                            new_row[first_col] = op
+                        
+                        # 적절한 위치에 삽입
+                            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    
+                        self.logger.info(f"누락된 통신사 행 추가 완료: {sheet_name}")
+            
+                modified_sheets[sheet_name] = df
+        
+            return modified_sheets
+        
+        except Exception as e:
+            self.logger.error(f"통신사 행 추가 중 오류: {str(e)}")
+            return sheets_data
+
     def _extract_from_text_content(self, content: str, file_params: Dict) -> Dict[str, pd.DataFrame]:
-       """텍스트 콘텐츠에서 데이터 추출"""
-       try:
-           # 간단한 표 형태로 변환
-           lines = content.split('\n')
-           lines = [line.strip() for line in lines if line.strip()]
-           
-           df = pd.DataFrame({'내용': lines})
-           
-           # 날짜 정보 추가
-           date_info = file_params.get('date')
-           if date_info:
-               date_str = f"{date_info.get('year', '')}년 {date_info.get('month', '')}월"
-               df['기준일자'] = date_str
-           
-           # 출처 정보 추가
-           post_info = file_params.get('post_info', {})
-           df['출처'] = post_info.get('title', '')
-           
-           return {"텍스트_내용": df}
-           
-       except Exception as e:
-           self.logger.error(f"텍스트 내용 추출 오류: {str(e)}")
-           return self._create_placeholder_dataframe(file_params)
-   
+        """텍스트 콘텐츠에서 데이터 추출"""
+        try:
+        # 간단한 표 형태로 변환
+            lines = content.split('\n')
+            lines = [line.strip() for line in lines if line.strip()]
+        
+            df = pd.DataFrame({'내용': lines})
+        
+        # 날짜 정보 추가
+            date_info = file_params.get('date')
+            if date_info:
+                date_str = f"{date_info.get('year', '')}년 {date_info.get('month', '')}월"
+                df['기준일자'] = date_str
+        
+        # 출처 정보 추가
+            post_info = file_params.get('post_info', {})
+            df['출처'] = post_info.get('title', '')
+        
+            return {"텍스트_내용": df}
+        
+        except Exception as e:
+            self.logger.error(f"텍스트 내용 추출 오류: {str(e)}")
+            return self._create_placeholder_dataframe(file_params)
+
     def _create_placeholder_dataframe(self, file_params: Dict) -> Dict[str, pd.DataFrame]:
-       """placeholder DataFrame 생성"""
-       try:
-           post_info = file_params.get('post_info', {})
-           
-           # 날짜 정보 추출
-           date_info = file_params.get('date')
-           if date_info:
-               year = date_info.get('year', 'Unknown')
-               month = date_info.get('month', 'Unknown')
-           else:
-               # 제목에서 추출 시도
-               date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info.get('title', ''))
-               year = date_match.group(1) if date_match else "Unknown"
-               month = date_match.group(2) if date_match else "Unknown"
-           
-           # 보고서 유형 결정
-           report_type = DataUtils.determine_report_type(post_info.get('title', ''), self.config.report_types)
-           
-           # 상태 결정
-           if 'atch_file_no' in file_params and 'file_ord' in file_params:
-               status = "문서 뷰어 접근 실패"
-               details = f"atch_file_no={file_params['atch_file_no']}, file_ord={file_params['file_ord']}"
-           elif 'content' in file_params:
-               status = "텍스트 분석 실패"
-               details = "텍스트 내용 처리 중 오류 발생"
-           elif 'download_url' in file_params:
-               status = "다운로드 URL 처리 실패"
-               details = file_params.get('download_url', '')
-           else:
-               status = "알 수 없는 오류"
-               details = "파일 파라미터 부족"
-           
-           # DataFrame 생성
-           df = pd.DataFrame({
-               '구분': [f'{year}년 {month}월 통계'],
-               '보고서 유형': [report_type],
-               '상태': [status],
-               '상세 정보': [details],
-               '링크': [post_info.get('url', '링크 없음')],
-               '추출 시도 시간': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-           })
-           
-           return {"Placeholder": df}
-           
-       except Exception as e:
-           self.logger.error(f"Placeholder DataFrame 생성 오류: {str(e)}")
-           # 최소한의 정보만 포함하는 DataFrame 반환
+        """placeholder DataFrame 생성"""
+        try:
+            post_info = file_params.get('post_info', {})
+        
+        # 날짜 정보 추출
+            date_info = file_params.get('date')
+            if date_info:
+                year = date_info.get('year', 'Unknown')
+                month = date_info.get('month', 'Unknown')
+            else:
+            # 제목에서 추출 시도
+                date_match = re.search(r'\((\d{4})년\s*(\d{1,2})월말\s*기준\)', post_info.get('title', ''))
+                year = date_match.group(1) if date_match else "Unknown"
+                month = date_match.group(2) if date_match else "Unknown"
+        
+        # 보고서 유형 결정
+            report_type = DataUtils.determine_report_type(post_info.get('title', ''), self.config.report_types)
+        
+        # 상태 결정
+            if 'atch_file_no' in file_params and 'file_ord' in file_params:
+                status = "문서 뷰어 접근 실패"
+                details = f"atch_file_no={file_params['atch_file_no']}, file_ord={file_params['file_ord']}"
+            elif 'content' in file_params:
+                status = "텍스트 분석 실패"
+                details = "텍스트 내용 처리 중 오류 발생"
+            elif 'download_url' in file_params:
+                status = "다운로드 URL 처리 실패"
+                details = file_params.get('download_url', '')
+            else:
+                status = "알 수 없는 오류"
+                details = "파일 파라미터 부족"
+        
+        # DataFrame 생성
+            df = pd.DataFrame({
+                '구분': [f'{year}년 {month}월 통계'],
+                '보고서 유형': [report_type],
+                '상태': [status],
+                '상세 정보': [details],
+                '링크': [post_info.get('url', '링크 없음')],
+                '추출 시도 시간': [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+            })
+        
+            return {"Placeholder": df}
+        
+        except Exception as e:
+            self.logger.error(f"Placeholder DataFrame 생성 오류: {str(e)}")
+        # 최소한의 정보만 포함하는 DataFrame 반환
+            return {"오류": pd.DataFrame({
+                '구분': ['오류 발생'],
+                '상태': ['데이터 추출 실패'],
+                '상세 정보': [f'오류: {str(e)}']
+            })}
 
 
-    return {"오류": pd.DataFrame({
-               '구분': ['오류 발생'],
-               '상태': ['데이터 추출 실패'],
-               '상세 정보': [f'오류: {str(e)}']
-           })}
-
-    def _ensure_all_rows_included(self, df: pd.DataFrame, report_type: str) -> pd.DataFrame:
-       """모든 행이 포함되도록 보장
-       
-       주요 수정 사항:
-       - SKT, KT, LGU+, MVNO 등 모든 중요 행 포함
-       """
-       if df is None or df.empty:
-           return df
-           
-       try:
-           # 복사본 생성
-           fixed_df = df.copy()
-           
-           # 보고서 유형에 따라 예상되는 필수 행 정의
-           expected_rows = self._get_expected_rows(report_type)
-           if not expected_rows:
-               return fixed_df
-               
-           # 항목/구분 컬럼 찾기
-           item_col = None
-           for col_candidate in ['항목', '구분', '통신사', '사업자', fixed_df.columns[0]]:
-               if col_candidate in fixed_df.columns:
-                   item_col = col_candidate
-                   break
-                   
-           if not item_col:
-               return fixed_df
-               
-           # 현재 있는 행 항목 확인
-           existing_items = set(fixed_df[item_col].astype(str).str.strip())
-           
-           # 누락된 행 찾기
-           missing_rows = []
-           for expected_item in expected_rows:
-               # 부분 일치 확인 (예: "SK텔레콤"이 "SKT"에 포함됨)
-               if not any(expected_item.lower() in item.lower() or item.lower() in expected_item.lower() 
-                         for item in existing_items):
-                   # 이 항목은 누락된 것으로 간주
-                   new_row = pd.Series(index=fixed_df.columns)
-                   new_row[item_col] = expected_item
-                   new_row = new_row.fillna('')  # 다른 열은 빈값으로
-                   missing_rows.append(new_row)
-           
-           # 누락된 행 추가
-           if missing_rows:
-               self.logger.info(f"{len(missing_rows)}개 누락된 행 추가: {[row[item_col] for row in missing_rows]}")
-               fixed_df = pd.concat([fixed_df, pd.DataFrame(missing_rows)], ignore_index=True)
-               
-               # 행 정렬 (항목 컬럼 기준)
-               try:
-                   fixed_df = fixed_df.sort_values(by=item_col).reset_index(drop=True)
-               except:
-                   pass
-           
-           return fixed_df
-           
-       except Exception as e:
-           self.logger.error(f"행 포함 확인 중 오류: {str(e)}")
-           return df
-   
-    def _get_expected_rows(self, report_type: str) -> List[str]:
-       """보고서 유형에 따른 예상 행 목록 반환"""
-       # 무선통신서비스 가입 현황
-       if "무선통신서비스" in report_type and "가입" in report_type:
-           return ["SKT", "KT", "LGU+", "MVNO", "알뜰폰", "합계"]
-           
-       # 유선통신서비스 가입 현황
-       elif "유선통신서비스" in report_type and "가입" in report_type:
-           return ["KT", "SK브로드밴드", "LG유플러스", "SKT", "기타", "합계"]
-           
-       # 이동전화 및 트래픽 통계
-       elif "이동전화" in report_type and "트래픽" in report_type:
-           return ["SKT", "KT", "LGU+", "MVNO", "합계"]
-           
-       # 무선데이터 트래픽 통계
-       elif "무선데이터" in report_type and "트래픽" in report_type:
-           return ["SKT", "KT", "LGU+", "MVNO", "합계"]
-           
-       # 번호이동 현황
-       elif "번호이동" in report_type:
-           return ["SKT", "KT", "LGU+", "MVNO", "알뜰폰", "합계"]
-           
-       # 기본값
-       return []
+class PageParser:
+    """페이지 파싱 클래스"""
+    
+    def __init__(self, config: MonitorConfig):
+        self.config = config
+        self.post_extractor = PostExtractor(config)
+        self.view_link_extractor = ViewLinkExtractor(config)
+        self.document_data_extractor = DocumentDataExtractor(config, extractors)
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
+    async def parse_page_content(
+        self,
+        page: Page,
+        page_num: int,
+        days_range: Optional[int] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        reverse_order: bool = True
+    ) -> Tuple[List[Dict], List[Dict], Dict]:
+        """페이지 콘텐츠 파싱"""
+        all_posts = []
+        telecom_stats_posts = []
+        
+        # 결과 정보를 담을 딕셔너리
+        result_info = {
+            'current_page_complete': True,
+            'skip_remaining_in_page': False,
+            'continue_to_next_page': True,
+            'oldest_date_found': None,
+            'newest_date_found': None,
+            'total_posts': 0,
+            'filtered_posts': 0,
+            'messages': []
+        }
+        
+        try:
+            # 날짜 객체로 변환
+            start_date_obj = None
+            end_date_obj = None
+            
+            if start_date:
+                try:
+                    start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+                except ValueError:
+                    self.logger.warning(f"잘못된 시작 날짜 형식: {start_date}")
+                    result_info['messages'].append(f"잘못된 시작 날짜 형식: {start_date}")
+                    
+            if end_date:
+                try:
+                    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+                except ValueError:
+                    self.logger.warning(f"잘못된 종료 날짜 형식: {end_date}")
+                    result_info['messages'].append(f"잘못된 종료 날짜 형식: {end_date}")
+            
+            # days_range를 사용하는 경우 start_date_obj 계산
+            if days_range and not start_date_obj:
+                # 한국 시간대 고려 (UTC+9)
+                korea_tz = datetime.now() + timedelta(hours=9)
+                start_date_obj = (korea_tz - timedelta(days=days_range)).date()
+                self.logger.info(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
+                result_info['messages'].append(f"days_range({days_range})로 계산된 시작 날짜: {start_date_obj}")
+            
+            # 페이지 로드 대기
+            try:
+                await page.wait_for_selector(".board_list", timeout=15000)
+                
+                # 추가 대기 (JS 로딩 등)
+                await page.wait_for_timeout(3000)
+            except Exception as wait_err:
+                self.logger.error(f"페이지 로드 시간 초과: {str(wait_err)}")
+                result_info['current_page_complete'] = False
+                result_info['continue_to_next_page'] = True
+                result_info['messages'].append("페이지 로드 시간 초과")
+                return [], [], result_info
+            
+            # 스크린샷 저장 (디버깅용)
+            await page.screenshot(path=f"parsed_page_{page_num}.png")
+            
+            # 게시물 목록 추출
+            posts = await page.query_selector_all("div.toggle:not(.thead), table.board_list tr:not(.thead), .board_list li")
+            
+            if not posts:
+                self.logger.warning("게시물을 찾을 수 없음")
+                result_info['messages'].append("게시물을 찾을 수 없음")
+                return [], [], result_info
+                
+            result_info['total_posts'] = len(posts)
+            self.logger.info(f"{len(posts)}개 게시물 항목 발견")
+            
+            # 각 게시물 처리
+            for post_idx, post_elem in enumerate(posts):
+                try:
+                    post_info = await self.post_extractor.extract_post_info(post_elem)
+                    if post_info:
+                        post_date = post_info['post_date']
+                        date_str = post_info['date']
+                        
+                        # 날짜 정보 업데이트
+                        if result_info['oldest_date_found'] is None or post_date < result_info['oldest_date_found']:
+                            result_info['oldest_date_found'] = post_date
+                            
+                        if result_info['newest_date_found'] is None or post_date > result_info['newest_date_found']:
+                            result_info['newest_date_found'] = post_date
+                        
+                        # 날짜 범위 확인
+                        include_post = True
+                        
+                        if start_date_obj and post_date < start_date_obj:
+                            include_post = False
+                            
+                            # 역순 탐색 시에는 현재 페이지의 나머지 게시물만 건너뛰고 다음 페이지로 계속 진행
+                            if reverse_order:
+                                result_info['skip_remaining_in_page'] = True
+                                self.logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                                result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 현재 페이지 나머지 건너뛰기")
+                                break  # 현재 페이지 루프 종료
+                            # 정순 탐색 시에는 모든 페이지 탐색 중단
+                            else:
+                                result_info['continue_to_next_page'] = False
+                                self.logger.info(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                                result_info['messages'].append(f"날짜 범위 이전 게시물({date_str}) 발견, 이후 페이지 탐색 중단")
+                        
+                        # 종료 날짜 이후인지 확인
+                        if end_date_obj and post_date > end_date_obj:
+                            include_post = False
+                        
+                        # 필터링 조건에 맞지 않으면 다음 게시물로
+                        if not include_post:
+                            continue
+                            
+                        # 필터링 조건을 통과한 게시물 처리
+                        result_info['filtered_posts'] += 1
+                        
+                        # 모든 게시물 리스트에 추가
+                        all_posts.append(post_info)
+                        
+                        # 통신 통계 게시물인지 확인
+                        if DataUtils.is_telecom_stats_post(post_info['title'], self.config.report_types):
+                            self.logger.info(f"통신 통계 게시물 발견: {post_info['title']}")
+                            telecom_stats_posts.append(post_info)
+                            
+                except Exception as post_err:
+                    self.logger.error(f"게시물 {post_idx+1} 처리 중 오류: {str(post_err)}")
+                    continue
+            
+            return all_posts, telecom_stats_posts, result_info
+            
+        except Exception as e:
+            self.logger.error(f"페이지 파싱 중 오류: {str(e)}")
+            result_info['current_page_complete'] = False
+            result_info['messages'].append(f"페이지 파싱 중 오류: {str(e)}")
+            return [], [], result_info
 
 
 ##################################################################################
