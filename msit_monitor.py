@@ -266,7 +266,37 @@ class LoggingUtils:
 class DateUtils:
     """날짜 관련 유틸리티 클래스"""
     
-            f"{year}-{month}-{day}"
+    @staticmethod
+    def parse_post_date(date_str: str) -> Optional[datetime.date]:
+        """게시물 날짜 파싱"""
+        try:
+            # 날짜 문자열 정규화
+            date_str = date_str.replace(',', ' ').strip()
+            
+            # 다양한 날짜 형식 시도
+            date_formats = [
+                '%Y. %m. %d',  # "YYYY. MM. DD" 형식
+                '%Y-%m-%d',    # "YYYY-MM-DD" 형식
+                '%Y/%m/%d',    # "YYYY/MM/DD" 형식
+                '%Y.%m.%d',    # "YYYY.MM.DD" 형식
+                '%Y년 %m월 %d일',  # "YYYY년 MM월 DD일" 형식
+            ]
+            
+            for date_format in date_formats:
+                try:
+                    return datetime.strptime(date_str, date_format).date()
+                except ValueError:
+                    continue
+            
+            # 정규식으로 시도
+            match = re.search(r'(\d{4})[.\-\s/]+(\d{1,2})[.\-\s/]+(\d{1,2})', date_str)
+            if match:
+                year, month, day = map(int, match.groups())
+                try:
+                    return datetime(year, month, day).date()
+                except ValueError:
+                    logger = logging.getLogger('msit_monitor')
+                    logger.warning(f"날짜 값이 유효하지 않음: {year}-{month}-{day}")
             
             logger = logging.getLogger('msit_monitor')
             logger.warning(f"알 수 없는 날짜 형식: {date_str}")
