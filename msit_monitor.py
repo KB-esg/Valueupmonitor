@@ -1674,11 +1674,18 @@ class PostExtractor:
             
             # 게시물 ID 추출
             post_id = None
-            onclick = await title_elem.get_attribute('onclick')
-            if onclick:
-                match = re.search(r"fn_detail\((\d+)\)", onclick)
+            onclick_attr = await title_elem.get_attribute('onclick')
+            if onclick_attr:
+                match = re.search(r"fn_detail\((\d+)\)", onclick_attr)
                 if match:
                     post_id = match.group(1)
+            else:
+                # onclick 속성이 없는 경우, href 속성에서 추출 시도
+                href_attr = await title_elem.get_attribute('href')
+                if href_attr:
+                    match = re.search(r"nttSeqNo=(\d+)", href_attr)
+                    if match:
+                        post_id = match.group(1)
             
             # 게시물 URL 생성
             post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post_id}" if post_id else None
@@ -1723,149 +1730,24 @@ class ViewLinkExtractor:
         # 현재 URL 저장
         current_url = page.url
         
-        # 게시물 목록 페이지로 돌아가기
+        # 게시물 상세 페이지 URL 직접 접근
+        post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+        await page.goto(post_url)
+        
+        # 페이지 로드 대기
         try:
-            await page.goto(self.config.stats_url)
-            await page.wait_for_selector(".board_list", timeout=10000)
-            await page.wait_for_timeout(2000)  # 추가 대기
+            await page.wait_for_selector('.view_head', timeout=10000)
         except Exception as e:
-            self.logger.error(f"게시물 목록 페이지 접근 실패: {str(e)}")
-            # 직접 URL 접근 폴백 시도
-            return await self._direct_access_view_link_params(page, post)
-        
-        # 최대 재시도 횟수
-        max_retries = 3
-        retry_delay = 2
-        
-        for attempt in range(max_retries):
-            try:
-                # 제목으로 게시물 링크 찾기 - 더 유연한 선택자 사용
-                post_link = None
-                
-                # 더 짧은 제목 부분만 비교 (맨 앞 20자만 사용)
-                title_prefix = post['title'][:20]
-                post_link = await page.query_selector(f"text='{title_prefix}'")
-                
-                # 게시물 번호로 시도
-                if not post_link and post['post_id']:
-                    post_link = await page.query_selector(f"a[onclick*='{post['post_id']}']")
-                
-                # 링크를 찾지 못한 경우 직접 URL 접근 시도
-                if not post_link:
-                    self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
-                    
-                    if attempt < max_retries - 1:
-                        self.logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                        await page.wait_for_timeout(retry_delay * 1000)
-                        continue
-                    else:
-                        # 직접 URL 접근 방식으로 대체
-                        self.logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                        return await self._direct_access_view_link_params(page, post)
-                
-                # 스크린샷 저장 (클릭 전)
-                await page.screenshot(path=f"before_click_{post['post_id']}.png")
-                
-                # 링크 클릭하여 상세 페이지로 이동
-                self.logger.info(f"게시물 링크 클릭 시도: {post['title']}")
-                
-                # 여러 클릭 방법 시도
-                try:
-                    # JavaScript로 클릭 (가장 안정적인 방법)
-                    await page.evaluate("(element) => element.click()", post_link)
-                    self.logger.info("JavaScript를 통한 클릭 실행")
-                except Exception as js_click_err:
-                    self.logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
-                    # 일반 클릭 시도
-                    await post_link.click()
-                    self.logger.info("일반 클릭 실행")
-                
-                # 페이지 로드 대기
-                try:
-                    # URL 변경 대기
-                    await page.wait_for_function(
-                        f"() => window.location.href !== '{self.config.stats_url}'",
-                        timeout=15000
-                    )
-                    self.logger.info(f"페이지 URL 변경 감지됨: {page.url}")
-                    await page.wait_for_timeout(3000)  # 추가 대기
-                except Exception as url_err:
-                    self.logger.warning("URL 변경 감지 실패")
-                    # 실패 시 직접 URL로 접근 시도
-                    if attempt < max_retries - 1:
-                        continue
-                    else:
-                        return await self._direct_access_view_link_params(page, post)
-                
-                # 바로보기 링크 찾기
-                view_link_params = await self._extract_view_link_params(page, post)
-                
-                # 원래 페이지로 돌아가기
-                await page.goto(current_url)
-                
-                return view_link_params
-                
-            except Exception as e:
-                self.logger.error(f"게시물 링크 처리 중 오류: {str(e)}")
-                
-                # 실패 시 직접 URL로 접근 시도
-                if attempt < max_retries - 1:
-                    self.logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                    await page.wait_for_timeout(retry_delay * 1000)
-                    continue
-                else:
-                    # 직접 URL 접근 방식으로 대체
-                    self.logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                    return await self._direct_access_view_link_params(page, post)
-        
-        # 모든 재시도 실패
-        self.logger.error(f"게시물 링크 처리 실패: {post['title']}")
-        return None
-    
-    async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
-        """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
-        try:
-            if not post.get('post_id'):
-                self.logger.error(f"직접 URL 접근 불가 {post['title']} - post_id 누락")
-                return None
-                
-            self.logger.info(f"게시물 직접 URL 접근 시도: {post['title']}")
-            
-            # 게시물 상세 URL 구성
-            post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
-            
-            # 현재 URL 저장
-            current_url = page.url
-            
-            # 게시물 상세 페이지 접속
-            await page.goto(post_url)
-            await page.wait_for_timeout(3000)  # 페이지 로드 대기
-            
-            # 페이지 로드 확인
-            try:
-                await page.wait_for_selector(".view_head", timeout=10000)
-                self.logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
-            except Exception:
-                self.logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
-            
-            # 바로보기 링크 찾기
-            view_link_params = await self._extract_view_link_params(page, post)
-            
-            # 원래 페이지로 돌아가기
-            await page.goto(current_url)
-            
-            return view_link_params
-            
-        except Exception as e:
-            self.logger.error(f"직접 URL 접근 중 오류: {str(e)}")
-            
-            try:
-                # 원래 페이지로 돌아가기
-                await page.goto(current_url)
-            except:
-                pass
-                
+            self.logger.warning(f"게시물 상세 페이지 로드 실패: {post['title']}, {str(e)}")
             return None
+        
+        # 바로보기 링크 찾기
+        view_link_params = await self._extract_view_link_params(page, post)
+        
+        # 원래 페이지로 돌아가기
+        await page.goto(current_url)
+        
+        return view_link_params
     
     async def _extract_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
         """바로보기 링크 파라미터 추출"""
@@ -1943,6 +1825,52 @@ class ViewLinkExtractor:
                 'date': date_info,
                 'post_info': post
             }
+    
+    async def _direct_access_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
+        """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
+        try:
+            if not post.get('post_id'):
+                self.logger.error(f"직접 URL 접근 불가 {post['title']} - post_id 누락")
+                return None
+                
+            self.logger.info(f"게시물 직접 URL 접근 시도: {post['title']}")
+            
+            # 게시물 상세 URL 구성
+            post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
+            
+            # 현재 URL 저장
+            current_url = page.url
+            
+            # 게시물 상세 페이지 접속
+            await page.goto(post_url)
+            await page.wait_for_timeout(3000)  # 페이지 로드 대기
+            
+            # 페이지 로드 확인
+            try:
+                await page.wait_for_selector(".view_head", timeout=10000)
+                self.logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
+            except Exception:
+                self.logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
+            
+            # 바로보기 링크 찾기
+            view_link_params = await self._extract_view_link_params(page, post)
+            
+            # 원래 페이지로 돌아가기
+            await page.goto(current_url)
+            
+            return view_link_params
+            
+        except Exception as e:
+            self.logger.error(f"직접 URL 접근 중 오류: {str(e)}")
+            
+            try:
+                # 원래 페이지로 돌아가기
+                await page.goto(current_url)
+            except:
+                pass
+                
+            return None
+    
 
 
 class DocumentDataExtractor:
