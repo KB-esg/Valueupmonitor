@@ -2036,7 +2036,7 @@ class PageParser:
                
            return None
    
-   async def extract_document_data(self, page: Page, file_params: Dict) -> Optional[Dict[str, pd.DataFrame]]:
+    async def extract_document_data(self, page: Page, file_params: Dict) -> Optional[Dict[str, pd.DataFrame]]:
        """문서 데이터 추출 (통합된 추출 로직)"""
        try:
            if not file_params:
@@ -2090,7 +2090,7 @@ class PageParser:
            # 오류 발생 시 placeholder 반환
            return self._create_placeholder_dataframe(file_params)
    
-   def _ensure_all_operators_included(self, sheets_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    def _ensure_all_operators_included(self, sheets_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
        """통신사 행 누락 문제 해결 - 이동통계 관련 시트에 SKT, KT, LGU+, MVNO 등 추가"""
        try:
            # 수정된 시트 데이터
@@ -2137,7 +2137,7 @@ class PageParser:
            self.logger.error(f"통신사 행 추가 중 오류: {str(e)}")
            return sheets_data
    
-   def _extract_from_text_content(self, content: str, file_params: Dict) -> Dict[str, pd.DataFrame]:
+    def _extract_from_text_content(self, content: str, file_params: Dict) -> Dict[str, pd.DataFrame]:
        """텍스트 콘텐츠에서 데이터 추출"""
        try:
            # 간단한 표 형태로 변환
@@ -2162,7 +2162,7 @@ class PageParser:
            self.logger.error(f"텍스트 내용 추출 오류: {str(e)}")
            return self._create_placeholder_dataframe(file_params)
    
-   def _create_placeholder_dataframe(self, file_params: Dict) -> Dict[str, pd.DataFrame]:
+    def _create_placeholder_dataframe(self, file_params: Dict) -> Dict[str, pd.DataFrame]:
        """placeholder DataFrame 생성"""
        try:
            post_info = file_params.get('post_info', {})
@@ -2212,13 +2212,13 @@ class PageParser:
            # 최소한의 정보만 포함하는 DataFrame 반환
 
 
-return {"오류": pd.DataFrame({
+    return {"오류": pd.DataFrame({
                '구분': ['오류 발생'],
                '상태': ['데이터 추출 실패'],
                '상세 정보': [f'오류: {str(e)}']
            })}
 
-   def _ensure_all_rows_included(self, df: pd.DataFrame, report_type: str) -> pd.DataFrame:
+    def _ensure_all_rows_included(self, df: pd.DataFrame, report_type: str) -> pd.DataFrame:
        """모든 행이 포함되도록 보장
        
        주요 수정 사항:
@@ -2278,7 +2278,7 @@ return {"오류": pd.DataFrame({
            self.logger.error(f"행 포함 확인 중 오류: {str(e)}")
            return df
    
-   def _get_expected_rows(self, report_type: str) -> List[str]:
+    def _get_expected_rows(self, report_type: str) -> List[str]:
        """보고서 유형에 따른 예상 행 목록 반환"""
        # 무선통신서비스 가입 현황
        if "무선통신서비스" in report_type and "가입" in report_type:
