@@ -1724,69 +1724,75 @@ class ViewLinkExtractor:
         if not post.get('post_id'):
             self.logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
             return None
-        
+    
         self.logger.info(f"게시물 열기: {post['title']}")
-        
+    
         # 현재 URL 저장
         current_url = page.url
-        
-        # 게시물 목록 페이지로 돌아가기
+    
+    # 게시물 목록 페이지로 돌아가기
         await page.goto(self.config.stats_url, wait_until='networkidle')
-        
-        # 게시물 링크 찾기
+    
+    # 게시물 링크 찾기
         post_link_selector = f'a[onclick*="fn_detail(\'{post["post_id"]}\')"]'
         try:
             post_link = await page.wait_for_selector(post_link_selector, timeout=10000)
         except TimeoutError:
             self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
             return None
-        
-        # 게시물 링크 클릭
+    
+    # 게시물 링크 클릭
         await post_link.click()
         await page.wait_for_load_state('networkidle')
-        
-        # 바로보기 버튼 찾기
+    
+    # 게시물 내용 페이지 로드 확인
+        try:
+            await page.wait_for_selector('.board_view', timeout=10000)
+        except TimeoutError:
+            self.logger.warning(f"게시물 내용 페이지 로드 실패: {post['title']}")
+            return None
+    
+    # 바로보기 버튼 찾기
         view_button_selector = 'a.view[onclick*="getExtension_path"]'
         try:
             view_button = await page.wait_for_selector(view_button_selector, timeout=10000)
         except TimeoutError:
             self.logger.warning(f"바로보기 버튼을 찾을 수 없음: {post['title']}")
             return None
-        
-        # 바로보기 버튼 클릭
+    
+    # 바로보기 버튼 클릭
         await view_button.click()
         await page.wait_for_load_state('networkidle')
-        
-        # 문서 뷰어 페이지로 전환
+    
+    # 문서 뷰어 페이지로 전환
         await page.wait_for_timeout(2000)  # 2초 대기
         viewer_page = await page.expect_popup()
-        
-        # 문서 뷰어 URL에서 파라미터 추출
+    
+    # 문서 뷰어 URL에서 파라미터 추출
         viewer_url = viewer_page.url
         parsed_url = urllib.parse.urlparse(viewer_url)
         query_params = urllib.parse.parse_qs(parsed_url.query)
-        
+    
         atch_file_no = query_params.get('atchFileNo', [None])[0]
         file_ord = query_params.get('fileOrdr', [None])[0]
-        
+    
         if not atch_file_no or not file_ord:
             self.logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
             return None
-        
-        # 날짜 정보 추출
+    
+    # 날짜 정보 추출
         date_info = DateUtils.extract_date_from_title(post['title'])
-        
-        # 원래 페이지로 돌아가기
+    
+    # 원래 페이지로 돌아가기
         await page.goto(current_url, wait_until='networkidle')
-        
+    
         return {
             'atch_file_no': atch_file_no,
             'file_ord': file_ord,
             'date': date_info,
             'post_info': post
         }
-   
-  
+
     
 class DocumentDataExtractor:
     """문서 데이터 추출 클래스"""
