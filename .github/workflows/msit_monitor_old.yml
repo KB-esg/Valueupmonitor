@@ -132,7 +132,7 @@ jobs:
         
         # 모니터링 스크립트 실행
         echo "모니터링 스크립트 실행..."
-        python msit_monitor.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
+        python msit_monitor_old.py || { echo "모니터링 스크립트 실행 실패"; exit 1; }
 
     - name: Create simple capture script
       run: |
