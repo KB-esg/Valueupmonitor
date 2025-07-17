@@ -1734,9 +1734,10 @@ class ViewLinkExtractor:
         await page.goto(self.config.stats_url, wait_until='networkidle')
         
         # 게시물 링크 찾기
-        post_link_selector = f'a[onclick*="{post["post_id"]}"]'
-        post_link = await page.query_selector(post_link_selector)
-        if not post_link:
+        post_link_selector = f"a[onclick*=\"fn_detail('{post['post_id']}')\"]"
+        try:
+            post_link = await page.wait_for_selector(post_link_selector, timeout=10000)
+        except TimeoutError:
             self.logger.warning(f"게시물 링크를 찾을 수 없음: {post['title']}")
             return None
         
@@ -1744,43 +1745,24 @@ class ViewLinkExtractor:
         await post_link.click()
         await page.wait_for_load_state('networkidle')
         
-        # 바로보기 링크 찾기
+        # 바로보기 버튼 찾기
         view_link_selector = 'a.view[onclick*="getExtension_path"]'
-        view_link = await page.query_selector(view_link_selector)
-        if not view_link:
-            self.logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
+        try:
+            view_link = await page.wait_for_selector(view_link_selector, timeout=10000)
+        except TimeoutError:
+            self.logger.warning(f"바로보기 버튼을 찾을 수 없음: {post['title']}")
             return None
         
-        # 바로보기 링크 클릭
+        # 바로보기 버튼 클릭
         await view_link.click()
         await page.wait_for_load_state('networkidle')
         
-        # 문서 뷰어 페이지로 전환
-        await page.wait_for_timeout(2000)  # 2초 대기
-        viewer_page = await page.expect_popup()
+        # 현재 URL에서 파라미터 추출
+        current_url = page.url
+        url_params = urllib.parse.parse_qs(urllib.parse.urlparse(current_url).query)
         
-        # 문서 뷰어 iframe 대기
-        await viewer_page.wait_for_selector('#SynapDocViewerFrame', timeout=5000)
-        
-        # 문서 뷰어 iframe으로 전환
-        iframe = await viewer_page.frame('#SynapDocViewerFrame')
-        if not iframe:
-            self.logger.warning(f"문서 뷰어 iframe을 찾을 수 없음: {post['title']}")
-            return None
-        
-        # iframe 내부 콘텐츠 확인
-        content = await iframe.content()
-        if not content:
-            self.logger.warning(f"문서 뷰어 내용을 찾을 수 없음: {post['title']}")
-            return None
-        
-        # 파라미터 추출
-        url = viewer_page.url
-        parsed_url = urllib.parse.urlparse(url)
-        query_params = urllib.parse.parse_qs(parsed_url.query)
-        
-        atch_file_no = query_params.get('atchFileNo', [None])[0]
-        file_ord = query_params.get('fileOrdr', [None])[0]
+        atch_file_no = url_params.get('atchFileNo', [None])[0]
+        file_ord = url_params.get('fileOrdr', [None])[0]
         
         if not atch_file_no or not file_ord:
             self.logger.warning(f"바로보기 링크 파라미터 추출 실패: {post['title']}")
@@ -1799,86 +1781,9 @@ class ViewLinkExtractor:
             'post_info': post
         }
     
-    async def _extract_view_link_params(self, page: Page, post: Dict) -> Optional[Dict]:
-        """바로보기 링크 파라미터 추출"""
-        try:
-            # 여러 선택자로 바로보기 링크 찾기
-            view_link = await page.query_selector("a.view[title='새창 열림']")
-            
-            # onclick 속성으로 찾기
-            if not view_link:
-                view_link = await page.query_selector("a[onclick*='getExtension_path']")
-            
-            # 텍스트로 찾기
-            if not view_link:
-                view_link = await page.query_selector("a:has-text('바로보기'), a:has-text('보기'), a:has-text('첨부파일')")
-            
-            if view_link:
-                onclick = await view_link.get_attribute('onclick')
-                href = await view_link.get_attribute('href')
-                
-                self.logger.info(f"바로보기 링크 발견, onclick: {onclick}, href: {href}")
-                
-                # getExtension_path('49234', '1') 형식에서 매개변수 추출
-                if onclick and 'getExtension_path' in onclick:
-                    match = re.search(r"getExtension_path\s*\(\s*['\"]([\d]+)['\"]?\s*,\s*['\"]([\d]+)['\"]", onclick)
-                    if match:
-                        atch_file_no = match.group(1)
-                        file_ord = match.group(2)
-                        
-                        # 날짜 정보 추출
-                        date_info = DateUtils.extract_date_from_title(post['title'])
-                        
-                        return {
-                            'atch_file_no': atch_file_no,
-                            'file_ord': file_ord,
-                            'date': date_info,
-                            'post_info': post
-                        }
-                
-                # 직접 다운로드 URL인 경우 처리
-                elif href and any(ext in href for ext in ['.xls', '.xlsx', '.pdf', '.hwp', '.doc', '.docx']):
-                    self.logger.info(f"직접 다운로드 링크 발견: {href}")
-                    
-                    # 날짜 정보 추출
-                    date_info = DateUtils.extract_date_from_title(post['title'])
-                    
-                    return {
-                        'download_url': href,
-                        'date': date_info,
-                        'post_info': post
-                    }
-            
-            # 바로보기 링크를 찾을 수 없는 경우
-            self.logger.warning(f"바로보기 링크를 찾을 수 없음: {post['title']}")
-            
-            # 게시물 내용 추출 시도
-            content = await page.text_content("div.view_cont, .view_content, .bbs_content")
-            
-            # 날짜 정보 추출
-            date_info = DateUtils.extract_date_from_title(post['title'])
-            
-            return {
-                'content': content or "내용 없음",
-                'date': date_info,
-                'post_info': post
-            }
-            
-        except Exception as e:
-            self.logger.error(f"바로보기 링크 추출 중 오류: {str(e)}")
-            
-            # 오류 발생 시에도 날짜 정보 추출 시도
-            date_info = DateUtils.extract_date_from_title(post['title'])
-            
-            return {
-                'content': f"오류 발생: {str(e)}",
-                'date': date_info,
-                'post_info': post
-            }
+   
   
     
-
-
 class DocumentDataExtractor:
     """문서 데이터 추출 클래스"""
     
@@ -1944,7 +1849,6 @@ class DocumentDataExtractor:
             # 오류 발생 시 placeholder 반환
             return self._create_placeholder_dataframe(file_params)
     
-
     def _ensure_all_operators_included(self, sheets_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
         """통신사 행 누락 문제 해결 - 이동통계 관련 시트에 SKT, KT, LGU+, MVNO 등 추가"""
         try:
@@ -2070,7 +1974,6 @@ class DocumentDataExtractor:
                 '상태': ['데이터 추출 실패'],
                 '상세 정보': [f'오류: {str(e)}']
             })}
-
 
 class PageParser:
     """페이지 파싱 클래스"""
