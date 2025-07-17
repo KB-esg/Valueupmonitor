@@ -15,13 +15,9 @@ import random
 import traceback
 import subprocess
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+# Playwright imports (Selenium 대체)
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Page, Browser, BrowserContext
 
 from bs4 import BeautifulSoup
 import telegram
@@ -74,105 +70,107 @@ TEMP_DIR.mkdir(exist_ok=True)
 SCREENSHOTS_DIR = Path("./screenshots")
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
-# ===========================
-# 유틸리티 함수들
-# ===========================
 
-def setup_driver():
-    """Selenium WebDriver 설정 (향상된 봇 탐지 회피)"""
-    options = Options()
-    # 비-headless 모드 실행 (GitHub Actions에서 Xvfb 사용 시)
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080')
+#=====================================================================================
+# Part 1. 유틸리티 함수들
+#=====================================================================================
+
+
+async def setup_browser():
+    """Playwright 브라우저 설정 (향상된 봇 탐지 회피)"""
+    playwright = await async_playwright().start()
     
-    # 봇 탐지 회피를 위한 추가 옵션
-    options.add_argument('--disable-blink-features=AutomationControlled')
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
+    # 브라우저 실행 옵션
+    browser_args = [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process'
+    ]
     
-    # User Agent 설정 (다양한 브라우저/OS 조합)
+    # User Agent 설정
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ]
-    options.add_argument(f'user-agent={random.choice(user_agents)}')
     
-    # 추가 봇 탐지 회피 설정
-    prefs = {
-        'credentials_enable_service': False,
-        'profile.password_manager_enabled': False,
-        'profile.default_content_setting_values.notifications': 2,
-        'excludeSwitches': ['enable-automation'],
-        'useAutomationExtension': False,
-    }
-    options.add_experimental_option('prefs', prefs)
+    # 헤드리스 모드 설정
+    headless = os.environ.get('HEADLESS', 'false').lower() == 'true'
     
-    # 다운로드 디렉토리 설정
-    download_prefs = {
-        'download.default_directory': str(TEMP_DIR.absolute()),
-        'download.prompt_for_download': False,
-        'download.directory_upgrade': True,
-        'safebrowsing.enabled': True,
-        'plugins.always_open_pdf_externally': True  # PDF를 다운로드하도록 설정
-    }
-    options.add_experimental_option('prefs', {**prefs, **download_prefs})
+    # 브라우저 시작
+    browser = await playwright.chromium.launch(
+        headless=headless,
+        args=browser_args
+    )
     
-    # 헤드리스 모드 설정 (환경 변수로 제어)
-    if os.environ.get('HEADLESS', 'false').lower() == 'true':
-        options.add_argument('--headless=new')  # Chrome v109+의 새로운 헤드리스 모드
+    # 컨텍스트 생성 (봇 탐지 회피 설정 포함)
+    context = await browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        user_agent=random.choice(user_agents),
+        locale='ko-KR',
+        timezone_id='Asia/Seoul',
+        permissions=['geolocation'],
+        ignore_https_errors=True,
+        java_script_enabled=True,
+        accept_downloads=True,
+        # 다운로드 경로 설정
+        downloads_path=str(TEMP_DIR.absolute())
+    )
     
-    # WebDriver 생성
-    driver = webdriver.Chrome(options=options)
+    # 봇 탐지 회피를 위한 JavaScript 주입
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['ko-KR', 'ko', 'en-US', 'en']
+        });
+        window.chrome = {
+            runtime: {}
+        };
+        Object.defineProperty(navigator, 'permissions', {
+            get: () => ({
+                query: () => Promise.resolve({ state: 'granted' })
+            })
+        });
+        
+        // Playwright 특유의 속성 숨기기
+        delete window.__playwright;
+        delete window.__pw_manual;
+        delete window.playwright;
+    """)
     
-    # JavaScript로 봇 탐지 회피를 위한 추가 설정
-    driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-        'source': '''
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
-            });
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['ko-KR', 'ko', 'en-US', 'en']
-            });
-            window.chrome = {
-                runtime: {}
-            };
-            Object.defineProperty(navigator, 'permissions', {
-                get: () => ({
-                    query: () => Promise.resolve({ state: 'granted' })
-                })
-            });
-        '''
-    })
+    # 새 페이지 생성
+    page = await context.new_page()
     
-    # 타임아웃 설정
-    driver.set_page_load_timeout(30)
-    driver.implicitly_wait(10)
+    # 페이지 타임아웃 설정
+    page.set_default_timeout(30000)  # 30초
+    page.set_default_navigation_timeout(30000)
     
-    logger.info("WebDriver 설정 완료")
-    return driver
+    logger.info("Playwright 브라우저 설정 완료")
+    return playwright, browser, context, page
 
-def reset_browser_context(driver, delete_cookies=True, navigate_to_blank=True):
+async def reset_browser_context(page, delete_cookies=True, navigate_to_blank=True):
     """브라우저 컨텍스트 초기화 (쿠키 삭제 및 빈 페이지로 이동)"""
     try:
         # 쿠키 삭제
         if delete_cookies:
-            driver.delete_all_cookies()
+            await page.context.clear_cookies()
             logger.info("모든 쿠키 삭제 완료")
             
         # 빈 페이지로 이동
         if navigate_to_blank:
-            driver.get("about:blank")
+            await page.goto("about:blank")
             logger.info("빈 페이지로 이동 완료")
             
         # 로컬 스토리지 및 세션 스토리지 클리어
         try:
-            driver.execute_script("localStorage.clear(); sessionStorage.clear();")
+            await page.evaluate("localStorage.clear(); sessionStorage.clear();")
             logger.info("로컬 스토리지 및 세션 스토리지 클리어")
         except Exception as js_err:
             logger.warning(f"스토리지 클리어 중 오류: {str(js_err)}")
@@ -182,11 +180,13 @@ def reset_browser_context(driver, delete_cookies=True, navigate_to_blank=True):
         logger.error(f"브라우저 컨텍스트 초기화 실패: {str(e)}")
         return False
 
-def take_screenshot(driver, name, crop_area=None):
+async def take_screenshot(page, name, crop_area=None):
     """특정 페이지의 스크린샷 저장 (선택적 영역 잘라내기)"""
     try:
         screenshot_path = f"screenshots/{name}_{int(time.time())}.png"
-        driver.save_screenshot(screenshot_path)
+        
+        # 전체 페이지 스크린샷
+        await page.screenshot(path=screenshot_path, full_page=False)
         
         # 특정 영역만 잘라내기 (OCR 개선용)
         if crop_area and CONFIG['ocr_enabled']:
@@ -215,12 +215,12 @@ def take_screenshot(driver, name, crop_area=None):
         logger.error(f"스크린샷 저장 중 오류: {str(e)}")
         return None
 
-def save_html_for_debugging(driver, name_prefix, include_iframe=True):
+async def save_html_for_debugging(page, name_prefix, include_iframe=True):
     """
     디버깅을 위해 HTML 콘텐츠 저장
     
     Args:
-        driver: Selenium WebDriver instance
+        page: Playwright Page instance
         name_prefix: Prefix for the file name
         include_iframe: Whether to also save iframe content if available
         
@@ -231,7 +231,7 @@ def save_html_for_debugging(driver, name_prefix, include_iframe=True):
     
     try:
         # Save main page HTML
-        main_html = driver.page_source
+        main_html = await page.content()
         html_path = f"{name_prefix}_{timestamp}_main.html"
         
         with open(html_path, 'w', encoding='utf-8') as f:
@@ -243,42 +243,34 @@ def save_html_for_debugging(driver, name_prefix, include_iframe=True):
         if include_iframe:
             try:
                 # Find all iframes
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                iframes = await page.query_selector_all("iframe")
                 
                 for i, iframe in enumerate(iframes):
                     try:
-                        # Switch to iframe
-                        driver.switch_to.frame(iframe)
-                        
-                        # Get iframe HTML
-                        iframe_html = driver.page_source
-                        iframe_path = f"{name_prefix}_{timestamp}_iframe_{i+1}.html"
-                        
-                        with open(iframe_path, 'w', encoding='utf-8') as f:
-                            f.write(iframe_html)
-                        
-                        logger.info(f"Saved iframe {i+1} HTML: {iframe_path}")
-                        
-                        # Switch back to main content
-                        driver.switch_to.default_content()
+                        # Get iframe content
+                        frame = await iframe.content_frame()
+                        if frame:
+                            iframe_html = await frame.content()
+                            iframe_path = f"{name_prefix}_{timestamp}_iframe_{i+1}.html"
+                            
+                            with open(iframe_path, 'w', encoding='utf-8') as f:
+                                f.write(iframe_html)
+                            
+                            logger.info(f"Saved iframe {i+1} HTML: {iframe_path}")
                     except Exception as iframe_err:
                         logger.warning(f"Error saving iframe {i+1} HTML: {str(iframe_err)}")
-                        try:
-                            driver.switch_to.default_content()
-                        except:
-                            pass
             except Exception as iframes_err:
                 logger.warning(f"Error finding/processing iframes: {str(iframes_err)}")
     
     except Exception as e:
         logger.error(f"Error saving HTML for debugging: {str(e)}")
 
-def collect_diagnostic_info(driver, error=None):
+async def collect_diagnostic_info(page, error=None):
     """
     브라우저와 페이지의 진단 정보 수집
     
     Args:
-        driver: Selenium WebDriver 인스턴스
+        page: Playwright Page instance
         error: 발생한 에러 (있는 경우)
         
     Returns:
@@ -292,50 +284,50 @@ def collect_diagnostic_info(driver, error=None):
         
         # 기본 정보
         try:
-            info['current_url'] = driver.current_url
-            info['title'] = driver.title
-            info['window_handles'] = len(driver.window_handles)
+            info['current_url'] = page.url
+            info['title'] = await page.title()
+            info['window_handles'] = len(page.context.pages)
         except:
             pass
         
         # JavaScript 실행 상태
         try:
-            js_info = driver.execute_script("""
-                return {
+            js_info = await page.evaluate("""
+                () => ({
                     readyState: document.readyState,
                     documentURI: document.documentURI,
                     referrer: document.referrer,
                     cookie: document.cookie ? 'exists' : 'empty'
-                };
+                })
             """)
             info['js_info'] = js_info
         except:
             info['js_info'] = 'Could not execute JavaScript'
         
         # DOM 정보
-        dom_info = driver.execute_script("""
-            return {
+        dom_info = await page.evaluate("""
+            () => ({
                 bodyChildCount: document.body ? document.body.children.length : 0,
                 headChildCount: document.head ? document.head.children.length : 0,
                 scriptsCount: document.scripts ? document.scripts.length : 0,
                 formsCount: document.forms ? document.forms.length : 0
-            };
+            })
         """)
         info['dom_info'] = dom_info
         
         # iframe 정보
         iframe_info = []
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        iframes = await page.query_selector_all("iframe")
         for i, iframe in enumerate(iframes):
             try:
                 iframe_info.append({
                     'index': i,
-                    'id': iframe.get_attribute('id'),
-                    'name': iframe.get_attribute('name'),
-                    'src': iframe.get_attribute('src'),
-                    'width': iframe.get_attribute('width'),
-                    'height': iframe.get_attribute('height'),
-                    'is_displayed': iframe.is_displayed()
+                    'id': await iframe.get_attribute('id'),
+                    'name': await iframe.get_attribute('name'),
+                    'src': await iframe.get_attribute('src'),
+                    'width': await iframe.get_attribute('width'),
+                    'height': await iframe.get_attribute('height'),
+                    'is_visible': await iframe.is_visible()
                 })
             except:
                 iframe_info.append({'index': i, 'error': 'Could not get attributes'})
@@ -346,7 +338,7 @@ def collect_diagnostic_info(driver, error=None):
         if error:
             try:
                 screenshot_path = f"error_screenshot_{int(time.time())}.png"
-                driver.save_screenshot(screenshot_path)
+                await page.screenshot(path=screenshot_path)
                 info['screenshot_path'] = screenshot_path
             except Exception as ss_err:
                 info['screenshot_error'] = str(ss_err)
@@ -354,8 +346,9 @@ def collect_diagnostic_info(driver, error=None):
             # 페이지 소스 저장
             try:
                 source_path = f"error_source_{int(time.time())}.html"
+                page_source = await page.content()
                 with open(source_path, 'w', encoding='utf-8') as f:
-                    f.write(driver.page_source)
+                    f.write(page_source)
                 info['source_path'] = source_path
             except Exception as src_err:
                 info['source_error'] = str(src_err)
@@ -401,16 +394,17 @@ def setup_enhanced_logging():
     # 로거 반환
     return logger
 
-# ===========================
-# 페이지 탐색 관련 함수들
-# ===========================
 
-def navigate_to_specific_page(driver, target_page):
+#=====================================================================================
+# Part 2. 페이지 탐색 함수들
+#=====================================================================================
+
+async def navigate_to_specific_page(page, target_page):
     """
     특정 페이지로 직접 이동하는 함수 (JavaScript 사용)
     
     Args:
-        driver: Selenium WebDriver 인스턴스
+        page: Playwright Page instance
         target_page: 이동하려는 페이지 번호
         
     Returns:
@@ -418,7 +412,7 @@ def navigate_to_specific_page(driver, target_page):
     """
     try:
         # 현재 페이지 번호 확인
-        current_page = get_current_page(driver)
+        current_page = await get_current_page(page)
         
         if current_page == target_page:
             logger.info(f"이미 목표 페이지 {target_page}에 있습니다.")
@@ -428,11 +422,11 @@ def navigate_to_specific_page(driver, target_page):
         
         # JavaScript로 직접 페이지 이동
         try:
-            driver.execute_script(f"fn_selectPage({target_page});")
-            time.sleep(2)  # 페이지 로드 대기
+            await page.evaluate(f"fn_selectPage({target_page});")
+            await page.wait_for_timeout(2000)  # 페이지 로드 대기
             
             # 페이지 변경 확인
-            new_page = get_current_page(driver)
+            new_page = await get_current_page(page)
             if new_page == target_page:
                 logger.info(f"페이지 {target_page}로 이동 성공")
                 return True
@@ -442,48 +436,52 @@ def navigate_to_specific_page(driver, target_page):
             logger.warning(f"JavaScript 페이지 이동 중 오류: {str(js_err)}")
         
         # JavaScript 실패 시 페이지네이션 링크 클릭 시도
-        page_nav = driver.find_element(By.ID, "pageNavi")
-        
-        # 목표 페이지에 대한 직접 링크 찾기
-        page_links = page_nav.find_elements(By.CSS_SELECTOR, "a.page-link")
-        
-        for link in page_links:
-            try:
-                if int(link.text.strip()) == target_page:
-                    link.click()
-                    time.sleep(2)
-                    
-                    # 페이지 변경 확인
-                    new_page = get_current_page(driver)
-                    if new_page == target_page:
-                        logger.info(f"링크 클릭으로 페이지 {target_page} 이동 성공")
-                        return True
-                    break
-            except ValueError:
-                # 숫자가 아닌 링크 (이전/다음 등) 무시
-                continue
+        try:
+            page_nav = await page.wait_for_selector("#pageNavi", timeout=5000)
+            
+            # 목표 페이지에 대한 직접 링크 찾기
+            page_links = await page_nav.query_selector_all("a.page-link")
+            
+            for link in page_links:
+                try:
+                    link_text = await link.text_content()
+                    if link_text and int(link_text.strip()) == target_page:
+                        await link.click()
+                        await page.wait_for_timeout(2000)
+                        
+                        # 페이지 변경 확인
+                        new_page = await get_current_page(page)
+                        if new_page == target_page:
+                            logger.info(f"링크 클릭으로 페이지 {target_page} 이동 성공")
+                            return True
+                        break
+                except ValueError:
+                    # 숫자가 아닌 링크 (이전/다음 등) 무시
+                    continue
+        except Exception as nav_err:
+            logger.warning(f"페이지네이션 탐색 중 오류: {str(nav_err)}")
         
         # 직접 링크가 없는 경우 이전/다음 버튼으로 이동
         if target_page > current_page:
             # 다음 페이지로 이동
-            next_link = page_nav.find_elements(By.CSS_SELECTOR, "a.next, a.page-navi.next")
+            next_link = await page.query_selector("a.next, a.page-navi.next")
             if next_link:
                 logger.info("다음 페이지 링크 클릭")
-                driver.execute_script("arguments[0].click();", next_link[0])
-                wait_for_page_change(driver, current_page)
+                await next_link.click()
+                await wait_for_page_change(page, current_page)
                 
                 # 재귀적으로 다시 시도
-                return navigate_to_specific_page(driver, target_page)
+                return await navigate_to_specific_page(page, target_page)
         else:
             # 이전 페이지로 이동
-            prev_link = page_nav.find_elements(By.CSS_SELECTOR, "a.prev, a.page-navi.prev")
+            prev_link = await page.query_selector("a.prev, a.page-navi.prev")
             if prev_link:
                 logger.info("이전 페이지 링크 클릭")
-                driver.execute_script("arguments[0].click();", prev_link[0])
-                wait_for_page_change(driver, current_page)
+                await prev_link.click()
+                await wait_for_page_change(page, current_page)
                 
                 # 재귀적으로 다시 시도
-                return navigate_to_specific_page(driver, target_page)
+                return await navigate_to_specific_page(page, target_page)
         
         # 직접 이동이 불가능한 경우 순차적으로 이동
         logger.warning(f"페이지 {target_page}에 대한 직접 링크를 찾을 수 없음, 순차적 이동 시도")
@@ -500,7 +498,7 @@ def navigate_to_specific_page(driver, target_page):
             next_page = current + step
             
             # 다음/이전 페이지로 이동
-            success = go_to_adjacent_page(driver, next_page)
+            success = await go_to_adjacent_page(page, next_page)
             if not success:
                 logger.error(f"페이지 {current}에서 {next_page}로 이동 실패")
                 return False
@@ -509,7 +507,7 @@ def navigate_to_specific_page(driver, target_page):
             logger.info(f"현재 페이지: {current}")
             
             # 과도한 요청 방지
-            time.sleep(2)
+            await page.wait_for_timeout(2000)
         
         return current == target_page
         
@@ -517,21 +515,19 @@ def navigate_to_specific_page(driver, target_page):
         logger.error(f"페이지 {target_page}로 이동 중 오류: {str(e)}")
         return False
 
-def get_current_page(driver):
+async def get_current_page(page):
     """
     현재 페이지 번호를 가져오는 함수
     
     Args:
-        driver: Selenium WebDriver 인스턴스
+        page: Playwright Page instance
         
     Returns:
         int: 현재 페이지 번호 (기본값 1)
     """
     try:
         # 현재 활성화된 페이지 링크 찾기
-        page_nav = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.ID, "pageNavi"))
-        )
+        page_nav = await page.wait_for_selector("#pageNavi", timeout=5000)
         
         # 여러 선택자 시도
         selectors = [
@@ -543,15 +539,17 @@ def get_current_page(driver):
         
         for selector in selectors:
             try:
-                current_page_elem = page_nav.find_element(By.CSS_SELECTOR, selector)
-                current_page = int(current_page_elem.text.strip())
-                logger.debug(f"현재 페이지: {current_page} (선택자: {selector})")
-                return current_page
-            except (NoSuchElementException, ValueError):
+                current_page_elem = await page_nav.query_selector(selector)
+                if current_page_elem:
+                    text = await current_page_elem.text_content()
+                    current_page = int(text.strip())
+                    logger.debug(f"현재 페이지: {current_page} (선택자: {selector})")
+                    return current_page
+            except (ValueError, AttributeError):
                 continue
         
         # 현재 페이지를 찾을 수 없는 경우 URL에서 확인
-        current_url = driver.current_url
+        current_url = page.url
         match = re.search(r'pageIndex=(\d+)', current_url)
         if match:
             return int(match.group(1))
@@ -564,52 +562,49 @@ def get_current_page(driver):
         logger.error(f"현재 페이지 번호 확인 중 오류: {str(e)}")
         return 1
 
-def wait_for_page_change(driver, old_page, timeout=10):
+async def wait_for_page_change(page, old_page, timeout=10000):
     """
     페이지가 변경될 때까지 대기하는 함수
     
     Args:
-        driver: Selenium WebDriver 인스턴스
+        page: Playwright Page instance
         old_page: 이전 페이지 번호
-        timeout: 최대 대기 시간 (초)
+        timeout: 최대 대기 시간 (밀리초)
         
     Returns:
         bool: 페이지 변경 성공 여부
     """
     try:
         # 페이지 변경 대기
-        WebDriverWait(driver, timeout).until(
-            lambda d: get_current_page(d) != old_page
-        )
+        start_time = time.time()
+        while (time.time() - start_time) * 1000 < timeout:
+            current = await get_current_page(page)
+            if current != old_page:
+                # 추가로 board_list가 로드될 때까지 대기
+                await page.wait_for_selector(".board_list", timeout=timeout)
+                return True
+            await page.wait_for_timeout(500)
         
-        # 추가로 board_list가 로드될 때까지 대기
-        WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-        )
-        
-        return True
-        
-    except TimeoutException:
-        logger.warning(f"페이지 변경 대기 시간 초과 ({timeout}초)")
+        logger.warning(f"페이지 변경 대기 시간 초과 ({timeout/1000}초)")
         return False
         
     except Exception as e:
         logger.error(f"페이지 변경 대기 중 오류: {str(e)}")
         return False
 
-def go_to_adjacent_page(driver, page_num):
+async def go_to_adjacent_page(page, page_num):
     """
     인접한 페이지로 이동하는 함수
     
     Args:
-        driver: Selenium WebDriver 인스턴스
+        page: Playwright Page instance
         page_num: 이동하려는 페이지 번호
         
     Returns:
         bool: 페이지 이동 성공 여부
     """
     try:
-        current_page = get_current_page(driver)
+        current_page = await get_current_page(page)
         
         # 현재 페이지와 같으면 이동 필요 없음
         if current_page == page_num:
@@ -621,35 +616,34 @@ def go_to_adjacent_page(driver, page_num):
             return False
         
         # 페이지네이션 영역 찾기
-        page_nav = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "pageNavi"))
-        )
+        page_nav = await page.wait_for_selector("#pageNavi", timeout=10000)
         
         # 목표 페이지 링크 찾기
-        page_links = page_nav.find_elements(By.CSS_SELECTOR, "a.page-link")
+        page_links = await page_nav.query_selector_all("a.page-link")
         
         for link in page_links:
             try:
-                if int(link.text.strip()) == page_num:
-                    # JavaScript로 클릭 (더 안정적)
-                    driver.execute_script("arguments[0].click();", link)
+                link_text = await link.text_content()
+                if link_text and int(link_text.strip()) == page_num:
+                    # 클릭
+                    await link.click()
                     
                     # 페이지 변경 대기
-                    return wait_for_page_change(driver, current_page)
+                    return await wait_for_page_change(page, current_page)
             except ValueError:
                 continue
         
         # 다음/이전 버튼으로 이동
         if page_num > current_page:
-            next_buttons = page_nav.find_elements(By.CSS_SELECTOR, "a.next, a.page-navi.next")
+            next_buttons = await page_nav.query_selector_all("a.next, a.page-navi.next")
             if next_buttons:
-                driver.execute_script("arguments[0].click();", next_buttons[0])
-                return wait_for_page_change(driver, current_page)
+                await next_buttons[0].click()
+                return await wait_for_page_change(page, current_page)
         else:
-            prev_buttons = page_nav.find_elements(By.CSS_SELECTOR, "a.prev, a.page-navi.prev")
+            prev_buttons = await page_nav.query_selector_all("a.prev, a.page-navi.prev")
             if prev_buttons:
-                driver.execute_script("arguments[0].click();", prev_buttons[0])
-                return wait_for_page_change(driver, current_page)
+                await prev_buttons[0].click()
+                return await wait_for_page_change(page, current_page)
         
         logger.error(f"페이지 {page_num}으로 이동할 수 있는 링크를 찾을 수 없습니다.")
         return False
@@ -658,43 +652,27 @@ def go_to_adjacent_page(driver, page_num):
         logger.error(f"인접 페이지 {page_num}으로 이동 중 오류: {str(e)}")
         return False
 
-def has_next_page(driver):
+async def has_next_page(page):
     """다음 페이지가 있는지 확인"""
     try:
-        # 여러 가능한 선택자 시도
-        selectors = [
-            "a.page-link[aria-current='page']",
-            "a.on[href*='pageIndex']",
-            ".pagination .active a",
-            "strong.on"
-        ]
+        # 현재 페이지 번호 찾기
+        current_page = await get_current_page(page)
         
-        current_page = None
-        for selector in selectors:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            if elements:
-                try:
-                    current_page = int(elements[0].text)
-                    break
-                except ValueError:
-                    continue
-        
-        if not current_page:
-            logger.warning("현재 페이지 번호를 찾을 수 없음")
-            return False
-            
         # 다음 페이지 링크 확인
         next_page_selectors = [
             f"a.page-link[href*='pageIndex={current_page + 1}']",
             f"a[href*='pageIndex={current_page + 1}']",
-            ".pagination a.next",
-            "a.btn_next"
+            ".pagination a.next:not([disabled])",
+            "a.btn_next:not([disabled])"
         ]
         
         for selector in next_page_selectors:
-            next_links = driver.find_elements(By.CSS_SELECTOR, selector)
-            if next_links and next_links[0].is_enabled():
-                return True
+            next_link = await page.query_selector(selector)
+            if next_link:
+                # 링크가 활성화되어 있는지 확인
+                is_disabled = await next_link.get_attribute('disabled')
+                if not is_disabled:
+                    return True
         
         return False
         
@@ -702,9 +680,11 @@ def has_next_page(driver):
         logger.error(f"다음 페이지 확인 중 오류: {str(e)}")
         return False
 
-# ===========================
-# 날짜 처리 및 게시물 파싱 함수들
-# ===========================
+
+
+#=====================================================================================
+# Part 3. 날짜 및 게시물 파싱 함수들
+#=====================================================================================
 
 def parse_date_with_new_format(date_str):
     """
@@ -1118,11 +1098,14 @@ def parse_page_content(driver, page_num=1, days_range=None, start_date=None, end
         result_info['messages'].append(f"페이지 파싱 중 에러: {str(e)}")
         return [], [], result_info
 
-# ===========================
-# 게시물 접근 및 데이터 추출 함수들
-# ===========================
 
-def find_view_link_params(driver, post):
+
+#=====================================================================================
+# Part 4. 게시물 접근 및 데이터 추출 함수들
+#=====================================================================================
+
+
+async def find_view_link_params(page, post):
     """게시물에서 바로보기 링크 파라미터 찾기 (클릭 방식 우선, 직접 URL 접근 폴백 추가)"""
     if not post.get('post_id'):
         logger.error(f"게시물 접근 불가 {post['title']} - post_id 누락")
@@ -1131,40 +1114,47 @@ def find_view_link_params(driver, post):
     logger.info(f"게시물 열기: {post['title']}")
     
     # 현재 URL 저장
-    current_url = driver.current_url
+    current_url = page.url
     
     # 게시물 목록 페이지로 돌아가기
     try:
-        driver.get(CONFIG['stats_url'])
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-        )
-        time.sleep(2)  # 추가 대기
+        await page.goto(CONFIG['stats_url'])
+        await page.wait_for_selector(".board_list", timeout=10000)
+        await page.wait_for_timeout(2000)  # 추가 대기
     except Exception as e:
         logger.error(f"게시물 목록 페이지 접근 실패: {str(e)}")
         # 직접 URL 접근 폴백 시도
-        return direct_access_view_link_params(driver, post)
+        return await direct_access_view_link_params(page, post)
     
     # 최대 재시도 횟수
     max_retries = 3
-    retry_delay = 2
+    retry_delay = 2000
     
     for attempt in range(max_retries):
         try:
             # 제목으로 게시물 링크 찾기 - 더 유연한 선택자 사용
-            xpath_selectors = [
-                # 더 짧은 제목 부분만 비교 (맨 앞 20자만 사용)
-                f"//p[contains(@class, 'title') and contains(text(), '{post['title'][:20]}')]",
-                f"//a[contains(text(), '{post['title'][:20]}')]",
-                f"//div[contains(@class, 'toggle') and contains(., '{post['title'][:20]}')]"
+            title_part = post['title'][:20]  # 맨 앞 20자만 사용
+            
+            # XPath와 CSS 선택자 모두 시도
+            link_selectors = [
+                f"//p[contains(@class, 'title') and contains(text(), '{title_part}')]",
+                f"//a[contains(text(), '{title_part}')]",
+                f"//div[contains(@class, 'toggle') and contains(., '{title_part}')]",
+                f"p.title:has-text('{title_part}')",
+                f"a:has-text('{title_part}')"
             ]
             
             post_link = None
-            for selector in xpath_selectors:
+            for selector in link_selectors:
                 try:
-                    elements = driver.find_elements(By.XPATH, selector)
-                    if elements:
-                        post_link = elements[0]
+                    if selector.startswith('//'):
+                        # XPath
+                        post_link = await page.locator(selector).first.element_handle(timeout=5000)
+                    else:
+                        # CSS selector
+                        post_link = await page.query_selector(selector)
+                    
+                    if post_link:
                         logger.info(f"게시물 링크 발견 (선택자: {selector})")
                         break
                 except Exception as find_err:
@@ -1176,64 +1166,22 @@ def find_view_link_params(driver, post):
                 
                 if attempt < max_retries - 1:
                     logger.info(f"재시도 중... ({attempt+1}/{max_retries})")
-                    time.sleep(retry_delay)
+                    await page.wait_for_timeout(retry_delay)
                     continue
                 else:
                     # 직접 URL 접근 방식으로 대체
                     logger.info("클릭 방식 실패, 직접 URL 접근 방식으로 대체")
-                    return direct_access_view_link_params(driver, post)
+                    return await direct_access_view_link_params(page, post)
             
             # 스크린샷 저장 (클릭 전)
-            take_screenshot(driver, f"before_click_{post['post_id']}")
+            await take_screenshot(page, f"before_click_{post['post_id']}")
             
             # 링크 클릭하여 상세 페이지로 이동
             logger.info(f"게시물 링크 클릭 시도: {post['title']}")
             
-            # 여러 클릭 방법 시도
-            success = False
-            
-            # 1. JavaScript로 클릭 시도 (더 신뢰성 있는 방법)
-            try:
-                driver.execute_script("arguments[0].click();", post_link)
-                logger.info("JavaScript를 통한 클릭 실행")
-                success = True
-            except Exception as js_click_err:
-                logger.warning(f"JavaScript 클릭 실패: {str(js_click_err)}")
-            
-            # 2. 일반 클릭 시도
-            if not success:
-                try:
-                    post_link.click()
-                    logger.info("일반 클릭 실행")
-                    success = True
-                except Exception as normal_click_err:
-                    logger.warning(f"일반 클릭 실패: {str(normal_click_err)}")
-            
-            # 3. Actions 체인 사용 시도
-            if not success:
-                try:
-                    actions = webdriver.ActionChains(driver)
-                    actions.move_to_element(post_link).click().perform()
-                    logger.info("ActionChains를 통한 클릭 실행")
-                    success = True
-                except Exception as action_err:
-                    logger.warning(f"ActionChains 클릭 실패: {str(action_err)}")
-            
-            # 4. href 속성 확인 및 직접 접근
-            if not success:
-                try:
-                    href = post_link.get_attribute('href')
-                    if href and href != 'javascript:void(0);' and not href.startswith('#'):
-                        driver.get(href)
-                        logger.info(f"href 속성을 통한 직접 이동: {href}")
-                        success = True
-                except Exception as href_err:
-                    logger.warning(f"href 접근 실패: {str(href_err)}")
-            
-            # 모든 방법 실패 시 직접 URL 구성하여 접근
-            if not success:
-                logger.warning("모든 클릭 방법 실패, 직접 URL 접근으로 대체")
-                return direct_access_view_link_params(driver, post)
+            # 클릭 시도
+            await post_link.click()
+            logger.info("클릭 실행")
             
         except Exception as click_err:
             logger.error(f"게시물 링크 클릭 중 오류: {str(click_err)}")
@@ -1241,45 +1189,44 @@ def find_view_link_params(driver, post):
                 continue
             else:
                 # 직접 URL 접근으로 폴백
-                return direct_access_view_link_params(driver, post)
+                return await direct_access_view_link_params(page, post)
         
         # 페이지 로드 대기
         try:
             # URL 변경 대기
-            WebDriverWait(driver, 15).until(
-                lambda d: d.current_url != CONFIG['stats_url']
+            await page.wait_for_function(
+                f"() => window.location.href !== '{CONFIG['stats_url']}'",
+                timeout=15000
             )
-            logger.info(f"페이지 URL 변경 감지됨: {driver.current_url}")
-            time.sleep(3)  # 추가 대기
-        except TimeoutException:
+            logger.info(f"페이지 URL 변경 감지됨: {page.url}")
+            await page.wait_for_timeout(3000)  # 추가 대기
+        except PlaywrightTimeoutError:
             logger.warning("URL 변경 감지 실패")
             # 실패 시 직접 URL로 접근 시도
             if attempt < max_retries - 1:
                 continue
             else:
-                return direct_access_view_link_params(driver, post)
+                return await direct_access_view_link_params(page, post)
         
         # 상세 페이지 대기 - 다양한 요소를 확인하여 페이지 로드 감지
         wait_elements = [
-            (By.CLASS_NAME, "view_head"),
-            (By.CLASS_NAME, "view_cont"),
-            (By.CSS_SELECTOR, ".bbs_wrap .view"),
-            (By.XPATH, "//div[contains(@class, 'view')]"),
-            (By.CSS_SELECTOR, ".board_view"),
-            (By.CLASS_NAME, "board_detail"),
-            (By.CLASS_NAME, "board_content")
+            ".view_head",
+            ".view_cont",
+            ".bbs_wrap .view",
+            "div[class*='view']",
+            ".board_view",
+            ".board_detail",
+            ".board_content"
         ]
         
         element_found = False
-        for by_type, selector in wait_elements:
+        for selector in wait_elements:
             try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((by_type, selector))
-                )
+                await page.wait_for_selector(selector, timeout=15000)
                 logger.info(f"상세 페이지 로드 완료: {selector} 요소 발견")
                 element_found = True
                 break
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 continue
         
         if not element_found:
@@ -1289,48 +1236,46 @@ def find_view_link_params(driver, post):
             else:
                 # AJAX 방식 시도
                 logger.info("AJAX 방식으로 접근 시도")
-                ajax_result = try_ajax_access(driver, post)
+                ajax_result = await try_ajax_access(page, post)
                 if ajax_result:
                     return ajax_result
                 
                 # 직접 URL 접근 방식으로 대체
-                return direct_access_view_link_params(driver, post)
+                return await direct_access_view_link_params(page, post)
         
         # 스크린샷 저장
-        take_screenshot(driver, f"post_view_clicked_{post['post_id']}")
+        await take_screenshot(page, f"post_view_clicked_{post['post_id']}")
         
         # 바로보기 링크 찾기 (확장된 선택자)
         try:
             # 여러 선택자로 바로보기 링크 찾기 - 확장된 목록
             view_links = []
             
-            # 1. 일반적인 '바로보기' 링크
-            view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
+            # 다양한 선택자 시도
+            view_link_selectors = [
+                "a.view[title='새창 열림']",
+                "a[onclick*='getExtension_path']",
+                "a:has-text('바로보기')",
+                "a.attach-file",
+                "a.file_link",
+                "a.download",
+                "a[title*='바로보기']",
+                "a[title*='View']",
+                "a[title*='열기']"
+            ]
             
-            # 2. onclick 속성으로 찾기
-            if not view_links:
-                all_links = driver.find_elements(By.TAG_NAME, "a")
-                view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
+            for selector in view_link_selectors:
+                found_links = await page.query_selector_all(selector)
+                view_links.extend(found_links)
             
-            # 3. 텍스트로 찾기
-            if not view_links:
-                all_links = driver.find_elements(By.TAG_NAME, "a")
-                view_links = [link for link in all_links if '바로보기' in (link.text or '')]
-            
-            # 4. class 속성으로 찾기
-            if not view_links:
-                view_links = driver.find_elements(By.CSS_SELECTOR, "a.attach-file, a.file_link, a.download")
-            
-            # 5. 아이콘이나 이미지가 있는 링크
-            if not view_links:
-                view_links = driver.find_elements(By.CSS_SELECTOR, "a[title*='바로보기'], a[title*='View'], a[title*='열기']")
-            
+            # 중복 제거
+            view_links = list(set(view_links))
             logger.info(f"바로보기 링크 {len(view_links)}개 발견")
             
             if view_links:
                 # onclick 속성에서 파라미터 추출
                 for link in view_links:
-                    onclick = link.get_attribute('onclick')
+                    onclick = await link.get_attribute('onclick')
                     if onclick:
                         # getExtension_path 함수 파라미터 추출
                         match = re.search(r'getExtension_path\(\s*["\'](\d+)["\']\s*,\s*["\'](\d+)["\']\s*\)', onclick)
@@ -1348,7 +1293,7 @@ def find_view_link_params(driver, post):
                 
                 # onclick 속성이 없는 경우 href 확인
                 for link in view_links:
-                    href = link.get_attribute('href')
+                    href = await link.get_attribute('href')
                     if href and 'docViewer' in href:
                         # URL에서 파라미터 추출
                         match = re.search(r'atch_file_no=(\d+).*file_ord=(\d+)', href)
@@ -1361,12 +1306,12 @@ def find_view_link_params(driver, post):
             
             # 바로보기 링크가 없는 경우 AJAX로 시도
             logger.warning("바로보기 링크를 찾을 수 없음, AJAX 방식 시도")
-            ajax_result = try_ajax_access(driver, post)
+            ajax_result = await try_ajax_access(page, post)
             if ajax_result:
                 return ajax_result
                 
             # 최종적으로 직접 URL 접근 시도
-            return direct_access_view_link_params(driver, post)
+            return await direct_access_view_link_params(page, post)
             
         except Exception as e:
             logger.error(f"바로보기 링크 파라미터 추출 중 오류: {str(e)}")
@@ -1387,7 +1332,7 @@ def find_view_link_params(driver, post):
     
     return None
 
-def direct_access_view_link_params(driver, post):
+async def direct_access_view_link_params(page, post):
     """직접 URL로 게시물 바로보기 링크 파라미터 접근"""
     try:
         if not post.get('post_id'):
@@ -1400,19 +1345,17 @@ def direct_access_view_link_params(driver, post):
         post_url = f"https://www.msit.go.kr/bbs/view.do?sCode=user&mId=99&mPid=74&nttSeqNo={post['post_id']}"
         
         # 현재 URL 저장
-        current_url = driver.current_url
+        current_url = page.url
         
         # 게시물 상세 페이지 접속
-        driver.get(post_url)
-        time.sleep(3)  # 페이지 로드 대기
+        await page.goto(post_url)
+        await page.wait_for_timeout(3000)  # 페이지 로드 대기
         
         # 페이지 로드 확인
         try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "view_head"))
-            )
+            await page.wait_for_selector(".view_head", timeout=10000)
             logger.info(f"게시물 상세 페이지 로드 완료: {post['title']}")
-        except TimeoutException:
+        except PlaywrightTimeoutError:
             logger.warning(f"게시물 상세 페이지 로드 시간 초과: {post['title']}")
         
         # 바로보기 링크 찾기 (확장된 선택자)
@@ -1421,21 +1364,23 @@ def direct_access_view_link_params(driver, post):
             view_links = []
             
             # 1. 일반적인 '바로보기' 링크
-            view_links = driver.find_elements(By.CSS_SELECTOR, "a.view[title='새창 열림']")
+            view_links = await page.query_selector_all("a.view[title='새창 열림']")
             
             # 2. onclick 속성으로 찾기
             if not view_links:
-                all_links = driver.find_elements(By.TAG_NAME, "a")
-                view_links = [link for link in all_links if 'getExtension_path' in (link.get_attribute('onclick') or '')]
+                all_links = await page.query_selector_all("a")
+                for link in all_links:
+                    onclick = await link.get_attribute('onclick')
+                    if onclick and 'getExtension_path' in onclick:
+                        view_links.append(link)
             
             # 3. 텍스트로 찾기
             if not view_links:
-                xpath_view = "//a[contains(text(), '바로보기') or contains(text(), 'View') or contains(text(), '열기')]"
-                view_links = driver.find_elements(By.XPATH, xpath_view)
+                view_links = await page.query_selector_all("a:has-text('바로보기'), a:has-text('View'), a:has-text('열기')")
             
             if view_links:
                 for link in view_links:
-                    onclick = link.get_attribute('onclick')
+                    onclick = await link.get_attribute('onclick')
                     if onclick:
                         match = re.search(r'getExtension_path\(\s*["\'](\d+)["\']\s*,\s*["\'](\d+)["\']\s*\)', onclick)
                         if match:
@@ -1446,9 +1391,9 @@ def direct_access_view_link_params(driver, post):
                             }
             
             # onclick이 없는 경우 href 확인
-            all_links = driver.find_elements(By.TAG_NAME, "a")
+            all_links = await page.query_selector_all("a")
             for link in all_links:
-                href = link.get_attribute('href')
+                href = await link.get_attribute('href')
                 if href and ('docViewer' in href or 'documentView' in href):
                     match = re.search(r'atch_file_no=(\d+).*file_ord=(\d+)', href)
                     if match:
@@ -1469,7 +1414,7 @@ def direct_access_view_link_params(driver, post):
         logger.error(f"직접 URL 접근 중 오류: {str(e)}")
         return None
 
-def try_ajax_access(driver, post):
+async def try_ajax_access(page, post):
     """AJAX 방식으로 게시물 접근 시도"""
     try:
         logger.info(f"AJAX 방식으로 게시물 접근 시도: {post['title']}")
@@ -1477,17 +1422,17 @@ def try_ajax_access(driver, post):
         # JavaScript로 fn_detail 함수 직접 호출
         if post.get('post_id'):
             try:
-                driver.execute_script(f"fn_detail({post['post_id']});")
-                time.sleep(3)
+                await page.evaluate(f"fn_detail({post['post_id']});")
+                await page.wait_for_timeout(3000)
                 
                 # 페이지 변경 확인
-                if driver.current_url != CONFIG['stats_url']:
+                if page.url != CONFIG['stats_url']:
                     logger.info("AJAX를 통한 페이지 이동 성공")
                     
                     # 바로보기 링크 찾기
-                    view_links = driver.find_elements(By.CSS_SELECTOR, "a[onclick*='getExtension_path']")
+                    view_links = await page.query_selector_all("a[onclick*='getExtension_path']")
                     for link in view_links:
-                        onclick = link.get_attribute('onclick')
+                        onclick = await link.get_attribute('onclick')
                         if onclick:
                             match = re.search(r'getExtension_path\(\s*["\'](\d+)["\']\s*,\s*["\'](\d+)["\']\s*\)', onclick)
                             if match:
@@ -1514,7 +1459,7 @@ def extract_year_month_from_title(title):
         return f"({year}년 {month}월말"
     return title[:15]  # 일치하는 패턴이 없으면 앞부분만 반환
 
-def access_iframe_content(driver, file_params):
+async def access_iframe_content(page, file_params):
     """iframe 내의 문서 콘텐츠에 접근하여 HTML 반환"""
     if not file_params.get('atch_file_no') or not file_params.get('file_ord'):
         logger.error("파일 파라미터가 누락되었습니다")
@@ -1532,77 +1477,71 @@ def access_iframe_content(driver, file_params):
     for attempt in range(max_retries):
         try:
             # 페이지 로드
-            driver.get(view_url)
-            time.sleep(5)  # 초기 대기
+            await page.goto(view_url)
+            await page.wait_for_timeout(5000)  # 초기 대기
             
             # 현재 URL 확인
-            current_url = driver.current_url
+            current_url = page.url
             logger.info(f"현재 URL: {current_url}")
            
             # 스크린샷 저장
-            take_screenshot(driver, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
+            await take_screenshot(page, f"iframe_view_{atch_file_no}_{file_ord}_attempt_{attempt}")
             
             # 현재 페이지 스크린샷 저장 (디버깅용)
             try:
-                driver.save_screenshot(f"document_view_{atch_file_no}_{file_ord}.png")
+                await page.screenshot(path=f"document_view_{atch_file_no}_{file_ord}.png")
                 logger.info(f"문서 뷰어 스크린샷 저장: document_view_{atch_file_no}_{file_ord}.png")
             except Exception as ss_err:
                 logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
             
             # 시스템 점검 페이지 감지
-            if "시스템 점검 안내" in driver.page_source:
+            page_content = await page.content()
+            if "시스템 점검 안내" in page_content:
                 if attempt < max_retries - 1:
                     logger.warning("시스템 점검 중입니다. 나중에 다시 시도합니다.")
-                    time.sleep(5)  # 더 오래 대기
+                    await page.wait_for_timeout(5000)  # 더 오래 대기
                     continue
                 else:
                     logger.warning("시스템 점검 중입니다. 문서를 열 수 없습니다.")
                     return None
             
             # iframe 찾기 및 전환
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            iframes = await page.query_selector_all("iframe")
             logger.info(f"찾은 iframe 개수: {len(iframes)}")
             
             if iframes:
-                for idx, iframe in enumerate(iframes):
+                for idx, iframe_elem in enumerate(iframes):
                     try:
                         # iframe 정보 출력
-                        iframe_id = iframe.get_attribute('id')
-                        iframe_name = iframe.get_attribute('name')
-                        iframe_src = iframe.get_attribute('src')
+                        iframe_id = await iframe_elem.get_attribute('id')
+                        iframe_name = await iframe_elem.get_attribute('name')
+                        iframe_src = await iframe_elem.get_attribute('src')
                         logger.info(f"iframe {idx}: id={iframe_id}, name={iframe_name}, src={iframe_src}")
                         
-                        # iframe으로 전환
-                        driver.switch_to.frame(iframe)
-                        logger.info(f"iframe {idx}로 전환 성공")
-                        
-                        # iframe 내용 확인
-                        iframe_html = driver.page_source
-                        
-                        # 유의미한 콘텐츠가 있는지 확인
-                        if len(iframe_html) > 100 and ('table' in iframe_html.lower() or 'div' in iframe_html.lower()):
-                            logger.info(f"iframe {idx}에서 유의미한 콘텐츠 발견")
+                        # iframe 내용 가져오기
+                        frame = await iframe_elem.content_frame()
+                        if frame:
+                            logger.info(f"iframe {idx}로 전환 성공")
                             
-                            # 스크린샷 저장
-                            take_screenshot(driver, f"iframe_content_{atch_file_no}_{file_ord}_frame_{idx}")
+                            # iframe 내용 확인
+                            iframe_html = await frame.content()
                             
-                            # iframe 내용 반환
-                            driver.switch_to.default_content()
-                            return iframe_html
-                        
-                        # 다시 메인 프레임으로 전환
-                        driver.switch_to.default_content()
+                            # 유의미한 콘텐츠가 있는지 확인
+                            if len(iframe_html) > 100 and ('table' in iframe_html.lower() or 'div' in iframe_html.lower()):
+                                logger.info(f"iframe {idx}에서 유의미한 콘텐츠 발견")
+                                
+                                # 스크린샷 저장
+                                await take_screenshot(page, f"iframe_content_{atch_file_no}_{file_ord}_frame_{idx}")
+                                
+                                # iframe 내용 반환
+                                return iframe_html
                         
                     except Exception as iframe_err:
                         logger.error(f"iframe {idx} 처리 중 오류: {str(iframe_err)}")
-                        try:
-                            driver.switch_to.default_content()
-                        except:
-                            pass
             
             # iframe이 없거나 콘텐츠를 찾지 못한 경우
             # 메인 페이지 콘텐츠 확인
-            page_html = driver.page_source
+            page_html = await page.content()
             
             # viewer 또는 문서 관련 div 찾기
             soup = BeautifulSoup(page_html, 'html.parser')
@@ -1615,24 +1554,24 @@ def access_iframe_content(driver, file_params):
             # 재시도
             if attempt < max_retries - 1:
                 logger.warning(f"콘텐츠를 찾을 수 없음, 재시도 {attempt + 1}/{max_retries}")
-                time.sleep(3)
+                await page.wait_for_timeout(3000)
                 continue
             
         except Exception as e:
             logger.error(f"iframe 콘텐츠 접근 중 오류 (시도 {attempt + 1}/{max_retries}): {str(e)}")
             if attempt < max_retries - 1:
-                time.sleep(3)
+                await page.wait_for_timeout(3000)
                 continue
     
     logger.error("모든 시도 실패, iframe 콘텐츠를 가져올 수 없습니다")
     return None
 
-def extract_data_from_viewer(driver):
+async def extract_data_from_viewer(page):
     """
     문서 뷰어에서 데이터 추출 (Synap 뷰어 등)
     
     Args:
-        driver: Selenium WebDriver instance
+        page: Playwright Page instance
         
     Returns:
         dict: Dictionary of sheet names to pandas DataFrames, or None if extraction fails
@@ -1641,11 +1580,11 @@ def extract_data_from_viewer(driver):
     
     try:
         # Wait for viewer to initialize
-        time.sleep(5)  # Initial wait for viewer to load
+        await page.wait_for_timeout(5000)  # Initial wait for viewer to load
         
         # Take screenshot for debugging
         screenshot_path = f"document_viewer_{int(time.time())}.png"
-        driver.save_screenshot(screenshot_path)
+        await page.screenshot(path=screenshot_path)
         
         # Look for sheet tabs - different viewers have different structures
         sheet_tabs = None
@@ -1659,7 +1598,7 @@ def extract_data_from_viewer(driver):
         
         for selector in sheet_selectors:
             try:
-                tabs = driver.find_elements(By.CSS_SELECTOR, selector)
+                tabs = await page.query_selector_all(selector)
                 if tabs:
                     sheet_tabs = tabs
                     logger.info(f"Found {len(tabs)} sheet tabs with selector: {selector}")
@@ -1670,30 +1609,31 @@ def extract_data_from_viewer(driver):
         # Process multiple sheets if found
         if sheet_tabs and len(sheet_tabs) > 0:
             for i, tab in enumerate(sheet_tabs):
-                sheet_name = tab.text.strip() if tab.text.strip() else f"Sheet_{i+1}"
+                tab_text = await tab.text_content()
+                sheet_name = tab_text.strip() if tab_text else f"Sheet_{i+1}"
                 logger.info(f"Processing sheet {i+1}/{len(sheet_tabs)}: {sheet_name}")
                 
                 # Click on tab if not the first one (first is usually selected by default)
                 if i > 0:
                     try:
-                        tab.click()
-                        time.sleep(3)  # Wait for sheet to load
+                        await tab.click()
+                        await page.wait_for_timeout(3000)  # Wait for sheet to load
                     except Exception as click_err:
                         logger.warning(f"Could not click sheet tab: {str(click_err)}")
                 
                 # Extract data from current sheet
-                sheet_data = extract_sheet_data_from_viewer(driver, sheet_name)
+                sheet_data = await extract_sheet_data_from_viewer(page, sheet_name)
                 if sheet_data is not None:
                     all_sheets[sheet_name] = sheet_data
         else:
             # Single sheet or no tabs visible
             logger.info("No sheet tabs found, attempting to extract single sheet data")
-            single_sheet_data = extract_sheet_data_from_viewer(driver, "전체데이터")
+            single_sheet_data = await extract_sheet_data_from_viewer(page, "전체데이터")
             if single_sheet_data is not None:
                 all_sheets["전체데이터"] = single_sheet_data
         
         # Save HTML for debugging
-        save_html_for_debugging(driver, "viewer_content", include_iframe=True)
+        await save_html_for_debugging(page, "viewer_content", include_iframe=True)
         
         return all_sheets if all_sheets else None
         
@@ -1701,12 +1641,12 @@ def extract_data_from_viewer(driver):
         logger.error(f"Error extracting data from viewer: {str(e)}")
         return None
 
-def extract_sheet_data_from_viewer(driver, sheet_name):
+async def extract_sheet_data_from_viewer(page, sheet_name):
     """
     Extract data from a single sheet in the document viewer
     
     Args:
-        driver: Selenium WebDriver instance
+        page: Playwright Page instance
         sheet_name: Name of the current sheet
         
     Returns:
@@ -1714,7 +1654,7 @@ def extract_sheet_data_from_viewer(driver, sheet_name):
     """
     try:
         # Wait a bit for content to stabilize
-        time.sleep(2)
+        await page.wait_for_timeout(2000)
         
         # Look for table elements - try multiple selectors
         table_selectors = [
@@ -1728,7 +1668,7 @@ def extract_sheet_data_from_viewer(driver, sheet_name):
         tables = []
         for selector in table_selectors:
             try:
-                found_tables = driver.find_elements(By.CSS_SELECTOR, selector)
+                found_tables = await page.query_selector_all(selector)
                 if found_tables:
                     tables.extend(found_tables)
                     logger.info(f"Found {len(found_tables)} tables with selector: {selector}")
@@ -1742,11 +1682,12 @@ def extract_sheet_data_from_viewer(driver, sheet_name):
         # Process the first visible table
         for table in tables:
             try:
-                if not table.is_displayed():
+                is_visible = await table.is_visible()
+                if not is_visible:
                     continue
                 
                 # Extract table HTML
-                table_html = table.get_attribute('outerHTML')
+                table_html = await table.evaluate("element => element.outerHTML")
                 
                 # Parse with pandas
                 dfs = pd.read_html(table_html)
@@ -1763,6 +1704,12 @@ def extract_sheet_data_from_viewer(driver, sheet_name):
     except Exception as e:
         logger.error(f"Error extracting sheet data: {str(e)}")
         return None
+
+
+
+#=====================================================================================
+# Part 6. 데이터 처리 함수들
+#=====================================================================================
 
 # ===========================
 # 데이터 추출 및 처리 함수들
@@ -2227,6 +2174,11 @@ def fallback_ocr_extraction(driver, file_params):
         logger.error(f"OCR 폴백 추출 중 오류: {str(e)}")
         return None
 
+
+
+#=====================================================================================
+# Part 6. 구글 시트 관리 함수들
+#=====================================================================================
 
 # ===========================
 # Google Sheets 관리 함수들
@@ -3020,100 +2972,14 @@ def ensure_metadata_sheet(spreadsheet):
         logger.error(f"Error ensuring metadata sheet: {str(e)}")
         return None
 
-# ===========================
-# 알림 관련 함수들
-# ===========================
 
-async def send_telegram_message(posts, data_updates=None):
-    """텔레그램으로 알림 메시지 전송"""
-    if not posts and not data_updates:
-        logger.info("알림을 보낼 내용이 없습니다")
-        return
-        
-    try:
-        # 텔레그램 봇 초기화
-        bot = telegram.Bot(token=CONFIG['telegram_token'])
-        
-        message = "📊 *MSIT 통신 통계 모니터링*\n\n"
-        
-        # 새 게시물 정보 추가
-        if posts:
-            message += "📱 *새로운 통신 관련 게시물*\n\n"
-            
-            # 최대 5개 게시물만 표시 (너무 길지 않도록)
-            displayed_posts = posts[:5]
-            for post in displayed_posts:
-                message += f"📅 {post['date']}\n"
-                message += f"📑 {post['title']}\n"
-                message += f"🏢 {post['department']}\n"
-                if post.get('url'):
-                    message += f"🔗 [게시물 링크]({post['url']})\n"
-                message += "\n"
-            
-            # 추가 게시물이 있는 경우 표시
-            if len(posts) > 5:
-                message += f"_...외 {len(posts) - 5}개 게시물_\n\n"
-        
-        # 데이터 업데이트 정보 추가
-        if data_updates:
-            message += "📊 *Google Sheets 데이터 업데이트*\n\n"
-            
-            # 최대 10개 업데이트만 표시
-            displayed_updates = data_updates[:10]
-            for update in displayed_updates:
-                post_info = update['post_info']
-                
-                # 날짜 정보 추출
-                if 'date' in update:
-                    year = update['date']['year']
-                    month = update['date']['month']
-                    message += f"• {year}년 {month}월 - {post_info['title'][:30]}...\n"
-                else:
-                    message += f"• {post_info['title'][:40]}...\n"
-                
-                # 추가 상태 정보
-                if update.get('status') == 'placeholder':
-                    message += "  ⚠️ _데이터 추출 실패 (플레이스홀더 생성)_\n"
-            
-            if len(data_updates) > 10:
-                message += f"\n_...외 {len(data_updates) - 10}개 업데이트_\n"
-            
-            # Google Sheets 링크 추가
-            message += f"\n📌 [Google Sheets에서 확인하기](https://docs.google.com/spreadsheets/d/{CONFIG['spreadsheet_id']})"
-        
-        # 실행 시간 추가
-        message += f"\n\n_실행 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
-        
-        # GitHub Actions 환경인 경우 표시
-        if os.environ.get('GITHUB_ACTIONS', 'false').lower() == 'true':
-            message += "\n_GitHub Actions에서 실행됨_"
-        
-        # 메시지 전송
-        await bot.send_message(
-            chat_id=int(CONFIG['chat_id']),
-            text=message,
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
-        
-        logger.info("텔레그램 알림 전송 완료")
-        
-    except Exception as e:
-        logger.error(f"텔레그램 알림 전송 중 오류: {str(e)}")
-        
-        # 간단한 메시지로 재시도
-        try:
-            simple_message = f"MSIT 모니터링 완료: {len(posts)}개 게시물, {len(data_updates) if data_updates else 0}개 업데이트"
-            bot = telegram.Bot(token=CONFIG['telegram_token'])
-            await bot.send_message(
-                chat_id=int(CONFIG['chat_id']),
-                text=simple_message
-            )
-        except Exception as retry_err:
-            logger.error(f"간단한 메시지 전송도 실패: {str(retry_err)}")
+
+#=====================================================================================
+# Part 7. 메인 함수들
+#=====================================================================================
 
 # ===========================
-# 메인 모니터링 함수
+# 메인 모니터링 함수 (Playwright 버전)
 # ===========================
 
 async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5, 
@@ -3135,7 +3001,10 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
         None
     """
     start_time = time.time()
-    driver = None
+    playwright = None
+    browser = None
+    context = None
+    page = None
     
     try:
         logger.info(f"=== MSIT 통신 통계 모니터링 시작 ===")
@@ -3154,8 +3023,8 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
             if not gs_client:
                 logger.warning("Google Sheets 클라이언트 초기화 실패, 계속 진행하지만 Sheets 업데이트는 건너뜁니다")
         
-        # Setup WebDriver
-        driver = setup_driver()
+        # Setup Playwright and browser
+        playwright, browser, context, page = await setup_browser()
         
         # Navigate to MSIT website
         logger.info("MSIT 웹사이트 접근 중...")
@@ -3163,69 +3032,73 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
         # 두 가지 접근 방식: 랜딩 페이지를 거쳐가거나 직접 통계 페이지로
         try:
             # Option 1: Navigate through landing page
-            driver.get(CONFIG['landing_url'])
-            time.sleep(3)
+            await page.goto(CONFIG['landing_url'])
+            await page.wait_for_timeout(3000)
             
             # Look for statistics menu/button
             stats_link_found = False
             stats_link_selectors = [
                 "//a[contains(text(), '통계정보')]",
                 "//a[contains(@href, '/bbs/list.do') and contains(@href, 'mId=99')]",
-                "//a[@title='통계정보']"
+                "//a[@title='통계정보']",
+                "a:has-text('통계정보')"
             ]
             
             for selector in stats_link_selectors:
                 try:
-                    stats_link = driver.find_element(By.XPATH, selector)
+                    if selector.startswith('//'):
+                        # XPath
+                        stats_link = await page.locator(selector).first.element_handle(timeout=5000)
+                    else:
+                        # CSS selector
+                        stats_link = await page.query_selector(selector)
+                    
                     if stats_link:
                         # Click using JavaScript to avoid interception
-                        driver.execute_script("arguments[0].click();", stats_link)
+                        await stats_link.click()
                         
                         # Wait for URL change
-                        WebDriverWait(driver, 15).until(
-                            lambda d: '/bbs/list.do' in d.current_url
+                        await page.wait_for_function(
+                            "() => window.location.href.includes('/bbs/list.do')",
+                            timeout=15000
                         )
                         stats_link_found = True
-                        logger.info(f"통계정보 페이지로 이동 완료: {driver.current_url}")
+                        logger.info(f"통계정보 페이지로 이동 완료: {page.url}")
                         break
                 except Exception as link_err:
                     logger.warning(f"통계정보 링크 클릭 실패 (선택자: {selector}): {str(link_err)}")
             
             if not stats_link_found:
                 logger.warning("통계정보 링크를 찾을 수 없음, 직접 URL로 접속")
-                driver.get(CONFIG['stats_url'])
+                await page.goto(CONFIG['stats_url'])
                 
                 # Wait for page to load
                 try:
-                    WebDriverWait(driver, 15).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-                    )
+                    await page.wait_for_selector(".board_list", timeout=15000)
                     logger.info("통계정보 페이지 직접 접속 성공")
-                except TimeoutException:
+                except PlaywrightTimeoutError:
                     logger.warning("통계정보 페이지 로드 시간 초과, 계속 진행")
             
         except Exception as e:
             logger.error(f"랜딩 또는 통계정보 버튼 클릭 중 오류 발생, fallback으로 직접 접속: {str(e)}")
             
             # Reset browser context
-            reset_browser_context(driver)
+            await reset_browser_context(page)
             
             # Access stats page directly
-            driver.get(CONFIG['stats_url'])
+            await page.goto(CONFIG['stats_url'])
             
             try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-                )
+                await page.wait_for_selector(".board_list", timeout=15000)
                 logger.info("통계정보 페이지 직접 접속 성공 (오류 후 재시도)")
-            except TimeoutException:
+            except PlaywrightTimeoutError:
                 logger.warning("통계정보 페이지 로드 시간 초과 (오류 후 재시도), 계속 진행")
         
         logger.info("MSIT 웹사이트 접근 완료")
         
         # Save screenshot (for debugging)
         try:
-            driver.save_screenshot("stats_page.png")
+            await page.screenshot(path="stats_page.png")
             logger.info("통계정보 페이지 스크린샷 저장 완료")
         except Exception as ss_err:
             logger.warning(f"스크린샷 저장 중 오류: {str(ss_err)}")
@@ -3253,14 +3126,14 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
             
             # Navigate to specific page if not the first
             if page_num > 1:
-                success = navigate_to_specific_page(driver, page_num)
+                success = await navigate_to_specific_page(page, page_num)
                 if not success:
                     logger.warning(f"페이지 {page_num}로 이동 실패, 건너뜀")
                     continue
             
             # Parse page content with date filtering
             posts, stats_posts, result_info = parse_page_content(
-                driver, page_num, days_range, start_date, end_date, reverse_order
+                await page.content(), page_num, days_range, start_date, end_date, reverse_order
             )
             
             # Add to overall lists
@@ -3293,11 +3166,11 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                 
                 try:
                     # Find view link parameters
-                    file_params = find_view_link_params(driver, post)
+                    file_params = await find_view_link_params(page, post)
                     
                     if file_params:
                         # Access iframe content
-                        iframe_html = access_iframe_content(driver, file_params)
+                        iframe_html = await access_iframe_content(page, file_params)
                         
                         if iframe_html:
                             # Extract data from HTML
@@ -3326,7 +3199,7 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                             else:
                                 # Try viewer extraction
                                 logger.info("HTML 테이블 추출 실패, 뷰어 추출 시도")
-                                viewer_data = extract_data_from_viewer(driver)
+                                viewer_data = await extract_data_from_viewer(page)
                                 
                                 if viewer_data:
                                     update_data = {
@@ -3347,7 +3220,7 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                                 else:
                                     # Try OCR as last resort
                                     logger.info("뷰어 추출 실패, OCR 시도")
-                                    ocr_data = fallback_ocr_extraction(driver, file_params)
+                                    ocr_data = await fallback_ocr_extraction(page, file_params)
                                     
                                     if ocr_data:
                                         update_data = {
@@ -3406,15 +3279,15 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                             data_updates.append(update_data)
                     
                     # Return to list page for next post
-                    driver.get(CONFIG['stats_url'])
-                    time.sleep(2)
+                    await page.goto(CONFIG['stats_url'])
+                    await page.wait_for_timeout(2000)
                     
                 except Exception as e:
                     logger.error(f"게시물 처리 중 오류: {str(e)}")
                     logger.error(traceback.format_exc())
                     
                     # Save diagnostic information
-                    diag_info = collect_diagnostic_info(driver, e)
+                    diag_info = await collect_diagnostic_info(page, e)
                     diag_path = f"diagnostic_{post['post_id']}_{int(time.time())}.json"
                     with open(diag_path, 'w', encoding='utf-8') as f:
                         json.dump(diag_info, f, ensure_ascii=False, indent=2)
@@ -3422,19 +3295,18 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                     
                     # Try to recover
                     try:
-                        driver.get(CONFIG['stats_url'])
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.CLASS_NAME, "board_list"))
-                        )
+                        await page.goto(CONFIG['stats_url'])
+                        await page.wait_for_selector(".board_list", timeout=10000)
                         logger.info("오류 복구 성공, 목록 페이지로 복귀")
                     except Exception as recovery_err:
                         logger.error(f"오류 복구 실패: {str(recovery_err)}")
                         
                         # 브라우저 완전 재설정 시도
                         try:
-                            driver.quit()
-                            driver = setup_driver()
-                            driver.get(CONFIG['stats_url'])
+                            await context.close()
+                            await browser.close()
+                            playwright, browser, context, page = await setup_browser()
+                            await page.goto(CONFIG['stats_url'])
                             logger.info("브라우저 완전 재설정 성공")
                         except Exception as reset_err:
                             logger.error(f"브라우저 재설정 실패: {str(reset_err)}")
@@ -3490,9 +3362,9 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
         # 오류 처리 향상
         try:
             # Save error screenshot
-            if driver:
+            if page:
                 try:
-                    driver.save_screenshot("error_screenshot.png")
+                    await page.screenshot(path="error_screenshot.png")
                     logger.info("오류 발생 시점 스크린샷 저장 완료")
                 except Exception as ss_err:
                     logger.error(f"오류 스크린샷 저장 실패: {str(ss_err)}")
@@ -3503,8 +3375,8 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
             
             # 진단 정보 수집
             try:
-                if driver:
-                    js_info = driver.execute_script("return {url: document.URL, readyState: document.readyState, title: document.title};")
+                if page:
+                    js_info = await page.evaluate("() => ({url: document.URL, readyState: document.readyState, title: document.title})")
                     logger.info(f"페이지 진단 정보: {json.dumps(js_info)}")
             except:
                 pass
@@ -3523,11 +3395,250 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
     
     finally:
         # Clean up resources
-        if driver:
-            driver.quit()
-            logger.info("WebDriver 종료")
+        try:
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+            if playwright:
+                await playwright.stop()
+            logger.info("Playwright 리소스 정리 완료")
+        except Exception as cleanup_err:
+            logger.error(f"리소스 정리 중 오류: {str(cleanup_err)}")
         
         logger.info("=== MSIT 통신 통계 모니터링 종료 ===")
+
+# ===========================
+# parse_page_content 함수 (Playwright용으로 수정)
+# ===========================
+
+def parse_page_content(html_content, page_num=1, days_range=None, start_date=None, end_date=None, reverse_order=False):
+    """
+    페이지 HTML 내용을 파싱하는 함수 (Playwright 버전)
+    BeautifulSoup을 사용하여 HTML 파싱
+    
+    Args:
+        html_content: 페이지 HTML 내용
+        page_num: 현재 페이지 번호
+        days_range: 특정 일수 이내 게시물 필터링
+        start_date: 시작 날짜 문자열 (YYYY-MM-DD)
+        end_date: 종료 날짜 문자열 (YYYY-MM-DD)
+        reverse_order: 역순 탐색 여부
+        
+    Returns:
+        Tuple[List, List, Dict]: 모든 게시물, 통신 통계 게시물, 파싱 결과 정보
+    """
+    all_posts = []
+    telecom_stats_posts = []
+    
+    result_info = {
+        'current_page_complete': True,
+        'skip_remaining_in_page': False,
+        'continue_to_next_page': True,
+        'oldest_date_found': None,
+        'newest_date_found': None,
+        'total_posts': 0,
+        'filtered_posts': 0,
+        'messages': []
+    }
+    
+    try:
+        # HTML 파싱
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 게시물 목록 찾기
+        board_list = soup.find('ul', class_='board_list')
+        if not board_list:
+            logger.error("게시물 목록을 찾을 수 없습니다")
+            result_info['current_page_complete'] = False
+            return [], [], result_info
+        
+        # 각 게시물 처리
+        items = board_list.find_all('li')
+        result_info['total_posts'] = len(items)
+        
+        # 날짜 범위 설정
+        start_date_obj = None
+        end_date_obj = None
+        
+        if start_date:
+            try:
+                start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+            except ValueError:
+                logger.warning(f"잘못된 시작 날짜 형식: {start_date}")
+                
+        if end_date:
+            try:
+                end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            except ValueError:
+                logger.warning(f"잘못된 종료 날짜 형식: {end_date}")
+        
+        if days_range and not start_date_obj:
+            korea_tz = datetime.now() + timedelta(hours=9)
+            start_date_obj = (korea_tz - timedelta(days=days_range)).date()
+        
+        # 각 게시물 파싱
+        for item in items:
+            try:
+                # 날짜 추출
+                date_elem = item.select_one("dd.date, dd[id*='td_CREATION_DATE']")
+                if not date_elem:
+                    continue
+                
+                date_str = date_elem.text.strip()
+                post_date = parse_date_with_new_format(date_str)
+                
+                # 날짜 범위 확인
+                if not is_within_date_range(post_date, start_date_obj, end_date_obj, days_range):
+                    if post_date and start_date_obj and post_date < start_date_obj:
+                        result_info['skip_remaining_in_page'] = True
+                        if not reverse_order:
+                            result_info['continue_to_next_page'] = False
+                        break
+                    continue
+                
+                # 제목 추출
+                title_elem = item.select_one("dt a, dd.tit a")
+                if not title_elem:
+                    continue
+                
+                title = title_elem.text.strip()
+                post_id = extract_post_id(item)
+                post_url = get_post_url(post_id)
+                
+                # 부서 정보 추출
+                dept_elem = item.select_one("dd[id*='td_CHRG_DEPT_NM'], .dept")
+                dept_text = dept_elem.text.strip() if dept_elem else "부서 정보 없음"
+                
+                # 게시물 정보 생성
+                post_info = {
+                    'title': title,
+                    'date': date_str,
+                    'post_date': post_date,
+                    'department': dept_text,
+                    'url': post_url,
+                    'post_id': post_id
+                }
+                
+                all_posts.append(post_info)
+                
+                # 통신 통계 게시물인지 확인
+                if is_telecom_stats_post(title):
+                    logger.info(f"통신 통계 게시물 발견: {title}")
+                    telecom_stats_posts.append(post_info)
+                
+            except Exception as e:
+                logger.error(f"게시물 파싱 중 에러: {str(e)}")
+                continue
+        
+        return all_posts, telecom_stats_posts, result_info
+        
+    except Exception as e:
+        logger.error(f"페이지 파싱 중 에러: {str(e)}")
+        result_info['current_page_complete'] = False
+        return [], [], result_info
+
+# ===========================
+# fallback_ocr_extraction 함수 (Playwright용으로 수정)
+# ===========================
+
+async def fallback_ocr_extraction(page, file_params):
+    """모든 추출 방법이 실패했을 때 OCR을 사용한 폴백 추출 (Playwright 버전)"""
+    logger.info("OCR 기반 추출로 폴백")
+    
+    # OCR 기능이 비활성화된 경우 건너뛰기
+    if not CONFIG['ocr_enabled']:
+        logger.info("OCR 기능이 비활성화되어 건너뜀")
+        return None
+    
+    # OCR 관련 라이브러리 임포트 확인
+    if not OCR_IMPORTS_AVAILABLE:
+        logger.warning("OCR 관련 라이브러리가 설치되지 않아 OCR 기능을 사용할 수 없습니다")
+        return None
+    
+    try:
+        # 전체 페이지 스크린샷
+        full_page_screenshot = f"ocr_full_page_{int(time.time())}.png"
+        await page.screenshot(path=full_page_screenshot, full_page=True)
+        logger.info(f"전체 페이지 스크린샷 캡처: {full_page_screenshot}")
+        
+        # 뷰포트 정보 가져오기
+        viewport_size = page.viewport_size
+        viewport_height = viewport_size['height'] if viewport_size else 1080
+        
+        # 페이지 높이 가져오기
+        total_height = await page.evaluate("document.body.scrollHeight")
+        
+        screenshots = []
+        current_position = 0
+        screenshot_count = 0
+        
+        while current_position < total_height:
+            # 스크롤
+            await page.evaluate(f"window.scrollTo(0, {current_position})")
+            await page.wait_for_timeout(500)
+            
+            # 스크린샷 저장
+            screenshot_path = f"ocr_part_{screenshot_count}_{int(time.time())}.png"
+            await page.screenshot(path=screenshot_path)
+            screenshots.append(screenshot_path)
+            logger.info(f"부분 스크린샷 저장: {screenshot_path}")
+            
+            current_position += viewport_height
+            screenshot_count += 1
+            
+            # 너무 많은 스크린샷 방지
+            if screenshot_count > 10:
+                logger.warning("스크린샷 수가 10개를 초과하여 중단")
+                break
+        
+        # OCR 처리
+        extracted_data = {}
+        
+        for i, screenshot_path in enumerate(screenshots):
+            try:
+                # 이미지 열기
+                image = Image.open(screenshot_path)
+                
+                # 이미지 전처리
+                image = image.convert('L')
+                enhancer = ImageEnhance.Contrast(image)
+                image = enhancer.enhance(2.0)
+                image = image.filter(ImageFilter.SHARPEN)
+                
+                img_array = np.array(image)
+                _, img_array = cv2.threshold(img_array, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                img_array = cv2.medianBlur(img_array, 3)
+                
+                processed_image = Image.fromarray(img_array)
+                
+                # OCR 수행
+                text = pytesseract.image_to_string(processed_image, lang='kor+eng')
+                
+                if text.strip():
+                    # 텍스트를 테이블 형태로 파싱 시도
+                    lines = text.strip().split('\n')
+                    data = []
+                    
+                    for line in lines:
+                        if line.strip():
+                            cells = re.split(r'\s{2,}|\t', line.strip())
+                            if cells and len(cells) > 1:
+                                data.append(cells)
+                    
+                    if data:
+                        df = pd.DataFrame(data[1:], columns=data[0] if data else None)
+                        extracted_data[f"OCR_Page_{i+1}"] = df
+                        logger.info(f"OCR로 {len(data)-1}행의 데이터 추출 성공")
+                
+            except Exception as ocr_err:
+                logger.error(f"OCR 처리 중 오류 (페이지 {i+1}): {str(ocr_err)}")
+        
+        return extracted_data if extracted_data else None
+        
+    except Exception as e:
+        logger.error(f"OCR 폴백 추출 중 오류: {str(e)}")
+        return None
 
 # ===========================
 # 메인 실행 함수
@@ -3544,41 +3655,34 @@ async def main():
     if is_github_actions:
         logger.info("GitHub Actions 환경에서 실행 중")
     
+    # 환경 변수 처리 (기존 코드와 동일)
     # 1. 검토 기간 설정
     try:
-        # 시작 날짜와 종료 날짜 (YYYY-MM-DD 형식)
         start_date_str = os.environ.get('START_DATE', '')
         end_date_str = os.environ.get('END_DATE', '')
         
         if start_date_str and end_date_str:
-            # 날짜 형식 검증
             try:
                 start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
                 end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
                 
-                # 날짜 범위 확인
                 if start_date > end_date:
                     logger.error(f"시작 날짜({start_date_str})가 종료 날짜({end_date_str})보다 나중입니다.")
                     logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
-                    # 기본값 사용
                     days_range = int(os.environ.get('DAYS_RANGE', '4'))
                     start_date_str = None
                     end_date_str = None
                 else:
-                    # 현재 날짜와의 차이로 days_range 계산
                     today = datetime.now().date()
                     days_range = (today - start_date).days
-                    
                     logger.info(f"검토 기간 설정: {start_date_str} ~ {end_date_str} (days_range: {days_range}일)")
             except ValueError as date_err:
                 logger.error(f"날짜 형식 오류: {str(date_err)}")
                 logger.info("기본 날짜 범위(최근 4일)를 사용합니다.")
-                # 기본값 사용
                 days_range = int(os.environ.get('DAYS_RANGE', '4'))
                 start_date_str = None
                 end_date_str = None
         else:
-            # 날짜가 입력되지 않은 경우 days_range 사용
             days_range = int(os.environ.get('DAYS_RANGE', '4'))
             logger.info(f"검토 기간 미설정, 기본값 사용: days_range={days_range}일")
             start_date_str = None
@@ -3595,7 +3699,6 @@ async def main():
         start_page = int(os.environ.get('START_PAGE', '1'))
         end_page = int(os.environ.get('END_PAGE', '5'))
         
-        # 페이지 범위 검증
         if start_page < 1:
             logger.warning("시작 페이지는 1 이상이어야 합니다.")
             start_page = 1
@@ -3612,46 +3715,32 @@ async def main():
         logger.info("기본 페이지 범위(1~5)를 사용합니다.")
         start_page = 1
         end_page = 5
-    except Exception as e:
-        logger.error(f"페이지 범위 설정 중 오류: {str(e)}")
-        logger.info("기본 페이지 범위(1~5)를 사용합니다.")
-        start_page = 1
-        end_page = 5
     
     # 3. 기타 환경 변수
     try:
-        # Google Sheets 업데이트 여부
         check_sheets_str = os.environ.get('CHECK_SHEETS', 'true').lower()
         check_sheets = check_sheets_str in ('true', 'yes', '1', 'y')
         
-        # 통합 시트 업데이트 설정
         update_consolidation_str = os.environ.get('UPDATE_CONSOLIDATION', 'true').lower()
         update_consolidation = update_consolidation_str in ('true', 'yes', '1', 'y')
         logger.info(f"통합 시트 업데이트: {update_consolidation}")
         
-        # 스프레드시트 이름
         spreadsheet_name = os.environ.get('SPREADSHEET_NAME', 'MSIT 통신 통계')
         
-        # OCR 설정 확인
         ocr_enabled_str = os.environ.get('OCR_ENABLED', 'true').lower()
         ocr_enabled = ocr_enabled_str in ('true', 'yes', '1', 'y')
 
-        # 시트 정리 옵션
         cleanup_sheets_str = os.environ.get('CLEANUP_OLD_SHEETS', 'false').lower()
         cleanup_old_sheets = cleanup_sheets_str in ('true', 'yes', '1', 'y')
-       
-        # 최대 API 요청 간격
+        
         api_request_wait = int(os.environ.get('API_REQUEST_WAIT', '2'))
         
-        # 재시도 설정
         max_retries = int(os.environ.get('MAX_RETRIES', '3'))
         page_load_timeout = int(os.environ.get('PAGE_LOAD_TIMEOUT', '30'))
         
-        # 역순 탐색 (기본 활성화)
         reverse_order_str = os.environ.get('REVERSE_ORDER', 'true').lower()
         reverse_order = reverse_order_str in ('true', 'yes', '1', 'y')
         
-        # 환경 설정 로그
         if start_date_str and end_date_str:
             logger.info(f"MSIT 모니터 시작 - 검토 기간: {start_date_str}~{end_date_str}, 페이지: {start_page}~{end_page}")
         else:
@@ -3669,35 +3758,29 @@ async def main():
         CONFIG['page_load_timeout'] = page_load_timeout
         CONFIG['cleanup_old_sheets'] = cleanup_old_sheets
 
-        
-        # Log the configuration
         logger.info(f"환경 설정 - Google Sheets 업데이트: {check_sheets}, OCR: {ocr_enabled}, 시트 정리: {cleanup_old_sheets}")
-    
     
     except Exception as config_err:
         logger.error(f"환경 설정 처리 중 오류: {str(config_err)}")
         return
     
-    # OCR 라이브러리 확인 (기존 코드)
+    # OCR 라이브러리 확인
     if CONFIG['ocr_enabled']:
         try:
             import pytesseract
             from PIL import Image, ImageEnhance, ImageFilter
             import cv2
             
-            # Tesseract 경로 설정
             pytesseract_cmd = os.environ.get('PYTESSERACT_CMD', 'tesseract')
             pytesseract.pytesseract.tesseract_cmd = pytesseract_cmd
             logger.info(f"Tesseract 경로 설정: {pytesseract_cmd}")
             
-            # Tesseract 가용성 확인
             try:
                 version = pytesseract.get_tesseract_version()
                 logger.info(f"Tesseract OCR 버전: {version}")
             except Exception as tess_err:
                 logger.warning(f"Tesseract OCR 설치 확인 실패: {str(tess_err)}")
                 if is_github_actions:
-                    # GitHub Actions에서는 tesseract 설치 여부 확인
                     import subprocess
                     try:
                         result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
