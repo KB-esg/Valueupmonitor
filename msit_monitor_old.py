@@ -2772,7 +2772,7 @@ def cleanup_date_specific_sheets(spreadsheet):
         ]
         
         # Find sheets to keep - only those ending with _Raw or _통합
-        keep_patterns = [r'.*_Raw, r'.*_통합, r'__metadata__']
+        keep_patterns = [r'.*_Raw', r'.*_통합', r'__metadata__']
         
         for worksheet in all_worksheets:
             title = worksheet.title
