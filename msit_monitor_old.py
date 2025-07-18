@@ -75,7 +75,6 @@ SCREENSHOTS_DIR.mkdir(exist_ok=True)
 # Part 1. 유틸리티 함수들
 #=====================================================================================
 
-
 async def setup_browser():
     """Playwright 브라우저 설정 (향상된 봇 탐지 회피)"""
     playwright = await async_playwright().start()
@@ -114,10 +113,11 @@ async def setup_browser():
         permissions=['geolocation'],
         ignore_https_errors=True,
         java_script_enabled=True,
-        accept_downloads=True,
-        # 다운로드 경로 설정
-        downloads_path=str(TEMP_DIR.absolute())
+        accept_downloads=True
     )
+    
+    # 다운로드 경로 설정
+    await context.set_default_timeout(30000)
     
     # 봇 탐지 회피를 위한 JavaScript 주입
     await context.add_init_script("""
@@ -3355,8 +3355,8 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                     chat_id=int(CONFIG['chat_id']),
                     text=f"📊 MSIT 통신 통계 모니터링: 최근 {days_range}일 내 새 게시물이 없습니다.\n({datetime.now().strftime('%Y-%m-%d %H:%M')})"
                 )
-    
-    except Exception as e:
+
+except Exception as e:
         logger.error(f"모니터링 중 오류 발생: {str(e)}")
         
         # 오류 처리 향상
@@ -3382,16 +3382,20 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                 pass
             
             # Send error notification
-            bot = telegram.Bot(token=CONFIG['telegram_token'])
-            error_post = {
-                'title': f"모니터링 오류: {str(e)}",
-                'date': datetime.now().strftime('%Y. %m. %d'),
-                'department': 'System Error'
-            }
-            await send_telegram_message([error_post])
-            logger.info("오류 알림 전송 완료")
-        except Exception as telegram_err:
-            logger.error(f"오류 알림 전송 중 추가 오류: {str(telegram_err)}")
+            try:
+                bot = telegram.Bot(token=CONFIG['telegram_token'])
+                error_msg = f"⚠️ *MSIT 모니터링 오류*\n\n오류: {str(e)}\n시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                
+                await bot.send_message(
+                    chat_id=int(CONFIG['chat_id']),
+                    text=error_msg,
+                    parse_mode='Markdown'
+                )
+                logger.info("오류 알림 전송 완료")
+            except Exception as telegram_err:
+                logger.error(f"오류 알림 전송 실패: {str(telegram_err)}")
+        except Exception as error_handler_err:
+            logger.error(f"오류 핸들러 실행 중 오류: {str(error_handler_err)}")
     
     finally:
         # Clean up resources
@@ -3537,6 +3541,126 @@ def parse_page_content(html_content, page_num=1, days_range=None, start_date=Non
         logger.error(f"페이지 파싱 중 에러: {str(e)}")
         result_info['current_page_complete'] = False
         return [], [], result_info
+
+# ===========================
+# 텔레그램 함수
+# ===========================
+
+async def send_telegram_message(posts, data_updates=None):
+    """텔레그램으로 알림 메시지 전송"""
+    if not posts and not data_updates:
+        logger.info("알림을 보낼 내용이 없습니다")
+        return
+        
+    try:
+        # 텔레그램 봇 초기화
+        bot = telegram.Bot(token=CONFIG['telegram_token'])
+        
+        message = "📊 *MSIT 통신 통계 모니터링*\n\n"
+        
+        # 새 게시물 정보 추가
+        if posts:
+            message += "📱 *새로운 통신 관련 게시물*\n\n"
+            
+            # 최대 5개 게시물만 표시 (너무 길지 않도록)
+            displayed_posts = posts[:5]
+            for post in displayed_posts:
+                message += f"📅 {post['date']}\n"
+                message += f"📑 {post['title']}\n"
+                message += f"🏢 {post['department']}\n"
+                if post.get('url'):
+                    message += f"🔗 [게시물 링크]({post['url']})\n"
+                message += "\n"
+            
+            # 추가 게시물이 있는 경우 표시
+            if len(posts) > 5:
+                message += f"_...외 {len(posts) - 5}개 게시물_\n\n"
+        
+        # 데이터 업데이트 정보 추가
+        if data_updates:
+            message += "📊 *Google Sheets 데이터 업데이트*\n\n"
+            
+            # 최대 10개 업데이트만 표시
+            displayed_updates = data_updates[:10]
+            for update in displayed_updates:
+                post_info = update['post_info']
+                
+                # 날짜 정보 추출
+                if 'date' in update:
+                    year = update['date']['year']
+                    month = update['date']['month']
+                    date_str = f"{year}년 {month}월"
+                else:
+                    date_str = "날짜 미상"
+                
+                # 타이틀 축약 (너무 길면)
+                title = post_info['title']
+                if len(title) > 50:
+                    title = title[:47] + "..."
+                
+                message += f"✅ {title}\n"
+                message += f"   📅 {date_str} 데이터\n"
+                
+                # DataFrame 정보 추가
+                if 'dataframe' in update and update['dataframe'] is not None:
+                    df = update['dataframe']
+                    if hasattr(df, 'shape'):
+                        rows, cols = df.shape
+                        message += f"   📋 {rows}행 × {cols}열\n"
+                
+                message += "\n"
+            
+            # 추가 업데이트가 있는 경우 표시
+            if len(data_updates) > 10:
+                message += f"_...외 {len(data_updates) - 10}개 업데이트_\n\n"
+        
+        # 시간 정보 추가
+        message += f"⏰ _수행 시간: {datetime.now().strftime('%Y-%m-%d %H:%M')}_"
+        
+        # 메시지 길이 제한 (텔레그램 제한)
+        max_length = 4000
+        if len(message) > max_length:
+            chunks = [message[i:i+max_length] for i in range(0, len(message), max_length)]
+            for i, chunk in enumerate(chunks):
+                # 첫 번째가 아닌 메시지에 헤더 추가
+                if i > 0:
+                    chunk = "📊 *MSIT 통신 통계 모니터링 (계속)...*\n\n" + chunk
+                
+                chat_id = int(CONFIG['chat_id'])
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode='Markdown'
+                )
+                time.sleep(1)  # 메시지 사이 지연
+            
+            logger.info(f"텔레그램 메시지 {len(chunks)}개 청크로 분할 전송 완료")
+        else:
+            # 단일 메시지 전송
+            chat_id = int(CONFIG['chat_id'])
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode='Markdown'
+            )
+            logger.info("텔레그램 메시지 전송 성공")
+        
+    except Exception as e:
+        logger.error(f"텔레그램 메시지 전송 중 오류: {str(e)}")
+        
+        # 단순화된 메시지로 재시도
+        try:
+            simple_msg = f"⚠️ MSIT 통신 통계 알림: {len(posts) if posts else 0}개 새 게시물, {len(data_updates) if data_updates else 0}개 업데이트"
+            await bot.send_message(
+                chat_id=int(CONFIG['chat_id']),
+                text=simple_msg
+            )
+            logger.info("단순화된 텔레그램 메시지 전송 성공")
+        except Exception as simple_err:
+            logger.error(f"단순화된 텔레그램 메시지 전송 중 오류: {str(simple_err)}")
+
+
+
 
 # ===========================
 # fallback_ocr_extraction 함수 (Playwright용으로 수정)
