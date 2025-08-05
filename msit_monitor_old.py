@@ -3356,7 +3356,7 @@ async def monitor_msit_telecom_stats(days_range=4, start_page=1, end_page=5,
                     text=f"📊 MSIT 통신 통계 모니터링: 최근 {days_range}일 내 새 게시물이 없습니다.\n({datetime.now().strftime('%Y-%m-%d %H:%M')})"
                 )
 
-except Exception as e:
+    except Exception as e:
         logger.error(f"모니터링 중 오류 발생: {str(e)}")
         
         # 오류 처리 향상
