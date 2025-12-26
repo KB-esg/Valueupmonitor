@@ -1,6 +1,7 @@
 """
 KRX Value-Up 모니터 메인 실행 파일
-매주 실행하여 새로운 밸류업 공시를 수집하고 Google Drive/Sheets에 저장
+매주 실행하여 새로운 밸류업 공시를 수집하고 Google Sheets에 기록
+PDF는 로컬 저장 + Google Drive 업로드 (OAuth2 인증 시)
 """
 
 import argparse
@@ -17,8 +18,8 @@ from datetime import datetime
 sys.stdout.reconfigure(line_buffering=True)
 
 from krx_valueup_crawler import KRXValueUpCrawler, DisclosureItem
-from gdrive_uploader import GDriveUploader
 from gsheet_manager import GSheetManager
+from gdrive_uploader import GDriveUploader
 
 
 def log(message: str):
@@ -42,6 +43,9 @@ def get_service_account_email() -> str:
 class ValueUpMonitor:
     """밸류업 공시 모니터"""
     
+    # PDF 저장 폴더 (GitHub Actions 아티팩트로 업로드됨)
+    PDF_OUTPUT_DIR = "Archive_pdf"
+    
     def __init__(
         self,
         credentials_json: Optional[str] = None,
@@ -62,7 +66,7 @@ class ValueUpMonitor:
             days: 조회할 기간(일), period가 None일 때 사용
             period: 기간 버튼 ('1주', '1개월', '3개월', '6개월', '1년', '전체')
             max_pages: 최대 크롤링 페이지 수
-            skip_pdf: PDF 다운로드/업로드 건너뛰기
+            skip_pdf: PDF 다운로드 건너뛰기
         """
         self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
         self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
@@ -72,19 +76,23 @@ class ValueUpMonitor:
         self.max_pages = max_pages
         self.skip_pdf = skip_pdf
         
-        # 컴포넌트 초기화
+        # Google Sheets 초기화
         self.sheet_manager = GSheetManager(
             credentials_json=self.credentials_json,
             spreadsheet_id=self.spreadsheet_id
         )
+        
+        # Google Drive 초기화 (OAuth2 우선, 서비스 계정 fallback)
         self.drive_uploader = GDriveUploader(
-            credentials_json=self.credentials_json,
             folder_id=self.gdrive_folder_id
         )
         
         # 연결 상태 확인
         self.sheet_ready = self.sheet_manager.spreadsheet is not None
         self.drive_ready = self.drive_uploader.service is not None
+        
+        # PDF 저장 폴더 생성
+        os.makedirs(self.PDF_OUTPUT_DIR, exist_ok=True)
     
     async def run(self) -> dict:
         """
@@ -96,6 +104,7 @@ class ValueUpMonitor:
         result = {
             'total_found': 0,
             'new_added': 0,
+            'pdf_downloaded': 0,
             'pdf_uploaded': 0,
             'errors': []
         }
@@ -105,9 +114,12 @@ class ValueUpMonitor:
         log("=" * 60)
         log(f"서비스 계정: {get_service_account_email()}")
         log(f"스프레드시트 ID: {self.spreadsheet_id}")
-        log(f"드라이브 폴더 ID: {self.gdrive_folder_id}")
+        log(f"드라이브 폴더 ID: {self.gdrive_folder_id or '(미설정)'}")
+        log(f"PDF 로컬 저장: {self.PDF_OUTPUT_DIR}/")
         log(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
         log(f"Google Drive 연결: {'성공' if self.drive_ready else '실패'}")
+        if self.drive_ready:
+            log(f"  → 인증 방식: {self.drive_uploader.auth_method}")
         
         # 조회 옵션 출력
         if self.period:
@@ -115,7 +127,7 @@ class ValueUpMonitor:
         else:
             log(f"조회 기간: 최근 {self.days}일")
         log(f"최대 페이지: {self.max_pages}")
-        log(f"PDF 업로드: {'건너뜀' if self.skip_pdf else '활성화'}")
+        log(f"PDF 다운로드: {'건너뜀' if self.skip_pdf else '활성화'}")
         
         if not self.sheet_ready:
             log("[오류] Google Sheets에 연결할 수 없습니다.")
@@ -154,20 +166,18 @@ class ValueUpMonitor:
                 if new_count == 0:
                     log("  → 모든 공시가 이미 기록되어 있습니다.")
                 
-                # 3. PDF 다운로드 및 Google Drive 업로드
+                # 3. PDF 다운로드 및 저장/업로드
                 if self.skip_pdf:
-                    log("[3단계] PDF 업로드 건너뜀 (--skip-pdf 옵션)")
-                elif not self.drive_ready:
-                    log("[3단계] Google Drive 연결 실패로 PDF 업로드 건너뜀")
+                    log("[3단계] PDF 다운로드 건너뜀 (--skip-pdf 옵션)")
                 else:
-                    log("[3단계] PDF 다운로드 및 Google Drive 업로드 중...")
+                    log("[3단계] PDF 다운로드 및 저장 중...")
                     
-                    # 구글드라이브 링크가 없는 항목 조회
+                    # 구글드라이브 링크가 없는 항목 조회 (아직 PDF 처리 안된 항목)
                     pending_items = self.sheet_manager.get_items_without_gdrive_link()
-                    log(f"  → 업로드 대기 항목: {len(pending_items)}건")
+                    log(f"  → 처리 대기 항목: {len(pending_items)}건")
                     
                     if not pending_items:
-                        log("  → 모든 항목이 이미 업로드되어 있습니다.")
+                        log("  → 모든 항목이 이미 처리되어 있습니다.")
                     
                     for idx, item in enumerate(pending_items, 1):
                         acptno = item.get('접수번호', '')
@@ -182,20 +192,29 @@ class ValueUpMonitor:
                             
                             if pdf_data:
                                 # 파일명 생성: 공시일자_회사명_접수번호.pdf
-                                safe_company = re.sub(r'[^\w가-힣]', '', company)  # 특수문자 제거
+                                safe_company = re.sub(r'[^\w가-힣]', '', company)
                                 filename = f"{date[:8]}_{safe_company}_{acptno}.pdf"
+                                filepath = os.path.join(self.PDF_OUTPUT_DIR, filename)
                                 
-                                # Google Drive에 업로드
-                                gdrive_link = self.drive_uploader.upload_pdf(pdf_data, filename)
+                                # 1) 로컬에 PDF 저장 (항상)
+                                with open(filepath, 'wb') as f:
+                                    f.write(pdf_data)
+                                result['pdf_downloaded'] += 1
+                                log(f"      → 로컬 저장: {filename} ({len(pdf_data):,} bytes)")
                                 
+                                # 2) Google Drive 업로드 (가능한 경우)
+                                gdrive_link = None
+                                if self.drive_ready:
+                                    gdrive_link = self.drive_uploader.upload_pdf(pdf_data, filename)
+                                    if gdrive_link:
+                                        result['pdf_uploaded'] += 1
+                                        log(f"      → Drive 업로드: {gdrive_link}")
+                                
+                                # 시트에 상태 업데이트
                                 if gdrive_link:
-                                    # 시트에 링크 업데이트
                                     self.sheet_manager.update_gdrive_link(acptno, gdrive_link)
-                                    result['pdf_uploaded'] += 1
-                                    log(f"      → 업로드 완료: {gdrive_link}")
                                 else:
-                                    result['errors'].append(f"Drive 업로드 실패: {acptno}")
-                                    log(f"      → Drive 업로드 실패")
+                                    self.sheet_manager.update_gdrive_link(acptno, f"[로컬저장] {filename}")
                             else:
                                 result['errors'].append(f"PDF 다운로드 실패: {acptno}")
                                 log(f"      → PDF 다운로드 실패")
@@ -218,7 +237,9 @@ class ValueUpMonitor:
         log("=" * 60)
         log(f"  발견된 공시: {result['total_found']}건")
         log(f"  새로 추가됨: {result['new_added']}건")
-        log(f"  PDF 업로드: {result['pdf_uploaded']}건")
+        log(f"  PDF 로컬 저장: {result['pdf_downloaded']}건")
+        log(f"  PDF Drive 업로드: {result['pdf_uploaded']}건")
+        log(f"  저장 위치: {self.PDF_OUTPUT_DIR}/")
         if result['errors']:
             log(f"  오류: {len(result['errors'])}건")
             for err in result['errors']:
@@ -244,10 +265,10 @@ def parse_args():
   # 기간 버튼 사용 (3개월)
   python main.py --period 3개월
   
-  # 전체 기간 아카이브 (PDF 업로드 포함)
+  # 전체 기간 아카이브
   python main.py --period 전체 --max-pages 20
   
-  # 목록만 수집 (PDF 업로드 건너뜀)
+  # 목록만 수집 (PDF 다운로드 건너뜀)
   python main.py --period 1년 --skip-pdf
         """
     )
@@ -278,7 +299,7 @@ def parse_args():
         '--skip-pdf',
         action='store_true',
         default=os.environ.get('VALUEUP_SKIP_PDF', '').lower() == 'true',
-        help='PDF 다운로드/업로드 건너뛰기'
+        help='PDF 다운로드 건너뛰기'
     )
     
     return parser.parse_args()
@@ -298,7 +319,12 @@ async def main():
         log("필요한 환경변수:")
         log("  - GOOGLE_SERVICE: 서비스 계정 JSON")
         log("  - VALUEUP_GSPREAD_ID: 스프레드시트 ID")
-        log("  - VALUEUP_ARCHIVE_ID: (선택) 구글드라이브 폴더 ID")
+        log("")
+        log("선택적 환경변수 (Google Drive 업로드용):")
+        log("  - GDRIVE_REFRESH_TOKEN: OAuth2 리프레시 토큰")
+        log("  - GDRIVE_CLIENT_ID: OAuth2 클라이언트 ID")
+        log("  - GDRIVE_CLIENT_SECRET: OAuth2 클라이언트 시크릿")
+        log("  - VALUEUP_ARCHIVE_ID: 업로드할 폴더 ID")
         sys.exit(1)
     
     monitor = ValueUpMonitor(
@@ -314,6 +340,7 @@ async def main():
         with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
             f.write(f"total_found={result['total_found']}\n")
             f.write(f"new_added={result['new_added']}\n")
+            f.write(f"pdf_downloaded={result['pdf_downloaded']}\n")
             f.write(f"pdf_uploaded={result['pdf_uploaded']}\n")
 
 
