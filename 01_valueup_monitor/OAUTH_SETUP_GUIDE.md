@@ -19,8 +19,8 @@ GitHub Actions에서 개인 Google Drive에 파일을 업로드하려면 OAuth2 
    - 개발자 연락처: 본인 이메일
 6. **저장 후 계속**
 7. 범위(Scopes) 페이지: **범위 추가 또는 삭제** 클릭
-   - `https://www.googleapis.com/auth/drive.file` 선택
-   - `https://www.googleapis.com/auth/drive` 선택
+   - `https://www.googleapis.com/auth/drive.file` 선택 ✅
+   - (`drive` 전체 권한은 선택하지 않음 - 심사 필요)
 8. **저장 후 계속**
 9. 테스트 사용자 페이지: **Add Users** 클릭
    - **본인 Gmail 주소 추가** (중요!)
@@ -59,9 +59,9 @@ GitHub Actions에서 개인 Google Drive에 파일을 업로드하려면 OAuth2 
 ### 2.3 API 범위 선택
 
 1. 왼쪽 목록에서 **Drive API v3** 찾기
-2. 다음 두 항목 체크:
-   - `https://www.googleapis.com/auth/drive`
-   - `https://www.googleapis.com/auth/drive.file`
+2. 다음 항목만 체크:
+   - ✅ `https://www.googleapis.com/auth/drive.file`
+   - ❌ `https://www.googleapis.com/auth/drive` (체크하지 않음)
 3. **Authorize APIs** 클릭
 
 ### 2.4 Google 계정 인증
@@ -125,9 +125,13 @@ https://drive.google.com/drive/folders/1ABC...XYZ
 - Refresh token이 만료됨 → 2단계부터 다시 진행
 - 앱이 "테스트" 상태면 토큰은 7일 후 만료됨
 
-### 토큰 만료 방지
-OAuth 동의 화면에서 **앱 게시** 선택 (심사 없이 가능한 범위 내에서)
-- 또는 7일마다 토큰 재발급 필요
+### 토큰 만료 방지 (중요!)
+
+1. Google Cloud Console → **API 및 서비스** → **OAuth 동의 화면**
+2. 상단의 **"앱 게시"** 버튼 클릭
+3. 확인 팝업 → **확인**
+
+`drive.file` 범위만 사용하면 **심사 없이 즉시 게시** 가능합니다.
 
 ---
 
