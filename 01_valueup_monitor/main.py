@@ -20,6 +20,7 @@ sys.stdout.reconfigure(line_buffering=True)
 from krx_valueup_crawler import KRXValueUpCrawler, DisclosureItem
 from gsheet_manager import GSheetManager
 from gdrive_uploader import GDriveUploader
+from stock_code_mapper import StockCodeMapper
 
 
 def log(message: str):
@@ -93,6 +94,31 @@ class ValueUpMonitor:
         
         # PDF 저장 폴더 생성
         os.makedirs(self.PDF_OUTPUT_DIR, exist_ok=True)
+        
+        # GitHub Actions 환경변수
+        self.github_run_id = os.environ.get('GITHUB_RUN_ID', '')
+        self.github_repository = os.environ.get('GITHUB_REPOSITORY', '')
+    
+    def _generate_artifact_info(self, filename: str) -> str:
+        """
+        GitHub Actions 아티팩트 정보 생성
+        
+        Args:
+            filename: PDF 파일명
+            
+        Returns:
+            아티팩트 정보 문자열 (다음 Action에서 조회 가능)
+        """
+        # 아티팩트 폴더/파일 경로
+        artifact_path = f"Archive_pdf/{filename}"
+        
+        # GitHub Actions 환경인 경우 실행 정보 포함
+        if self.github_run_id and self.github_repository:
+            # 아티팩트 다운로드 URL (Actions 페이지)
+            actions_url = f"https://github.com/{self.github_repository}/actions/runs/{self.github_run_id}"
+            return f"{artifact_path}|run_id:{self.github_run_id}"
+        
+        return artifact_path
     
     async def run(self) -> dict:
         """
@@ -155,8 +181,21 @@ class ValueUpMonitor:
                     log("  → 새로운 공시가 없습니다.")
                     return result
                 
-                # 2. Google Sheets에 새 항목 추가
-                log("[2단계] Google Sheets에 공시 목록 기록 중...")
+                # 2. 종목코드 채우기 (비어있는 경우)
+                log("[2단계] 종목코드 조회 중...")
+                stock_mapper = StockCodeMapper()
+                
+                for item in items:
+                    if not item.종목코드:
+                        code = stock_mapper.get_code(item.회사명)
+                        if code:
+                            item.종목코드 = code
+                            log(f"  → {item.회사명} → {code}")
+                        else:
+                            log(f"  → {item.회사명} → (종목코드 없음)")
+                
+                # 3. Google Sheets에 새 항목 추가
+                log("[3단계] Google Sheets에 공시 목록 기록 중...")
                 
                 disclosures = [asdict(item) for item in items]
                 new_count = self.sheet_manager.append_disclosures(disclosures)
@@ -166,11 +205,11 @@ class ValueUpMonitor:
                 if new_count == 0:
                     log("  → 모든 공시가 이미 기록되어 있습니다.")
                 
-                # 3. PDF 다운로드 및 저장/업로드
+                # 4. PDF 다운로드 및 저장/업로드
                 if self.skip_pdf:
-                    log("[3단계] PDF 다운로드 건너뜀 (--skip-pdf 옵션)")
+                    log("[4단계] PDF 다운로드 건너뜀 (--skip-pdf 옵션)")
                 else:
-                    log("[3단계] PDF 다운로드 및 저장 중...")
+                    log("[4단계] PDF 다운로드 및 저장 중...")
                     
                     # 구글드라이브 링크가 없는 항목 조회 (아직 PDF 처리 안된 항목)
                     pending_items = self.sheet_manager.get_items_without_gdrive_link()
@@ -178,6 +217,9 @@ class ValueUpMonitor:
                     
                     if not pending_items:
                         log("  → 모든 항목이 이미 처리되어 있습니다.")
+                    
+                    # 링크 업데이트 정보 수집 (배치용)
+                    link_updates = []
                     
                     for idx, item in enumerate(pending_items, 1):
                         acptno = item.get('접수번호', '')
@@ -212,7 +254,6 @@ class ValueUpMonitor:
                                 log(f"      → 로컬 저장: {filename} ({len(pdf_data):,} bytes)")
                                 
                                 # 2) Google Drive 업로드 (가능한 경우)
-                                #    월별 폴더에 저장: PDF_archive/YY_MM/
                                 gdrive_link = None
                                 if self.drive_ready:
                                     gdrive_link = self.drive_uploader.upload_pdf(
@@ -225,11 +266,16 @@ class ValueUpMonitor:
                                         result['pdf_uploaded'] += 1
                                         log(f"      → Drive 업로드: {gdrive_link}")
                                 
-                                # 시트에 상태 업데이트
-                                if gdrive_link:
-                                    self.sheet_manager.update_gdrive_link(acptno, gdrive_link)
-                                else:
-                                    self.sheet_manager.update_gdrive_link(acptno, f"[로컬저장] {filename}")
+                                # 3) 아티팩트 링크 정보 생성
+                                artifact_info = self._generate_artifact_info(filename)
+                                
+                                # 링크 업데이트 정보 수집 (나중에 배치로 업데이트)
+                                link_updates.append({
+                                    '접수번호': acptno,
+                                    '구글드라이브링크': gdrive_link or f"[로컬저장] {filename}",
+                                    '아티팩트링크': artifact_info
+                                })
+                                
                             else:
                                 result['errors'].append(f"PDF 다운로드 실패: {acptno}")
                                 log(f"      → PDF 다운로드 실패")
@@ -241,6 +287,12 @@ class ValueUpMonitor:
                         
                         # 요청 간 딜레이
                         await asyncio.sleep(2)
+                    
+                    # 5. 시트에 링크 배치 업데이트 (1회 API 호출)
+                    if link_updates:
+                        log("[5단계] 시트에 링크 정보 배치 업데이트...")
+                        updated = self.sheet_manager.batch_update_links(link_updates)
+                        log(f"  → {updated}건 업데이트 완료")
                 
             except Exception as e:
                 result['errors'].append(f"크롤링 오류: {str(e)}")
