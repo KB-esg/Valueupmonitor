@@ -5,10 +5,21 @@ Google Drive 업로더
 
 import os
 import io
+import sys
 from typing import Optional
+from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+
+# stdout 버퍼링 해제
+sys.stdout.reconfigure(line_buffering=True)
+
+
+def log(message: str):
+    """타임스탬프와 함께 로그 출력"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log(f"[{timestamp}] {message}", flush=True)
 
 
 class GDriveUploader:
@@ -63,7 +74,7 @@ class GDriveUploader:
             업로드된 파일의 웹 링크 또는 None
         """
         if not self.service:
-            print("Google Drive 서비스가 초기화되지 않았습니다.")
+            log("Google Drive 서비스가 초기화되지 않았습니다.")
             return None
         
         target_folder = folder_id or self.folder_id
@@ -101,7 +112,7 @@ class GDriveUploader:
             return file.get('webViewLink')
             
         except Exception as e:
-            print(f"파일 업로드 중 오류: {e}")
+            log(f"파일 업로드 중 오류: {e}")
             return None
     
     def check_file_exists(self, filename: str, folder_id: Optional[str] = None) -> bool:
@@ -134,7 +145,7 @@ class GDriveUploader:
             return len(results.get('files', [])) > 0
             
         except Exception as e:
-            print(f"파일 확인 중 오류: {e}")
+            log(f"파일 확인 중 오류: {e}")
             return False
     
     def create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
@@ -168,7 +179,7 @@ class GDriveUploader:
             return folder.get('id')
             
         except Exception as e:
-            print(f"폴더 생성 중 오류: {e}")
+            log(f"폴더 생성 중 오류: {e}")
             return None
 
 
@@ -181,9 +192,9 @@ def main():
     
     link = uploader.upload_pdf(test_pdf, 'test_valueup.pdf')
     if link:
-        print(f"업로드 성공: {link}")
+        log(f"업로드 성공: {link}")
     else:
-        print("업로드 실패")
+        log("업로드 실패")
 
 
 if __name__ == "__main__":
