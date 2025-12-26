@@ -493,14 +493,29 @@ class KRXValueUpCrawler:
         await self._save_debug_html(self.page, "01_list_initial")
         await self._save_debug_js(self.page, "01_list_initial")
         
-        # 기간 설정
+        # 컷오프 날짜 계산 (period 여부와 관계없이)
+        # period 사용 시에도 days 기준으로 컷오프 적용
+        end_date = datetime.now()
+        
         if period:
-            log(f"기간 버튼 클릭: {period}")
+            # 기간 버튼에 따른 days 계산
+            period_to_days = {
+                '1주': 7,
+                '1개월': 30,
+                '3개월': 90,
+                '6개월': 180,
+                '1년': 365,
+                '2년': 730,
+                '3년': 1095,
+                '전체': 3650  # 약 10년
+            }
+            effective_days = period_to_days.get(period, days)
+            log(f"기간 버튼 클릭: {period} (약 {effective_days}일)")
             await self.click_period_button(period)
             await asyncio.sleep(2)
         else:
+            effective_days = days
             # 날짜 범위로 검색
-            end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
             log(f"날짜 범위 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
             
@@ -527,12 +542,16 @@ class KRXValueUpCrawler:
             except Exception as e:
                 log(f"날짜 설정 오류: {e}")
         
+        # 컷오프 날짜 설정 (항상 적용)
+        cutoff_date = end_date - timedelta(days=effective_days)
+        log(f"  컷오프 날짜: {cutoff_date.strftime('%Y-%m-%d')} 이전 공시는 제외")
+        
         # 디버그: 검색 후 저장
         await self._save_debug_screenshot(self.page, "02_list_after_search")
         await self._save_debug_html(self.page, "02_list_after_search")
         
         # 페이지별 크롤링
-        cutoff_date = datetime.now() - timedelta(days=days) if not period else None
+        consecutive_old_count = 0  # 연속으로 오래된 공시가 나온 횟수
         
         for page_num in range(1, max_pages + 1):
             log(f"페이지 {page_num} 파싱 중...")
@@ -544,35 +563,53 @@ class KRXValueUpCrawler:
                 log("  더 이상 항목 없음, 종료")
                 break
             
-            # 날짜 필터링 (period가 아닌 경우)
-            if cutoff_date:
-                filtered_items = []
-                for item in page_items:
-                    try:
-                        date_str = item.공시일자.replace('.', '-').strip()
-                        if ' ' in date_str:
-                            date_str = date_str.split(' ')[0]
-                        
-                        if len(date_str) == 10:
-                            item_date = datetime.strptime(date_str, "%Y-%m-%d")
-                        elif len(date_str) == 8:
-                            item_date = datetime.strptime(date_str, "%Y%m%d")
-                        else:
-                            filtered_items.append(item)
-                            continue
-                            
-                        if item_date >= cutoff_date:
-                            filtered_items.append(item)
-                    except:
+            # 날짜 필터링
+            filtered_items = []
+            old_items_in_page = 0
+            
+            for item in page_items:
+                try:
+                    # 날짜 파싱
+                    date_str = item.공시일자.replace('.', '-').strip()
+                    if ' ' in date_str:
+                        date_str = date_str.split(' ')[0]
+                    
+                    if len(date_str) == 10:
+                        item_date = datetime.strptime(date_str, "%Y-%m-%d")
+                    elif len(date_str) == 8:
+                        item_date = datetime.strptime(date_str, "%Y%m%d")
+                    else:
+                        # 날짜 파싱 실패시 포함
                         filtered_items.append(item)
-                
-                all_items.extend(filtered_items)
-                
-                if len(filtered_items) < len(page_items):
-                    log(f"  날짜 기준 도달, 종료")
+                        continue
+                    
+                    if item_date >= cutoff_date:
+                        filtered_items.append(item)
+                        consecutive_old_count = 0  # 리셋
+                    else:
+                        old_items_in_page += 1
+                        log(f"    [SKIP] {item.회사명} - {item.공시일자} (기간 외)")
+                        
+                except Exception as e:
+                    # 예외 발생시 포함 (안전)
+                    filtered_items.append(item)
+            
+            all_items.extend(filtered_items)
+            log(f"  필터 후: {len(filtered_items)}건 추가 (제외: {old_items_in_page}건)")
+            
+            # 조기 종료 조건: 페이지의 절반 이상이 기간 외 공시인 경우
+            if old_items_in_page > len(page_items) // 2:
+                consecutive_old_count += 1
+                if consecutive_old_count >= 1:  # 한 페이지라도 절반 이상 기간 외면 종료
+                    log(f"  조회 기간 외 공시 다수 발견, 크롤링 종료")
                     break
             else:
-                all_items.extend(page_items)
+                consecutive_old_count = 0
+            
+            # 전체 페이지가 기간 외인 경우 즉시 종료
+            if len(filtered_items) == 0 and len(page_items) > 0:
+                log(f"  현재 페이지 전체가 조회 기간 외, 크롤링 종료")
+                break
             
             # 다음 페이지로 이동
             if page_num < max_pages:
