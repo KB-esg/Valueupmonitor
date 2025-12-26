@@ -180,6 +180,8 @@ class KRXValueUpCrawler:
         try:
             # 밸류업 페이지의 기간 버튼 셀렉터 (더 구체적)
             selectors = [
+                f'.btn-set.dates a:has-text("{period}")',
+                f'ul.btn-set a:has-text("{period}")',
                 f'.period-btn:has-text("{period}")',
                 f'.search-period a:has-text("{period}")',
                 f'a.period:has-text("{period}")',
@@ -213,8 +215,8 @@ class KRXValueUpCrawler:
                 'img[alt="검색"]',
                 'a:has(img[alt="검색"])',
                 # 클래스 기반
-                'a.btn-search',
-                'button.btn-search',
+                'a.search-btn',
+                'button.search-btn',
                 '.search-btn',
                 # 검색 영역 내 버튼
                 '.search-area a:has-text("검색")',
@@ -277,19 +279,50 @@ class KRXValueUpCrawler:
             return 1
     
     async def go_to_page(self, page_num: int) -> bool:
-        """특정 페이지로 이동"""
+        """특정 페이지로 이동 - 페이지네이션 영역 내에서만 검색"""
         try:
-            # 페이지 번호 링크 클릭
-            page_link = self.page.locator(f'a:has-text("{page_num}"), a[href*="page={page_num}"]').first
-            if await page_link.count() > 0:
-                await page_link.click()
+            # 페이지네이션 영역 내에서만 페이지 번호 찾기 (정확한 텍스트 매칭)
+            paging_selectors = [
+                f'.paging a:text-is("{page_num}")',
+                f'.paging-group a:text-is("{page_num}")',
+                f'section.paging-group a:text-is("{page_num}")',
+                f'.pagination a:text-is("{page_num}")',
+                f'div.paging a:text-is("{page_num}")',
+            ]
+            
+            for selector in paging_selectors:
+                try:
+                    page_link = self.page.locator(selector).first
+                    if await page_link.count() > 0:
+                        is_visible = await page_link.is_visible()
+                        if is_visible:
+                            await page_link.click()
+                            log(f"  페이지 {page_num}으로 이동 (셀렉터: {selector})")
+                            await asyncio.sleep(2)
+                            return True
+                except Exception:
+                    continue
+            
+            # JavaScript로 페이지 이동 시도 (fnPageGo 함수 - Colab 코드에서 발견)
+            try:
+                await self.page.evaluate(f"fnPageGo('{page_num}')")
+                log(f"  JavaScript fnPageGo('{page_num}')로 이동")
                 await asyncio.sleep(2)
                 return True
+            except Exception:
+                pass
             
-            # JavaScript로 페이지 이동 시도
-            await self.page.evaluate(f'goPage({page_num})')
-            await asyncio.sleep(2)
-            return True
+            # goPage 함수 시도
+            try:
+                await self.page.evaluate(f'goPage({page_num})')
+                log(f"  JavaScript goPage({page_num})로 이동")
+                await asyncio.sleep(2)
+                return True
+            except Exception:
+                pass
+            
+            log(f"  페이지 {page_num} 링크를 찾을 수 없음 (1페이지만 존재할 수 있음)")
+            return False
             
         except Exception as e:
             log(f"  페이지 이동 오류: {e}")
@@ -467,7 +500,6 @@ class KRXValueUpCrawler:
             log(f"날짜 범위 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
             
             try:
-                # 날짜 입력 필드 찾기 (여러 셀렉터 시도)
                 start_selectors = ['input#fromDate', 'input[name="fromDate"]', 'input.from-date']
                 end_selectors = ['input#toDate', 'input[name="toDate"]', 'input.to-date']
                 
@@ -485,7 +517,6 @@ class KRXValueUpCrawler:
                         log(f"  종료일 입력 완료: {selector}")
                         break
                 
-                # 검색 버튼 클릭 (실패해도 계속 진행)
                 await self.click_search_button()
                 
             except Exception as e:
@@ -513,11 +544,13 @@ class KRXValueUpCrawler:
                 filtered_items = []
                 for item in page_items:
                     try:
-                        # 다양한 날짜 형식 처리
                         date_str = item.공시일자.replace('.', '-').strip()
-                        if len(date_str) == 10:  # YYYY-MM-DD
+                        if ' ' in date_str:
+                            date_str = date_str.split(' ')[0]
+                        
+                        if len(date_str) == 10:
                             item_date = datetime.strptime(date_str, "%Y-%m-%d")
-                        elif len(date_str) == 8:  # YYYYMMDD
+                        elif len(date_str) == 8:
                             item_date = datetime.strptime(date_str, "%Y%m%d")
                         else:
                             filtered_items.append(item)
@@ -530,7 +563,6 @@ class KRXValueUpCrawler:
                 
                 all_items.extend(filtered_items)
                 
-                # 필터링으로 제외된 항목이 있으면 더 이상 진행 불필요
                 if len(filtered_items) < len(page_items):
                     log(f"  날짜 기준 도달, 종료")
                     break
@@ -546,82 +578,19 @@ class KRXValueUpCrawler:
         log(f"총 {len(all_items)}건 수집 완료")
         return all_items
     
-    async def get_doc_number(self, acptno: str) -> str:
-        """
-        공시 상세 페이지에서 문서번호(docNo) 추출
-        
-        Args:
-            acptno: 접수번호
-            
-        Returns:
-            문서번호
-        """
-        viewer_url = f"{self.VIEWER_URL}?method=search&acptno={acptno}"
-        log(f"  문서번호 추출 중: {acptno}")
-        
-        page = await self.context.new_page()
-        try:
-            await page.goto(viewer_url, wait_until="networkidle")
-            await asyncio.sleep(3)
-            
-            # 디버그: 뷰어 페이지 저장
-            await self._save_debug_screenshot(page, f"viewer_{acptno}")
-            await self._save_debug_html(page, f"viewer_{acptno}")
-            await self._save_debug_js(page, f"viewer_{acptno}")
-            
-            # mainDoc select에서 docNo 추출
-            # <option value='20251128000575|Y' selected="selected">
-            main_doc = page.locator('select#mainDoc option[selected]')
-            if await main_doc.count() > 0:
-                value = await main_doc.get_attribute('value') or ""
-                log(f"    mainDoc value: {value}")
-                if '|' in value:
-                    return value.split('|')[0]
-                return value
-            
-            # 첫 번째 실제 옵션 (본문선택 제외)
-            first_option = page.locator('select#mainDoc option:not([value=""])').first
-            if await first_option.count() > 0:
-                value = await first_option.get_attribute('value') or ""
-                log(f"    first option value: {value}")
-                if '|' in value:
-                    return value.split('|')[0]
-                return value
-            
-            # hidden input에서 추출
-            doc_no_input = page.locator('input#docNo, input[name="docNo"]')
-            if await doc_no_input.count() > 0:
-                return await doc_no_input.get_attribute('value') or ""
-                
-        except Exception as e:
-            log(f"  문서번호 추출 오류: {e}")
-        finally:
-            await page.close()
-            
-        return ""
-    
     async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
-        PDF 다운로드 - 뷰어 팝업에서 PDF 버튼 클릭 방식
+        PDF 다운로드 - 첨부문서(attachedDoc)에서 PDF 링크 추출 방식
+        Colab 코드 참조: iframe 내부에서 .pdf 링크 찾기
         
         Args:
             acptno: 접수번호
-            doc_no: 문서번호 (없으면 자동 추출)
+            doc_no: 문서번호 (사용하지 않음, 호환성 유지)
             
         Returns:
             PDF 바이너리 데이터 또는 None
         """
         log(f"  PDF 다운로드 시작: acptno={acptno}")
-        
-        # 문서번호 추출
-        if not doc_no:
-            doc_no = await self.get_doc_number(acptno)
-        
-        if not doc_no:
-            log(f"  문서번호를 찾을 수 없음: acptno={acptno}")
-            return None
-        
-        log(f"    문서번호: {doc_no}")
         
         viewer_url = f"{self.VIEWER_URL}?method=search&acptno={acptno}"
         
@@ -632,110 +601,202 @@ class KRXValueUpCrawler:
             await asyncio.sleep(3)
             
             # 디버그: 다운로드 전 상태 저장
-            await self._save_debug_screenshot(page, f"pdf_before_{acptno}")
+            await self._save_debug_screenshot(page, f"pdf_viewer_{acptno}")
             
-            # 2. PDF 버튼 찾기
-            # HTML에서: <a href="#viewer" onclick="pdfPrint();return false;"><img src="../images/common/btn_pdf.png" alt="PDF 로 저장" /></a>
-            pdf_btn_selectors = [
-                'a[onclick*="pdfPrint"]',
-                'a:has(img[alt*="PDF"])',
-                'img[alt*="PDF"]',
-                'a:has-text("PDF")',
-            ]
-            
-            pdf_btn = None
-            for selector in pdf_btn_selectors:
-                btn = page.locator(selector).first
-                if await btn.count() > 0:
-                    pdf_btn = btn
-                    log(f"    PDF 버튼 발견: {selector}")
-                    break
-            
-            if not pdf_btn:
-                log(f"  PDF 버튼을 찾을 수 없음")
-                await self._save_debug_screenshot(page, f"pdf_no_button_{acptno}")
-                return None
-            
-            # 3. 직접 다운로드 URL 시도 (pdfPrint 우회)
-            # fnPdfJson -> filedownload('pdf') -> /common/pdfDownload.do?method=pdfDown&acptNo=XXX&docNo=YYY
-            download_url = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={acptno}&docNo={doc_no}"
-            log(f"    직접 다운로드 URL: {download_url}")
-            
-            download_page = await self.context.new_page()
-            try:
-                # 다운로드 대기
-                async with download_page.expect_download(timeout=60000) as download_info:
-                    await download_page.goto(download_url)
+            # 2. 첨부문서(attachedDoc) 드롭다운에서 PDF 찾기
+            attach_select = page.locator('select#attachedDoc')
+            if await attach_select.count() > 0:
+                # 모든 옵션 가져오기
+                options = await attach_select.locator('option').all()
+                log(f"    첨부문서 옵션 수: {len(options)}")
                 
-                download = await download_info.value
-                log(f"    다운로드 시작: {download.suggested_filename}")
-                
-                # 임시 파일로 저장
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                    tmp_path = tmp.name
-                
-                await download.save_as(tmp_path)
-                
-                with open(tmp_path, 'rb') as f:
-                    pdf_data = f.read()
-                
-                os.unlink(tmp_path)
-                
-                # PDF 유효성 검사 (최소 크기 및 헤더 확인)
-                if len(pdf_data) < 1000:
-                    log(f"    PDF가 너무 작음: {len(pdf_data)} bytes")
-                    return None
-                
-                if not pdf_data.startswith(b'%PDF'):
-                    log(f"    유효하지 않은 PDF 형식")
-                    return None
-                
-                log(f"    PDF 다운로드 완료: {len(pdf_data)} bytes")
-                return pdf_data
-                
-            except Exception as e:
-                log(f"    직접 다운로드 실패: {e}")
-            finally:
-                await download_page.close()
-            
-            # 4. PDF 버튼 클릭 방식 (fallback)
-            log("    PDF 버튼 클릭 방식 시도...")
-            try:
-                async with page.expect_download(timeout=60000) as download_info:
-                    await pdf_btn.click()
-                
-                download = await download_info.value
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                    tmp_path = tmp.name
-                
-                await download.save_as(tmp_path)
-                
-                with open(tmp_path, 'rb') as f:
-                    pdf_data = f.read()
-                
-                os.unlink(tmp_path)
-                
-                if pdf_data and len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
-                    log(f"    PDF 버튼 클릭 성공: {len(pdf_data)} bytes")
-                    return pdf_data
+                for option in options:
+                    option_text = await option.text_content() or ""
+                    option_value = await option.get_attribute('value') or ""
                     
-            except Exception as e:
-                log(f"    PDF 버튼 클릭 실패: {e}")
-                await self._save_debug_screenshot(page, f"pdf_click_failed_{acptno}")
+                    # 빈 값이나 선택 옵션 건너뛰기
+                    if not option_value or option_value == "":
+                        continue
+                    
+                    log(f"    첨부문서: {option_text[:50]}...")
+                    
+                    # 기타공시첨부서류, 기타공개첨부문서, 첨부 등 찾기
+                    keywords = ["기타공시첨부서류", "기타공개첨부문서", "첨부", "PDF", "pdf"]
+                    if any(kw in option_text for kw in keywords):
+                        # 해당 옵션 선택
+                        await attach_select.select_option(value=option_value)
+                        log(f"    선택됨: {option_text[:30]}...")
+                        await asyncio.sleep(3)
+                        
+                        # docViewFrm iframe에서 PDF 링크 찾기
+                        pdf_url = await self._find_pdf_in_iframe(page)
+                        if pdf_url:
+                            log(f"    PDF URL: {pdf_url}")
+                            pdf_data = await self._download_pdf_from_url(pdf_url)
+                            if pdf_data:
+                                return pdf_data
+                
+                # 키워드 없이 모든 첨부 옵션 시도
+                log(f"    키워드 매칭 실패, 모든 첨부문서 검색...")
+                for option in options:
+                    option_value = await option.get_attribute('value') or ""
+                    if not option_value:
+                        continue
+                    
+                    await attach_select.select_option(value=option_value)
+                    await asyncio.sleep(2)
+                    
+                    pdf_url = await self._find_pdf_in_iframe(page)
+                    if pdf_url:
+                        log(f"    PDF URL: {pdf_url}")
+                        pdf_data = await self._download_pdf_from_url(pdf_url)
+                        if pdf_data:
+                            return pdf_data
+            else:
+                log(f"    첨부문서 드롭다운 없음")
             
+            # 3. 본문(mainDoc)에서도 PDF 찾기 시도
+            log(f"    본문에서 PDF 검색...")
+            main_select = page.locator('select#mainDoc')
+            if await main_select.count() > 0:
+                options = await main_select.locator('option').all()
+                for option in options:
+                    option_value = await option.get_attribute('value') or ""
+                    if not option_value:
+                        continue
+                    
+                    await main_select.select_option(value=option_value)
+                    await asyncio.sleep(2)
+                    
+                    pdf_url = await self._find_pdf_in_iframe(page)
+                    if pdf_url:
+                        log(f"    본문 PDF URL: {pdf_url}")
+                        pdf_data = await self._download_pdf_from_url(pdf_url)
+                        if pdf_data:
+                            return pdf_data
+            
+            log(f"    PDF를 찾을 수 없음")
+            await self._save_debug_screenshot(page, f"pdf_not_found_{acptno}")
             return None
             
         except Exception as e:
             log(f"  PDF 다운로드 오류: {e}")
+            import traceback
+            log(f"  {traceback.format_exc()}")
             return None
         finally:
             await page.close()
+    
+    async def _find_pdf_in_iframe(self, page: Page) -> Optional[str]:
+        """iframe 내부에서 PDF 링크 찾기"""
+        try:
+            # JavaScript로 iframe 내부 접근
+            pdf_url = await page.evaluate('''() => {
+                const iframe = document.getElementById('docViewFrm');
+                if (!iframe || !iframe.contentDocument) {
+                    return null;
+                }
+                
+                // PDF 링크 찾기
+                const links = iframe.contentDocument.querySelectorAll('a[href*=".pdf"], a[href*=".PDF"]');
+                for (const link of links) {
+                    const href = link.getAttribute('href');
+                    if (href && (href.toLowerCase().includes('.pdf'))) {
+                        return href;
+                    }
+                }
+                
+                // 텍스트로 PDF 찾기
+                const allLinks = iframe.contentDocument.querySelectorAll('a');
+                for (const link of allLinks) {
+                    const text = link.textContent || '';
+                    if (text.toLowerCase().includes('.pdf')) {
+                        return link.getAttribute('href');
+                    }
+                }
+                
+                return null;
+            }''')
+            
+            if pdf_url:
+                # 상대 경로를 절대 경로로 변환
+                if pdf_url.startswith('http'):
+                    return pdf_url
+                elif pdf_url.startswith('/'):
+                    return f"{self.BASE_URL}{pdf_url}"
+                else:
+                    return f"{self.BASE_URL}/{pdf_url}"
+            
+            return None
+            
+        except Exception as e:
+            log(f"    iframe PDF 검색 오류: {e}")
+            return None
+    
+    async def _download_pdf_from_url(self, pdf_url: str) -> Optional[bytes]:
+        """URL에서 PDF 다운로드 (aiohttp 사용)"""
+        try:
+            import aiohttp
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://kind.krx.co.kr/',
+                'Accept': 'application/pdf,*/*',
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(pdf_url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    if response.status == 200:
+                        pdf_data = await response.read()
+                        
+                        # PDF 유효성 검사
+                        if len(pdf_data) < 1000:
+                            log(f"    PDF가 너무 작음: {len(pdf_data)} bytes")
+                            return None
+                        
+                        if not pdf_data.startswith(b'%PDF'):
+                            log(f"    유효하지 않은 PDF 형식 (헤더: {pdf_data[:20]})")
+                            return None
+                        
+                        log(f"    PDF 다운로드 완료: {len(pdf_data)} bytes")
+                        return pdf_data
+                    else:
+                        log(f"    PDF 다운로드 실패: HTTP {response.status}")
+                        return None
+                        
+        except ImportError:
+            log(f"    aiohttp 없음, requests 사용...")
+            return await self._download_pdf_with_requests(pdf_url)
+        except Exception as e:
+            log(f"    PDF URL 다운로드 오류: {e}")
+            return None
+    
+    async def _download_pdf_with_requests(self, pdf_url: str) -> Optional[bytes]:
+        """requests로 PDF 다운로드 (fallback)"""
+        try:
+            import requests
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://kind.krx.co.kr/',
+            }
+            
+            response = requests.get(pdf_url, headers=headers, timeout=60)
+            if response.status_code == 200:
+                pdf_data = response.content
+                
+                if len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
+                    log(f"    PDF 다운로드 완료 (requests): {len(pdf_data)} bytes")
+                    return pdf_data
+            
+            return None
+        except Exception as e:
+            log(f"    requests 다운로드 오류: {e}")
+            return None
 
 
 async def main():
     """테스트용 메인 함수"""
-    # 디버그 모드로 실행
     debug_dir = os.environ.get('VALUEUP_DEBUG_DIR', '/tmp/krx_debug')
     
     async with KRXValueUpCrawler(headless=True, debug_dir=debug_dir) as crawler:
