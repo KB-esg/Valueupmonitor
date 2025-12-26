@@ -45,6 +45,18 @@ class KRXValueUpCrawler:
     VIEWER_URL = f"{BASE_URL}/common/disclsviewer.do"
     PDF_DOWNLOAD_URL = f"{BASE_URL}/common/pdfDownload.do"
     
+    # 기간 버튼 매핑
+    PERIOD_BUTTONS = {
+        '1주': '1주',
+        '1개월': '1개월',
+        '3개월': '3개월',
+        '6개월': '6개월',
+        '1년': '1년',
+        '2년': '2년',
+        '3년': '3년',
+        '전체': '전체'
+    }
+    
     def __init__(self, headless: bool = True):
         self.headless = headless
         self.browser: Optional[Browser] = None
@@ -76,17 +88,206 @@ class KRXValueUpCrawler:
         if self.playwright:
             await self.playwright.stop()
     
-    async def get_disclosure_list(self, days: int = 7) -> List[DisclosureItem]:
+    async def click_period_button(self, period: str) -> bool:
+        """
+        기간 버튼 클릭 (1주, 1개월, 3개월, 6개월, 1년, 2년, 3년, 전체)
+        
+        Args:
+            period: 기간 문자열
+            
+        Returns:
+            성공 여부
+        """
+        try:
+            # 기간 버튼 찾기 (a 태그 또는 button)
+            period_btn = self.page.locator(f'a:text-is("{period}"), button:text-is("{period}")')
+            if await period_btn.count() > 0:
+                await period_btn.first.click()
+                log(f"  → '{period}' 버튼 클릭 완료")
+                await asyncio.sleep(2)
+                return True
+            else:
+                log(f"  → '{period}' 버튼을 찾을 수 없음")
+                return False
+        except Exception as e:
+            log(f"  → 기간 버튼 클릭 오류: {e}")
+            return False
+    
+    async def click_search_button(self) -> bool:
+        """검색 버튼 클릭"""
+        try:
+            # 다양한 검색 버튼 셀렉터 시도
+            selectors = [
+                'a.btn-search',
+                'button.btn-search', 
+                'input.btn-search',
+                'a:has(img[alt="검색"])',
+                'a.search',
+                'button:text-is("검색")',
+                'input[value="검색"]',
+                'a[title="검색"]',
+                'img[alt="검색"]'
+            ]
+            
+            for selector in selectors:
+                btn = self.page.locator(selector)
+                if await btn.count() > 0:
+                    await btn.first.click()
+                    log(f"  → 검색 버튼 클릭 완료 (selector: {selector})")
+                    await asyncio.sleep(3)
+                    return True
+            
+            log("  → 검색 버튼을 찾을 수 없음")
+            return False
+        except Exception as e:
+            log(f"  → 검색 버튼 클릭 오류: {e}")
+            return False
+    
+    async def get_total_pages(self) -> int:
+        """총 페이지 수 확인"""
+        try:
+            # 페이지 정보 텍스트에서 추출 (예: "전체 51건 : 1/4")
+            page_info = self.page.locator('div.paging, span.page-info, *:text-matches("전체.*건")')
+            if await page_info.count() > 0:
+                text = await page_info.first.text_content()
+                match = re.search(r'(\d+)/(\d+)', text)
+                if match:
+                    return int(match.group(2))
+            
+            # 페이지 번호 링크에서 마지막 페이지 추출
+            page_links = await self.page.locator('div.paging a, a.page-link').all()
+            max_page = 1
+            for link in page_links:
+                text = await link.text_content()
+                if text and text.strip().isdigit():
+                    max_page = max(max_page, int(text.strip()))
+            return max_page
+        except:
+            return 1
+    
+    async def go_to_page(self, page_num: int) -> bool:
+        """특정 페이지로 이동"""
+        try:
+            # 페이지 번호 링크 클릭
+            page_link = self.page.locator(f'div.paging a:text-is("{page_num}"), a.page-link:text-is("{page_num}")')
+            if await page_link.count() > 0:
+                await page_link.first.click()
+                await asyncio.sleep(2)
+                return True
+            return False
+        except Exception as e:
+            log(f"  → 페이지 이동 오류: {e}")
+            return False
+
+    async def parse_current_page(self) -> List[DisclosureItem]:
+        """현재 페이지의 공시 목록 파싱"""
+        items = []
+        
+        # 테이블 행 추출 - 다양한 셀렉터 시도
+        rows = await self.page.locator('table.list tbody tr').all()
+        if not rows:
+            rows = await self.page.locator('table.tbl-list tbody tr').all()
+        if not rows:
+            rows = await self.page.locator('div.list table tbody tr').all()
+        if not rows:
+            rows = await self.page.locator('table tbody tr').all()
+        
+        for row in rows:
+            try:
+                cells = await row.locator('td').all()
+                if len(cells) < 4:
+                    continue
+                
+                # 번호
+                번호_text = await cells[0].text_content()
+                번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
+                
+                # 공시일자
+                공시일자 = (await cells[1].text_content() or "").strip()
+                
+                # 회사명 셀에서 회사명과 종목코드 추출
+                회사명_cell = cells[2]
+                회사명_full = (await 회사명_cell.text_content() or "").strip()
+                
+                # 회사명 (첫 번째 단어 또는 링크 텍스트)
+                회사명_link = 회사명_cell.locator('a')
+                if await 회사명_link.count() > 0:
+                    회사명 = (await 회사명_link.first.text_content() or "").strip()
+                else:
+                    회사명_parts = 회사명_full.split()
+                    회사명 = 회사명_parts[0] if 회사명_parts else ""
+                
+                # 종목코드 추출 (span 또는 텍스트에서)
+                종목코드 = ""
+                stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
+                if stock_code_match:
+                    종목코드 = stock_code_match.group()
+                
+                # 공시제목 셀
+                제목_cell = cells[3]
+                공시제목 = (await 제목_cell.text_content() or "").strip()
+                
+                # 접수번호 추출 - 제목 링크의 onclick에서
+                접수번호 = ""
+                제목_link = 제목_cell.locator('a')
+                if await 제목_link.count() > 0:
+                    onclick = await 제목_link.first.get_attribute('onclick') or ""
+                    # openDisclsViewer('20251224001157') 형태에서 추출
+                    match = re.search(r"openDisclsViewer\s*\(\s*['\"](\d+)['\"]", onclick)
+                    if match:
+                        접수번호 = match.group(1)
+                
+                # onclick에서 못 찾으면 행 전체 HTML에서 시도
+                if not 접수번호:
+                    row_html = await row.inner_html()
+                    match = re.search(r"openDisclsViewer\s*\(\s*['\"](\d+)['\"]", row_html)
+                    if match:
+                        접수번호 = match.group(1)
+                    else:
+                        # acptno 파라미터에서 추출
+                        match = re.search(r'acptno[=\'"\s:]+[\'"]?(\d+)', row_html, re.IGNORECASE)
+                        if match:
+                            접수번호 = match.group(1)
+                
+                if 접수번호:
+                    원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
+                    
+                    item = DisclosureItem(
+                        번호=번호,
+                        공시일자=공시일자,
+                        회사명=회사명,
+                        종목코드=종목코드,
+                        공시제목=공시제목,
+                        접수번호=접수번호,
+                        문서번호="",
+                        원시PDF링크=원시PDF링크
+                    )
+                    items.append(item)
+                    
+            except Exception as e:
+                log(f"  → 행 파싱 오류: {e}")
+                continue
+        
+        return items
+
+    async def get_disclosure_list(
+        self, 
+        days: int = 7,
+        period: str = None,
+        max_pages: int = 10
+    ) -> List[DisclosureItem]:
         """
         공시 목록 조회
         
         Args:
-            days: 조회할 기간(일), 기본 7일
+            days: 조회할 기간(일), period가 None일 때 사용
+            period: 기간 버튼 ('1주', '1개월', '3개월', '6개월', '1년', '전체' 등)
+            max_pages: 최대 크롤링 페이지 수
             
         Returns:
             공시 항목 리스트
         """
-        items = []
+        all_items = []
         
         # 페이지 로드
         log("  → 브라우저에서 KRX KIND 페이지 로딩 중...")
@@ -94,134 +295,81 @@ class KRXValueUpCrawler:
         log("  → 페이지 로딩 완료")
         await asyncio.sleep(3)
         
-        # 기간 설정 (최근 N일)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
-        # 날짜 입력 필드 설정 및 검색
-        try:
+        # 기간 설정
+        if period:
+            # 기간 버튼 클릭
+            log(f"  → 기간 설정: {period}")
+            await self.click_period_button(period)
+        else:
+            # 날짜 직접 입력
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
             log(f"  → 조회 기간 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
             
-            # 시작일 설정
-            start_input = self.page.locator('input[name="fromDate"]')
-            if await start_input.count() > 0:
-                await start_input.fill(start_date.strftime("%Y-%m-%d"))
-            
-            # 종료일 설정
-            end_input = self.page.locator('input[name="toDate"]')
-            if await end_input.count() > 0:
-                await end_input.fill(end_date.strftime("%Y-%m-%d"))
-            
-            # 검색 버튼 클릭 (class="btn-search" 또는 검색 이미지 버튼)
-            log("  → 검색 버튼 클릭 중...")
-            search_btn = self.page.locator('a.btn-search, button.btn-search, input.btn-search, a:has(img[alt*="검색"])')
-            if await search_btn.count() > 0:
-                await search_btn.first.click()
-                log("  → 검색 결과 대기 중...")
-                await asyncio.sleep(3)
-            else:
-                log("  → 검색 버튼을 찾을 수 없음, 기본 목록 사용")
-        except Exception as e:
-            log(f"  → 날짜 설정 중 오류 (기본값 사용): {e}")
+            try:
+                # 시작일 입력
+                start_input = self.page.locator('input#fromDate, input[name="fromDate"]')
+                if await start_input.count() > 0:
+                    await start_input.clear()
+                    await start_input.fill(start_date.strftime("%Y-%m-%d"))
+                    log(f"  → 시작일 입력 완료")
+                
+                # 종료일 입력
+                end_input = self.page.locator('input#toDate, input[name="toDate"]')
+                if await end_input.count() > 0:
+                    await end_input.clear()
+                    await end_input.fill(end_date.strftime("%Y-%m-%d"))
+                    log(f"  → 종료일 입력 완료")
+                
+                # 검색 버튼 클릭
+                await self.click_search_button()
+                
+            except Exception as e:
+                log(f"  → 날짜 설정 오류: {e}")
         
-        # 전체 페이지 수 확인 및 모든 페이지 크롤링
-        all_items = []
-        page_num = 1
+        await asyncio.sleep(2)
         
-        while True:
-            log(f"  → 페이지 {page_num} 파싱 중...")
+        # 총 페이지 수 확인
+        total_pages = await self.get_total_pages()
+        log(f"  → 총 {total_pages} 페이지 발견")
+        
+        # 각 페이지 크롤링
+        pages_to_crawl = min(total_pages, max_pages)
+        
+        for page_num in range(1, pages_to_crawl + 1):
+            log(f"  → 페이지 {page_num}/{pages_to_crawl} 파싱 중...")
             
-            # 현재 페이지의 테이블 행 추출
-            rows = await self.page.locator('table.list tbody tr, table.tbl-list tbody tr, div.list table tbody tr').all()
+            if page_num > 1:
+                if not await self.go_to_page(page_num):
+                    log(f"  → 페이지 {page_num} 이동 실패, 크롤링 종료")
+                    break
             
-            if not rows:
-                # 다른 테이블 구조 시도
-                rows = await self.page.locator('table tbody tr').all()
+            page_items = await self.parse_current_page()
+            log(f"  → 페이지 {page_num}: {len(page_items)}건 파싱 완료")
             
-            log(f"  → 페이지 {page_num}: {len(rows)}개 행 발견")
-            
-            parsed_count = 0
-            for row in rows:
-                try:
-                    cells = await row.locator('td').all()
-                    if len(cells) < 4:
-                        continue
-                    
-                    # 번호
-                    번호_text = await cells[0].text_content()
-                    번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
-                    
-                    # 공시일자
-                    공시일자 = (await cells[1].text_content() or "").strip()
-                    
-                    # 회사명 및 종목코드
-                    회사명_full = (await cells[2].text_content() or "").strip()
-                    
-                    # 회사명과 종목코드 분리
-                    회사명_parts = 회사명_full.split()
-                    회사명 = 회사명_parts[0] if 회사명_parts else ""
-                    
-                    # 종목코드 추출
-                    종목코드 = ""
-                    stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
-                    if stock_code_match:
-                        종목코드 = stock_code_match.group()
-                    
-                    # 공시제목
-                    공시제목 = (await cells[3].text_content() or "").strip()
-                    
-                    # 접수번호 추출 (행의 HTML에서)
-                    row_html = await row.inner_html()
-                    접수번호 = ""
-                    
-                    # onclick 또는 href에서 acptno 추출
-                    acptno_match = re.search(r'acptno[=\'"\s:]+[\'"]?(\d+)', row_html, re.IGNORECASE)
-                    if acptno_match:
-                        접수번호 = acptno_match.group(1)
-                    
-                    if not 접수번호:
-                        # openDisclsViewer 함수 파라미터에서 추출 시도
-                        viewer_match = re.search(r'openDisclsViewer\s*\(\s*[\'"](\d+)[\'"]', row_html)
-                        if viewer_match:
-                            접수번호 = viewer_match.group(1)
-                    
-                    if 접수번호:
-                        원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
-                        
-                        item = DisclosureItem(
-                            번호=번호,
-                            공시일자=공시일자,
-                            회사명=회사명,
-                            종목코드=종목코드,
-                            공시제목=공시제목,
-                            접수번호=접수번호,
-                            문서번호="",
-                            원시PDF링크=원시PDF링크
-                        )
-                        all_items.append(item)
-                        parsed_count += 1
-                        
-                except Exception as e:
-                    log(f"  → 행 파싱 오류: {e}")
-                    continue
-            
-            log(f"  → 페이지 {page_num}: {parsed_count}건 파싱 완료")
-            
-            # 다음 페이지 확인
-            next_btn = self.page.locator('a.next, a:has-text("다음"), a[title="다음"]')
-            if await next_btn.count() > 0 and await next_btn.first.is_visible():
-                try:
-                    await next_btn.first.click()
-                    await asyncio.sleep(2)
-                    page_num += 1
-                    if page_num > 10:  # 최대 10페이지까지만
-                        log("  → 최대 페이지(10) 도달, 크롤링 종료")
-                        break
-                except:
+            # 날짜 필터링 (period 사용 시에는 건너뜀)
+            if not period and days:
+                cutoff_date = datetime.now() - timedelta(days=days)
+                filtered_items = []
+                for item in page_items:
+                    try:
+                        # 공시일자 파싱 (YYYY-MM-DD HH:MM 형식)
+                        date_str = item.공시일자.split()[0] if item.공시일자 else ""
+                        item_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        if item_date >= cutoff_date:
+                            filtered_items.append(item)
+                    except:
+                        filtered_items.append(item)  # 파싱 실패 시 포함
+                
+                all_items.extend(filtered_items)
+                
+                # 날짜가 cutoff 이전이면 더 이상 크롤링 불필요
+                if page_items and len(filtered_items) < len(page_items):
+                    log(f"  → 기간 외 데이터 도달, 크롤링 종료")
                     break
             else:
-                log("  → 마지막 페이지 도달")
-                break
+                all_items.extend(page_items)
         
         log(f"  → 크롤링 완료: 총 {len(all_items)}건")
         return all_items
@@ -322,10 +470,11 @@ class KRXValueUpCrawler:
 async def main():
     """테스트용 메인 함수"""
     async with KRXValueUpCrawler(headless=True) as crawler:
+        # 7일간 데이터 조회
         items = await crawler.get_disclosure_list(days=7)
         
         print(f"총 {len(items)}건의 공시 발견")
-        for item in items[:5]:  # 상위 5개만 출력
+        for item in items[:5]:
             print(f"- {item.공시일자} | {item.회사명} | {item.공시제목}")
             print(f"  접수번호: {item.접수번호}")
 
