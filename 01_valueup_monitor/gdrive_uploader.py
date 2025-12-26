@@ -1,6 +1,6 @@
 """
 Google Drive 업로더
-밸류업 PDF 파일을 Google Drive에 업로드
+밸류업 PDF 파일을 Google Drive에 업로드 (공유 드라이브 지원)
 """
 
 import os
@@ -23,7 +23,7 @@ def log(message: str):
 
 
 class GDriveUploader:
-    """Google Drive 업로더"""
+    """Google Drive 업로더 (공유 드라이브 지원)"""
     
     SCOPES = [
         'https://www.googleapis.com/auth/drive.file',
@@ -36,7 +36,7 @@ class GDriveUploader:
         
         Args:
             credentials_json: 서비스 계정 JSON 파일 경로 또는 JSON 문자열
-            folder_id: 업로드할 폴더 ID (없으면 루트)
+            folder_id: 업로드할 폴더 ID (공유 드라이브 폴더 권장)
         """
         self.folder_id = folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         self.service = None
@@ -63,12 +63,15 @@ class GDriveUploader:
     
     def upload_pdf(self, pdf_data: bytes, filename: str, folder_id: Optional[str] = None) -> Optional[str]:
         """
-        PDF 파일 업로드
+        PDF 파일 업로드 (공유 드라이브 지원)
+        
+        서비스 계정은 개인 드라이브에 업로드할 수 없으므로
+        반드시 공유 드라이브(Shared Drive) 폴더에 업로드해야 합니다.
         
         Args:
             pdf_data: PDF 바이너리 데이터
             filename: 저장할 파일명
-            folder_id: 업로드할 폴더 ID (없으면 기본 폴더)
+            folder_id: 업로드할 폴더 ID (공유 드라이브 폴더)
             
         Returns:
             업로드된 파일의 웹 링크 또는 None
@@ -94,25 +97,43 @@ class GDriveUploader:
         )
         
         try:
+            # supportsAllDrives=True: 공유 드라이브 지원
             file = self.service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id, webViewLink'
+                fields='id, webViewLink',
+                supportsAllDrives=True  # 공유 드라이브 지원
             ).execute()
+            
+            file_id = file.get('id')
+            web_link = file.get('webViewLink')
             
             # 파일 공유 설정 (링크가 있는 모든 사용자가 볼 수 있도록)
-            self.service.permissions().create(
-                fileId=file['id'],
-                body={
-                    'type': 'anyone',
-                    'role': 'reader'
-                }
-            ).execute()
+            try:
+                self.service.permissions().create(
+                    fileId=file_id,
+                    body={
+                        'type': 'anyone',
+                        'role': 'reader'
+                    },
+                    supportsAllDrives=True  # 공유 드라이브 지원
+                ).execute()
+            except Exception as perm_error:
+                # 권한 설정 실패해도 업로드는 성공한 것으로 처리
+                log(f"권한 설정 경고 (무시): {perm_error}")
             
-            return file.get('webViewLink')
+            return web_link
             
         except Exception as e:
+            error_msg = str(e)
             log(f"파일 업로드 중 오류: {e}")
+            
+            # 스토리지 할당량 오류인 경우 안내 메시지
+            if 'storageQuotaExceeded' in error_msg or 'storage quota' in error_msg.lower():
+                log("  → 서비스 계정은 개인 드라이브에 업로드할 수 없습니다.")
+                log("  → 공유 드라이브(Shared Drive)를 사용하세요.")
+                log("  → VALUEUP_ARCHIVE_ID가 공유 드라이브 폴더 ID인지 확인하세요.")
+            
             return None
     
     def check_file_exists(self, filename: str, folder_id: Optional[str] = None) -> bool:
@@ -139,7 +160,9 @@ class GDriveUploader:
             results = self.service.files().list(
                 q=query,
                 spaces='drive',
-                fields='files(id, name)'
+                fields='files(id, name)',
+                supportsAllDrives=True,  # 공유 드라이브 지원
+                includeItemsFromAllDrives=True  # 공유 드라이브 항목 포함
             ).execute()
             
             return len(results.get('files', [])) > 0
@@ -173,7 +196,8 @@ class GDriveUploader:
         try:
             folder = self.service.files().create(
                 body=file_metadata,
-                fields='id'
+                fields='id',
+                supportsAllDrives=True  # 공유 드라이브 지원
             ).execute()
             
             return folder.get('id')
@@ -187,14 +211,22 @@ def main():
     """테스트용 메인 함수"""
     uploader = GDriveUploader()
     
+    if not uploader.service:
+        log("Google Drive 서비스 초기화 실패")
+        return
+    
+    log("Google Drive 연결 성공")
+    log(f"대상 폴더 ID: {uploader.folder_id}")
+    
     # 테스트용 PDF 데이터
-    test_pdf = b'%PDF-1.4 test'
+    test_pdf = b'%PDF-1.4\n1 0 obj\n<</Type/Catalog>>\nendobj\ntrailer<</Root 1 0 R>>'
     
     link = uploader.upload_pdf(test_pdf, 'test_valueup.pdf')
     if link:
         log(f"업로드 성공: {link}")
     else:
         log("업로드 실패")
+        log("참고: 서비스 계정은 공유 드라이브에만 업로드 가능합니다.")
 
 
 if __name__ == "__main__":
