@@ -79,15 +79,37 @@ export GOOGLE_SERVICE='{"type": "service_account", ...}'
 export VALUEUP_GSPREAD_ID='your-spreadsheet-id'
 export VALUEUP_ARCHIVE_ID='your-folder-id'
 
-# 실행
+# 기본 실행 (최근 7일)
 cd 01_valueup_monitor
 python main.py
+
+# 기간 옵션 사용
+python main.py --days 30              # 최근 30일
+python main.py --period 3개월          # 3개월 버튼 클릭
+python main.py --period 전체           # 전체 기간
+
+# 추가 옵션
+python main.py --max-pages 20          # 최대 20페이지 크롤링
+python main.py --skip-pdf              # PDF 업로드 건너뛰기
+python main.py --period 1년 --skip-pdf # 1년 데이터, PDF 없이 목록만
 ```
+
+### CLI 옵션
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--days`, `-d` | 조회 기간(일) | 7 |
+| `--period`, `-p` | 기간 버튼 (1주, 1개월, 3개월, 6개월, 1년, 전체) | - |
+| `--max-pages`, `-m` | 최대 크롤링 페이지 수 | 10 |
+| `--skip-pdf` | PDF 다운로드/업로드 건너뛰기 | false |
 
 ### GitHub Actions
 
 - **자동 실행**: 매주 일요일 자정(UTC) = 월요일 오전 9시(KST)
 - **수동 실행**: Actions 탭에서 "Run workflow" 클릭
+  - 기간 버튼 선택 가능 (1주, 1개월, 3개월, 6개월, 1년, 전체)
+  - 최대 페이지 수 설정 가능
+  - PDF 업로드 건너뛰기 옵션
 
 ## 라이선스
 
