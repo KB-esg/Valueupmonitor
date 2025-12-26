@@ -13,7 +13,7 @@ KRX KIND 사이트에서 기업가치 제고(밸류업) 공시를 자동으로 �
 ## 파일 구조
 
 ```
-valueup_monitor/
+01_valueup_monitor/
 ├── __init__.py              # 패키지 초기화
 ├── krx_valueup_crawler.py   # KRX 크롤러 (Playwright)
 ├── gdrive_uploader.py       # Google Drive 업로더
@@ -46,9 +46,9 @@ requirements/
 ### 3. GitHub Secrets 설정
 
 ```
-GOOGLE_CREDENTIALS    # 서비스 계정 JSON 전체 (한 줄로)
-GSHEET_SPREADSHEET_ID # 스프레드시트 ID
-GDRIVE_FOLDER_ID      # (선택) Google Drive 폴더 ID
+GOOGLE_SERVICE        # 서비스 계정 JSON 전체 (한 줄로)
+VALUEUP_GSPREAD_ID    # 스프레드시트 ID
+VALUEUP_ARCHIVE_ID    # Google Drive 폴더 ID
 ```
 
 ## Google Sheets 구조
@@ -75,12 +75,12 @@ pip install -r requirements/requirements_valueup_read.txt
 playwright install chromium
 
 # 환경변수 설정
-export GOOGLE_CREDENTIALS='{"type": "service_account", ...}'
-export GSHEET_SPREADSHEET_ID='your-spreadsheet-id'
-export GDRIVE_FOLDER_ID='your-folder-id'  # 선택사항
+export GOOGLE_SERVICE='{"type": "service_account", ...}'
+export VALUEUP_GSPREAD_ID='your-spreadsheet-id'
+export VALUEUP_ARCHIVE_ID='your-folder-id'
 
 # 실행
-cd valueup_monitor
+cd 01_valueup_monitor
 python main.py
 ```
 
