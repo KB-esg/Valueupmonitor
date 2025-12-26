@@ -36,8 +36,7 @@ class GDriveUploader:
     """Google Drive 업로더 (OAuth2 + 서비스 계정 지원)"""
     
     SCOPES = [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/drive'
+        'https://www.googleapis.com/auth/drive.file'  # 앱이 생성한 파일만 접근 (심사 불필요)
     ]
     
     def __init__(
