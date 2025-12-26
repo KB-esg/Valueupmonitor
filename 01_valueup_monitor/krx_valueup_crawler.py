@@ -59,16 +59,26 @@ class KRXValueUpCrawler:
         
         Args:
             headless: 헤드리스 모드 여부
-            debug_dir: 디버그 파일 저장 디렉토리 (None이면 디버그 비활성화)
+            debug_dir: 디버그 파일 저장 디렉토리 (None이면 환경변수에서 읽음)
         """
         self.headless = headless
-        self.debug_dir = debug_dir
+        # 환경변수에서 디버그 디렉토리 읽기
+        if debug_dir is None:
+            env_debug = os.environ.get('VALUEUP_DEBUG', 'false').lower()
+            if env_debug == 'true':
+                self.debug_dir = os.environ.get('VALUEUP_DEBUG_DIR', '/tmp/krx_debug')
+            else:
+                self.debug_dir = None
+        else:
+            self.debug_dir = debug_dir
+            
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
         
         # 디버그 디렉토리 생성
         if self.debug_dir:
             os.makedirs(self.debug_dir, exist_ok=True)
+            log(f"디버그 모드 활성화: {self.debug_dir}")
         
     async def __aenter__(self):
         await self.start()
@@ -106,8 +116,11 @@ class KRXValueUpCrawler:
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = os.path.join(self.debug_dir, f"{timestamp}_{name}.png")
-        await page.screenshot(path=filepath, full_page=True)
-        log(f"  [DEBUG] 스크린샷 저장: {filepath}")
+        try:
+            await page.screenshot(path=filepath, full_page=True)
+            log(f"  [DEBUG] 스크린샷 저장: {filepath}")
+        except Exception as e:
+            log(f"  [DEBUG] 스크린샷 저장 실패: {e}")
     
     async def _save_debug_html(self, page: Page, name: str):
         """디버그용 HTML 저장"""
@@ -116,10 +129,13 @@ class KRXValueUpCrawler:
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = os.path.join(self.debug_dir, f"{timestamp}_{name}.html")
-        content = await page.content()
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
-        log(f"  [DEBUG] HTML 저장: {filepath}")
+        try:
+            content = await page.content()
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            log(f"  [DEBUG] HTML 저장: {filepath}")
+        except Exception as e:
+            log(f"  [DEBUG] HTML 저장 실패: {e}")
     
     async def _save_debug_js(self, page: Page, name: str, script_selector: str = "script"):
         """디버그용 JavaScript 저장"""
@@ -129,20 +145,23 @@ class KRXValueUpCrawler:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = os.path.join(self.debug_dir, f"{timestamp}_{name}.js")
         
-        # 모든 스크립트 태그 내용 추출
-        scripts = await page.locator(script_selector).all()
-        js_content = []
-        for i, script in enumerate(scripts):
-            try:
-                text = await script.text_content()
-                if text and text.strip():
-                    js_content.append(f"// === Script {i+1} ===\n{text}\n")
-            except:
-                pass
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(js_content))
-        log(f"  [DEBUG] JS 저장: {filepath}")
+        try:
+            # 모든 스크립트 태그 내용 추출
+            scripts = await page.locator(script_selector).all()
+            js_content = []
+            for i, script in enumerate(scripts):
+                try:
+                    text = await script.text_content()
+                    if text and text.strip():
+                        js_content.append(f"// === Script {i+1} ===\n{text}\n")
+                except:
+                    pass
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(js_content))
+            log(f"  [DEBUG] JS 저장: {filepath}")
+        except Exception as e:
+            log(f"  [DEBUG] JS 저장 실패: {e}")
     
     async def click_period_button(self, period: str) -> bool:
         """
@@ -159,8 +178,11 @@ class KRXValueUpCrawler:
             return False
         
         try:
-            # 여러 셀렉터 시도
+            # 밸류업 페이지의 기간 버튼 셀렉터 (더 구체적)
             selectors = [
+                f'.period-btn:has-text("{period}")',
+                f'.search-period a:has-text("{period}")',
+                f'a.period:has-text("{period}")',
                 f'a:has-text("{period}")',
                 f'button:has-text("{period}")',
                 f'span:has-text("{period}")',
@@ -183,25 +205,44 @@ class KRXValueUpCrawler:
             return False
     
     async def click_search_button(self) -> bool:
-        """검색 버튼 클릭"""
+        """검색 버튼 클릭 - 밸류업 페이지에 특화된 셀렉터 사용"""
         try:
+            # 밸류업 페이지의 검색 버튼 셀렉터 (더 구체적인 것부터 시도)
             selectors = [
-                'a.btn-search',
-                'button:has-text("검색")',
-                'a:has-text("검색")',
-                'input[value="검색"]',
+                # 이미지 버튼 (가장 일반적)
                 'img[alt="검색"]',
+                'a:has(img[alt="검색"])',
+                # 클래스 기반
+                'a.btn-search',
+                'button.btn-search',
+                '.search-btn',
+                # 검색 영역 내 버튼
+                '.search-area a:has-text("검색")',
+                '.search-box a:has-text("검색")',
+                'form a:has-text("검색")',
+                # input 버튼
+                'input[type="button"][value="검색"]',
+                'input[type="submit"][value="검색"]',
+                # 정확한 텍스트 매칭 (회사별검색 등 제외)
+                'a:text-is("검색")',
+                'button:text-is("검색")',
             ]
             
             for selector in selectors:
-                btn = self.page.locator(selector).first
-                if await btn.count() > 0:
-                    await btn.click()
-                    log("  검색 버튼 클릭")
-                    await asyncio.sleep(2)
-                    return True
+                try:
+                    btn = self.page.locator(selector).first
+                    if await btn.count() > 0:
+                        # 버튼이 보이는지 확인
+                        is_visible = await btn.is_visible()
+                        if is_visible:
+                            await btn.click()
+                            log(f"  검색 버튼 클릭 성공: {selector}")
+                            await asyncio.sleep(2)
+                            return True
+                except Exception:
+                    continue
             
-            log("  검색 버튼을 찾을 수 없음")
+            log("  검색 버튼을 찾을 수 없음 (검색 없이 계속 진행)")
             return False
             
         except Exception as e:
@@ -255,71 +296,129 @@ class KRXValueUpCrawler:
             return False
     
     async def parse_current_page(self) -> List[DisclosureItem]:
-        """현재 페이지의 공시 목록 파싱"""
+        """현재 페이지의 공시 목록 파싱 - 밸류업 페이지 특화"""
         items = []
         
-        # 테이블 행 추출
-        rows = await self.page.locator('table tbody tr').all()
+        # 테이블 행 추출 (여러 셀렉터 시도)
+        table_selectors = [
+            'table.list tbody tr',
+            'table tbody tr',
+            '.board-list tbody tr',
+            '#grid tbody tr',
+        ]
+        
+        rows = []
+        for selector in table_selectors:
+            rows = await self.page.locator(selector).all()
+            if rows:
+                log(f"  테이블 셀렉터 사용: {selector}")
+                break
+        
         log(f"  현재 페이지 행 수: {len(rows)}")
         
-        for row in rows:
+        for row_idx, row in enumerate(rows):
             try:
+                # 행 전체 HTML 로깅 (디버그용)
+                row_html = await row.inner_html()
+                if row_idx == 0 and self.debug_dir:
+                    log(f"  [DEBUG] 첫 번째 행 HTML (처음 500자): {row_html[:500]}")
+                
                 cells = await row.locator('td').all()
-                if len(cells) < 4:
+                if len(cells) < 3:
                     continue
                 
-                # 번호
-                번호_text = await cells[0].text_content()
-                번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
-                
-                # 공시일자
-                공시일자 = (await cells[1].text_content() or "").strip()
-                
-                # 회사명 및 종목코드
-                company_cell = cells[2]
-                회사명_full = (await company_cell.text_content() or "").strip()
-                회사명 = 회사명_full.split()[0] if 회사명_full else ""
-                
-                # 종목코드 추출
-                종목코드 = ""
-                stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
-                if stock_code_match:
-                    종목코드 = stock_code_match.group()
-                
-                # 공시제목
-                공시제목 = (await cells[3].text_content() or "").strip()
-                
-                # 접수번호 추출 - 제목 링크의 onclick에서
+                # 접수번호 추출 - 여러 패턴 시도
                 접수번호 = ""
-                title_link = row.locator('td a').first
-                if await title_link.count() > 0:
-                    onclick = await title_link.get_attribute('onclick') or ""
-                    # openDisclsViewer('20251217000377') 패턴
-                    match = re.search(r"openDisclsViewer\s*\(\s*['\"]?(\d+)['\"]?", onclick)
+                
+                # 패턴 1: openDisclsViewer('접수번호')
+                match = re.search(r"openDisclsViewer\s*\(\s*['\"]?(\d+)['\"]?", row_html)
+                if match:
+                    접수번호 = match.group(1)
+                
+                # 패턴 2: openPop('접수번호') 또는 다른 팝업 함수
+                if not 접수번호:
+                    match = re.search(r"openPop\s*\(\s*['\"]?(\d+)['\"]?", row_html)
                     if match:
                         접수번호 = match.group(1)
                 
-                # 접수번호가 없으면 다른 방식 시도
+                # 패턴 3: acptno=접수번호 또는 acptNo=접수번호
                 if not 접수번호:
-                    all_html = await row.inner_html()
-                    acptno_match = re.search(r'acptno[=\'"\s:]+(\d+)', all_html, re.IGNORECASE)
-                    if acptno_match:
-                        접수번호 = acptno_match.group(1)
+                    match = re.search(r'acpt[Nn]o[=\'"\s:]+(\d{14,})', row_html)
+                    if match:
+                        접수번호 = match.group(1)
                 
-                if 접수번호:
-                    원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
+                # 패턴 4: href에서 접수번호 추출
+                if not 접수번호:
+                    match = re.search(r'href="[^"]*?(\d{14,})[^"]*"', row_html)
+                    if match:
+                        접수번호 = match.group(1)
+                
+                # 패턴 5: onclick에서 14자리 이상 숫자 추출
+                if not 접수번호:
+                    match = re.search(r'onclick="[^"]*?(\d{14,})[^"]*"', row_html)
+                    if match:
+                        접수번호 = match.group(1)
+                
+                # 패턴 6: 어떤 속성이든 14자리 숫자 추출
+                if not 접수번호:
+                    match = re.search(r'[\'"](\d{14,})[\'"]', row_html)
+                    if match:
+                        접수번호 = match.group(1)
+                
+                if not 접수번호:
+                    log(f"  [SKIP] 행 {row_idx}: 접수번호 추출 실패")
+                    continue
+                
+                log(f"  [FOUND] 접수번호: {접수번호}")
+                
+                # 번호 (첫 번째 셀)
+                번호_text = await cells[0].text_content()
+                번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
+                
+                # 셀 개수에 따라 다른 파싱 로직
+                if len(cells) >= 5:
+                    # 일반적인 구조: 번호 | 공시일자 | 회사명 | 종목코드 | 공시제목
+                    공시일자 = (await cells[1].text_content() or "").strip()
+                    회사명 = (await cells[2].text_content() or "").strip().split()[0] if await cells[2].text_content() else ""
+                    종목코드_text = (await cells[3].text_content() or "").strip()
+                    공시제목 = (await cells[4].text_content() or "").strip()
                     
-                    item = DisclosureItem(
-                        번호=번호,
-                        공시일자=공시일자,
-                        회사명=회사명,
-                        종목코드=종목코드,
-                        공시제목=공시제목,
-                        접수번호=접수번호,
-                        문서번호="",
-                        원시PDF링크=원시PDF링크
-                    )
-                    items.append(item)
+                elif len(cells) >= 4:
+                    # 대체 구조: 번호 | 공시일자 | 회사명(종목코드) | 공시제목
+                    공시일자 = (await cells[1].text_content() or "").strip()
+                    회사명_full = (await cells[2].text_content() or "").strip()
+                    회사명 = 회사명_full.split()[0] if 회사명_full else ""
+                    종목코드_text = 회사명_full
+                    공시제목 = (await cells[3].text_content() or "").strip()
+                    
+                else:
+                    # 최소 구조
+                    공시일자 = (await cells[1].text_content() or "").strip() if len(cells) > 1 else ""
+                    회사명 = ""
+                    종목코드_text = ""
+                    공시제목 = ""
+                
+                # 종목코드 추출 (6자리 숫자)
+                종목코드 = ""
+                if 종목코드_text:
+                    stock_match = re.search(r'[A-Z]?\d{6}', 종목코드_text)
+                    if stock_match:
+                        종목코드 = stock_match.group()
+                
+                원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
+                
+                item = DisclosureItem(
+                    번호=번호,
+                    공시일자=공시일자,
+                    회사명=회사명,
+                    종목코드=종목코드,
+                    공시제목=공시제목,
+                    접수번호=접수번호,
+                    문서번호="",
+                    원시PDF링크=원시PDF링크
+                )
+                items.append(item)
+                log(f"  [OK] {공시일자} | {회사명} | {공시제목[:30]}...")
                     
             except Exception as e:
                 log(f"  행 파싱 오류: {e}")
@@ -349,11 +448,12 @@ class KRXValueUpCrawler:
         # 페이지 로드
         log(f"공시 목록 페이지 로드 중...")
         await self.page.goto(self.LIST_URL, wait_until="networkidle")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         
         # 디버그: 초기 페이지 저장
         await self._save_debug_screenshot(self.page, "01_list_initial")
         await self._save_debug_html(self.page, "01_list_initial")
+        await self._save_debug_js(self.page, "01_list_initial")
         
         # 기간 설정
         if period:
@@ -367,15 +467,27 @@ class KRXValueUpCrawler:
             log(f"날짜 범위 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
             
             try:
-                start_input = self.page.locator('input[name="fromDate"], input#fromDate').first
-                if await start_input.count() > 0:
-                    await start_input.fill(start_date.strftime("%Y-%m-%d"))
+                # 날짜 입력 필드 찾기 (여러 셀렉터 시도)
+                start_selectors = ['input#fromDate', 'input[name="fromDate"]', 'input.from-date']
+                end_selectors = ['input#toDate', 'input[name="toDate"]', 'input.to-date']
                 
-                end_input = self.page.locator('input[name="toDate"], input#toDate').first
-                if await end_input.count() > 0:
-                    await end_input.fill(end_date.strftime("%Y-%m-%d"))
+                for selector in start_selectors:
+                    start_input = self.page.locator(selector).first
+                    if await start_input.count() > 0:
+                        await start_input.fill(start_date.strftime("%Y-%m-%d"))
+                        log(f"  시작일 입력 완료: {selector}")
+                        break
                 
+                for selector in end_selectors:
+                    end_input = self.page.locator(selector).first
+                    if await end_input.count() > 0:
+                        await end_input.fill(end_date.strftime("%Y-%m-%d"))
+                        log(f"  종료일 입력 완료: {selector}")
+                        break
+                
+                # 검색 버튼 클릭 (실패해도 계속 진행)
                 await self.click_search_button()
+                
             except Exception as e:
                 log(f"날짜 설정 오류: {e}")
         
@@ -401,7 +513,16 @@ class KRXValueUpCrawler:
                 filtered_items = []
                 for item in page_items:
                     try:
-                        item_date = datetime.strptime(item.공시일자, "%Y-%m-%d")
+                        # 다양한 날짜 형식 처리
+                        date_str = item.공시일자.replace('.', '-').strip()
+                        if len(date_str) == 10:  # YYYY-MM-DD
+                            item_date = datetime.strptime(date_str, "%Y-%m-%d")
+                        elif len(date_str) == 8:  # YYYYMMDD
+                            item_date = datetime.strptime(date_str, "%Y%m%d")
+                        else:
+                            filtered_items.append(item)
+                            continue
+                            
                         if item_date >= cutoff_date:
                             filtered_items.append(item)
                     except:
@@ -615,7 +736,7 @@ class KRXValueUpCrawler:
 async def main():
     """테스트용 메인 함수"""
     # 디버그 모드로 실행
-    debug_dir = "/tmp/krx_debug"
+    debug_dir = os.environ.get('VALUEUP_DEBUG_DIR', '/tmp/krx_debug')
     
     async with KRXValueUpCrawler(headless=True, debug_dir=debug_dir) as crawler:
         log("=== 공시 목록 조회 테스트 ===")
