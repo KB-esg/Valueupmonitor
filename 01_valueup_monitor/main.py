@@ -9,10 +9,20 @@ import sys
 import json
 from dataclasses import asdict
 from typing import Optional
+from datetime import datetime
+
+# stdout 버퍼링 해제 (GitHub Actions에서 실시간 출력)
+sys.stdout.reconfigure(line_buffering=True)
 
 from krx_valueup_crawler import KRXValueUpCrawler, DisclosureItem
 from gdrive_uploader import GDriveUploader
 from gsheet_manager import GSheetManager
+
+
+def log(message: str):
+    """타임스탬프와 함께 로그 출력 (즉시 flush)"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 def get_service_account_email() -> str:
@@ -79,59 +89,59 @@ class ValueUpMonitor:
             'errors': []
         }
         
-        print("=" * 60)
-        print("KRX Value-Up 공시 모니터 시작")
-        print("=" * 60)
-        print(f"서비스 계정: {get_service_account_email()}")
-        print(f"스프레드시트 ID: {self.spreadsheet_id}")
-        print(f"드라이브 폴더 ID: {self.gdrive_folder_id}")
-        print(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
-        print(f"Google Drive 연결: {'성공' if self.drive_ready else '실패'}")
+        log("=" * 60)
+        log("KRX Value-Up 공시 모니터 시작")
+        log("=" * 60)
+        log(f"서비스 계정: {get_service_account_email()}")
+        log(f"스프레드시트 ID: {self.spreadsheet_id}")
+        log(f"드라이브 폴더 ID: {self.gdrive_folder_id}")
+        log(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
+        log(f"Google Drive 연결: {'성공' if self.drive_ready else '실패'}")
         
         if not self.sheet_ready:
-            print("\n[오류] Google Sheets에 연결할 수 없습니다.")
-            print("  → 서비스 계정에 스프레드시트 편집 권한이 있는지 확인하세요.")
+            log("[오류] Google Sheets에 연결할 수 없습니다.")
+            log("  → 서비스 계정에 스프레드시트 편집 권한이 있는지 확인하세요.")
             result['errors'].append("Google Sheets 연결 실패")
             return result
         
         # 1. KRX에서 공시 목록 크롤링
-        print(f"\n[1단계] KRX에서 최근 {self.days}일간 공시 목록 조회 중...")
+        log(f"[1단계] KRX에서 최근 {self.days}일간 공시 목록 조회 중...")
         
         async with KRXValueUpCrawler(headless=True) as crawler:
             try:
                 items = await crawler.get_disclosure_list(days=self.days)
                 result['total_found'] = len(items)
-                print(f"  → 총 {len(items)}건의 공시 발견")
+                log(f"  → 총 {len(items)}건의 공시 발견")
                 
                 if not items:
-                    print("  → 새로운 공시가 없습니다.")
+                    log("  → 새로운 공시가 없습니다.")
                     return result
                 
                 # 2. Google Sheets에 새 항목 추가
-                print("\n[2단계] Google Sheets에 공시 목록 기록 중...")
+                log("[2단계] Google Sheets에 공시 목록 기록 중...")
                 
                 disclosures = [asdict(item) for item in items]
                 new_count = self.sheet_manager.append_disclosures(disclosures)
                 result['new_added'] = new_count
-                print(f"  → {new_count}건의 새로운 공시 추가됨")
+                log(f"  → {new_count}건의 새로운 공시 추가됨")
                 
                 if new_count == 0:
-                    print("  → 모든 공시가 이미 기록되어 있습니다.")
+                    log("  → 모든 공시가 이미 기록되어 있습니다.")
                     return result
                 
                 # 3. PDF 다운로드 및 Google Drive 업로드
-                print("\n[3단계] PDF 다운로드 및 Google Drive 업로드 중...")
+                log("[3단계] PDF 다운로드 및 Google Drive 업로드 중...")
                 
                 # 구글드라이브 링크가 없는 항목 조회
                 pending_items = self.sheet_manager.get_items_without_gdrive_link()
-                print(f"  → 업로드 대기 항목: {len(pending_items)}건")
+                log(f"  → 업로드 대기 항목: {len(pending_items)}건")
                 
                 for idx, item in enumerate(pending_items, 1):
                     acptno = item.get('접수번호', '')
                     company = item.get('회사명', '')
                     date = item.get('공시일자', '').replace('-', '')
                     
-                    print(f"  [{idx}/{len(pending_items)}] {company} ({acptno})...")
+                    log(f"  [{idx}/{len(pending_items)}] {company} ({acptno})...")
                     
                     try:
                         # PDF 다운로드
@@ -148,7 +158,7 @@ class ValueUpMonitor:
                                 # 시트에 링크 업데이트
                                 self.sheet_manager.update_gdrive_link(acptno, gdrive_link)
                                 result['pdf_uploaded'] += 1
-                                print(f"      → 업로드 완료: {gdrive_link}")
+                                log(f"      → 업로드 완료: {gdrive_link}")
                             else:
                                 result['errors'].append(f"Drive 업로드 실패: {acptno}")
                         else:
@@ -157,27 +167,27 @@ class ValueUpMonitor:
                     except Exception as e:
                         error_msg = f"{acptno}: {str(e)}"
                         result['errors'].append(error_msg)
-                        print(f"      → 오류: {e}")
+                        log(f"      → 오류: {e}")
                     
                     # 요청 간 딜레이
                     await asyncio.sleep(2)
                 
             except Exception as e:
                 result['errors'].append(f"크롤링 오류: {str(e)}")
-                print(f"오류 발생: {e}")
+                log(f"오류 발생: {e}")
         
         # 결과 출력
-        print("\n" + "=" * 60)
-        print("실행 결과 요약")
-        print("=" * 60)
-        print(f"  발견된 공시: {result['total_found']}건")
-        print(f"  새로 추가됨: {result['new_added']}건")
-        print(f"  PDF 업로드: {result['pdf_uploaded']}건")
+        log("=" * 60)
+        log("실행 결과 요약")
+        log("=" * 60)
+        log(f"  발견된 공시: {result['total_found']}건")
+        log(f"  새로 추가됨: {result['new_added']}건")
+        log(f"  PDF 업로드: {result['pdf_uploaded']}건")
         if result['errors']:
-            print(f"  오류: {len(result['errors'])}건")
+            log(f"  오류: {len(result['errors'])}건")
             for err in result['errors']:
-                print(f"    - {err}")
-        print("=" * 60)
+                log(f"    - {err}")
+        log("=" * 60)
         
         return result
 
