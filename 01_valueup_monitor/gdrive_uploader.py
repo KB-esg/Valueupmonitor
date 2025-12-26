@@ -2,6 +2,12 @@
 Google Drive 업로더 (OAuth2 지원)
 개인 마이 드라이브에 PDF 파일 업로드
 
+폴더 구조:
+- 01_Valueup_archive (VALUEUP_ARCHIVE_ID)
+  └── PDF_archive
+      └── YY_MM (예: 25_12)
+          └── PDF 파일들
+
 인증 방식:
 1. OAuth2 (권장): 개인 계정의 마이 드라이브에 업로드
 2. 서비스 계정: 공유 드라이브에만 업로드 가능
@@ -36,7 +42,8 @@ class GDriveUploader:
     """Google Drive 업로더 (OAuth2 + 서비스 계정 지원)"""
     
     SCOPES = [
-        'https://www.googleapis.com/auth/drive.file'  # 앱이 생성한 파일만 접근 (심사 불필요)
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/drive'
     ]
     
     def __init__(
@@ -53,7 +60,7 @@ class GDriveUploader:
         초기화
         
         Args:
-            folder_id: 업로드할 폴더 ID (없으면 루트)
+            folder_id: 기본 폴더 ID (01_Valueup_archive)
             refresh_token: OAuth2 리프레시 토큰
             client_id: OAuth2 클라이언트 ID
             client_secret: OAuth2 클라이언트 시크릿
@@ -62,6 +69,7 @@ class GDriveUploader:
         self.folder_id = folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         self.service = None
         self.auth_method = None
+        self._folder_cache = {}  # 폴더 ID 캐시: {(parent_id, folder_name): folder_id}
         
         # 환경변수에서 OAuth2 인증 정보 로드
         refresh_token = refresh_token or os.environ.get('GDRIVE_REFRESH_TOKEN')
@@ -121,14 +129,165 @@ class GDriveUploader:
         
         self.service = build('drive', 'v3', credentials=creds)
     
-    def upload_pdf(self, pdf_data: bytes, filename: str, folder_id: Optional[str] = None) -> Optional[str]:
+    def find_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
+        """
+        폴더 찾기
+        
+        Args:
+            folder_name: 폴더명
+            parent_id: 부모 폴더 ID
+            
+        Returns:
+            폴더 ID 또는 None
+        """
+        if not self.service:
+            return None
+        
+        # 캐시 확인
+        cache_key = (parent_id, folder_name)
+        if cache_key in self._folder_cache:
+            return self._folder_cache[cache_key]
+        
+        query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        if parent_id:
+            query += f" and '{parent_id}' in parents"
+        
+        try:
+            results = self.service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)',
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            files = results.get('files', [])
+            if files:
+                folder_id = files[0]['id']
+                self._folder_cache[cache_key] = folder_id
+                return folder_id
+            return None
+            
+        except Exception as e:
+            log(f"폴더 검색 중 오류: {e}")
+            return None
+    
+    def create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
+        """
+        폴더 생성
+        
+        Args:
+            folder_name: 폴더명
+            parent_id: 상위 폴더 ID
+            
+        Returns:
+            생성된 폴더 ID 또는 None
+        """
+        if not self.service:
+            return None
+        
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        
+        if parent_id:
+            file_metadata['parents'] = [parent_id]
+        
+        try:
+            folder = self.service.files().create(
+                body=file_metadata,
+                fields='id',
+                supportsAllDrives=True
+            ).execute()
+            
+            folder_id = folder.get('id')
+            
+            # 캐시에 저장
+            cache_key = (parent_id, folder_name)
+            self._folder_cache[cache_key] = folder_id
+            
+            log(f"  폴더 생성됨: {folder_name} (ID: {folder_id[:20]}...)")
+            return folder_id
+            
+        except Exception as e:
+            log(f"폴더 생성 중 오류: {e}")
+            return None
+    
+    def get_or_create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
+        """
+        폴더가 있으면 ID 반환, 없으면 생성
+        
+        Args:
+            folder_name: 폴더명
+            parent_id: 부모 폴더 ID
+            
+        Returns:
+            폴더 ID 또는 None
+        """
+        # 먼저 기존 폴더 찾기
+        folder_id = self.find_folder(folder_name, parent_id)
+        if folder_id:
+            return folder_id
+        
+        # 없으면 생성
+        return self.create_folder(folder_name, parent_id)
+    
+    def get_monthly_folder_id(self, date: Optional[datetime] = None) -> Optional[str]:
+        """
+        월별 폴더 ID 반환 (없으면 생성)
+        
+        폴더 구조: 01_Valueup_archive / PDF_archive / YY_MM
+        
+        Args:
+            date: 대상 날짜 (기본: 현재 날짜)
+            
+        Returns:
+            월별 폴더 ID 또는 None
+        """
+        if not self.service:
+            return None
+        
+        if not self.folder_id:
+            log("  기본 폴더 ID(VALUEUP_ARCHIVE_ID)가 설정되지 않음")
+            return None
+        
+        date = date or datetime.now()
+        month_folder_name = date.strftime("%y_%m")  # 예: 25_12
+        
+        log(f"  폴더 경로 확인: PDF_archive/{month_folder_name}")
+        
+        # 1. PDF_archive 폴더 확인/생성
+        pdf_archive_id = self.get_or_create_folder("PDF_archive", self.folder_id)
+        if not pdf_archive_id:
+            log("  PDF_archive 폴더 생성 실패")
+            return None
+        
+        # 2. 월별 폴더 확인/생성 (예: 25_12)
+        monthly_folder_id = self.get_or_create_folder(month_folder_name, pdf_archive_id)
+        if not monthly_folder_id:
+            log(f"  {month_folder_name} 폴더 생성 실패")
+            return None
+        
+        return monthly_folder_id
+    
+    def upload_pdf(
+        self, 
+        pdf_data: bytes, 
+        filename: str, 
+        folder_id: Optional[str] = None,
+        use_monthly_folder: bool = True,
+        date: Optional[datetime] = None
+    ) -> Optional[str]:
         """
         PDF 파일 업로드
         
         Args:
             pdf_data: PDF 바이너리 데이터
             filename: 저장할 파일명
-            folder_id: 업로드할 폴더 ID (없으면 기본 폴더)
+            folder_id: 업로드할 폴더 ID (없으면 월별 폴더 사용)
+            use_monthly_folder: 월별 폴더 사용 여부 (기본: True)
+            date: 파일 날짜 (월별 폴더 결정용)
             
         Returns:
             업로드된 파일의 웹 링크 또는 None
@@ -139,7 +298,16 @@ class GDriveUploader:
             log("Google Drive 서비스가 초기화되지 않았습니다.")
             return None
         
-        target_folder = folder_id or self.folder_id
+        # 대상 폴더 결정
+        if folder_id:
+            target_folder = folder_id
+        elif use_monthly_folder:
+            target_folder = self.get_monthly_folder_id(date)
+            if not target_folder:
+                log("  월별 폴더 생성 실패, 기본 폴더에 업로드")
+                target_folder = self.folder_id
+        else:
+            target_folder = self.folder_id
         
         file_metadata = {
             'name': filename,
@@ -156,7 +324,6 @@ class GDriveUploader:
         )
         
         try:
-            # supportsAllDrives: 서비스 계정의 공유 드라이브 지원
             file = self.service.files().create(
                 body=file_metadata,
                 media_body=media,
@@ -228,41 +395,6 @@ class GDriveUploader:
         except Exception as e:
             log(f"파일 확인 중 오류: {e}")
             return False
-    
-    def create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
-        """
-        폴더 생성
-        
-        Args:
-            folder_name: 폴더명
-            parent_id: 상위 폴더 ID
-            
-        Returns:
-            생성된 폴더 ID 또는 None
-        """
-        if not self.service:
-            return None
-        
-        file_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        
-        if parent_id:
-            file_metadata['parents'] = [parent_id]
-        
-        try:
-            folder = self.service.files().create(
-                body=file_metadata,
-                fields='id',
-                supportsAllDrives=True
-            ).execute()
-            
-            return folder.get('id')
-            
-        except Exception as e:
-            log(f"폴더 생성 중 오류: {e}")
-            return None
 
 
 def main():
@@ -279,7 +411,11 @@ def main():
         return
     
     log(f"인증 방식: {uploader.auth_method}")
-    log(f"대상 폴더 ID: {uploader.folder_id or '(루트)'}")
+    log(f"기본 폴더 ID: {uploader.folder_id or '(루트)'}")
+    
+    # 월별 폴더 테스트
+    monthly_id = uploader.get_monthly_folder_id()
+    log(f"월별 폴더 ID: {monthly_id}")
     
     # 테스트용 PDF 데이터
     test_pdf = b'%PDF-1.4\n1 0 obj\n<</Type/Catalog>>\nendobj\ntrailer<</Root 1 0 R>>'
