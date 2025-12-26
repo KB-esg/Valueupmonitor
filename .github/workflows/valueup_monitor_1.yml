@@ -9,30 +9,19 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: '조회 기간 (일) - period 미선택 시 사용'
+        description: '조회 기간 (일)'
         required: false
         default: '7'
-      period:
-        description: '기간 버튼 선택'
+      debug:
+        description: '디버그 모드 활성화'
         required: false
-        type: choice
-        options:
-          - ''
-          - '1주'
-          - '1개월'
-          - '3개월'
-          - '6개월'
-          - '1년'
-          - '전체'
-      max_pages:
-        description: '최대 크롤링 페이지 수'
-        required: false
-        default: '10'
-      skip_pdf:
-        description: 'PDF 업로드 건너뛰기'
-        required: false
+        default: 'true'
         type: boolean
-        default: false
+
+# 아티팩트 업로드 권한
+permissions:
+  contents: read
+  actions: write
 
 env:
   PYTHON_VERSION: '3.11'
@@ -61,43 +50,43 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
       
+      - name: Create debug directory
+        run: mkdir -p /tmp/krx_debug
+      
       - name: Run Value-Up Monitor
         env:
           GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
           VALUEUP_GSPREAD_ID: ${{ secrets.VALUEUP_GSPREAD_ID }}
           VALUEUP_ARCHIVE_ID: ${{ secrets.VALUEUP_ARCHIVE_ID }}
+          VALUEUP_DAYS: ${{ github.event.inputs.days || '7' }}
+          VALUEUP_DEBUG: ${{ github.event.inputs.debug || 'true' }}
+          VALUEUP_DEBUG_DIR: /tmp/krx_debug
         working-directory: 01_valueup_monitor
         run: |
-          ARGS=""
-          
-          # 기간 버튼 옵션
-          if [ -n "${{ github.event.inputs.period }}" ]; then
-            ARGS="$ARGS --period '${{ github.event.inputs.period }}'"
-          else
-            ARGS="$ARGS --days ${{ github.event.inputs.days || '7' }}"
-          fi
-          
-          # 최대 페이지 옵션
-          ARGS="$ARGS --max-pages ${{ github.event.inputs.max_pages || '10' }}"
-          
-          # PDF 건너뛰기 옵션
-          if [ "${{ github.event.inputs.skip_pdf }}" == "true" ]; then
-            ARGS="$ARGS --skip-pdf"
-          fi
-          
-          echo "실행 명령: python main.py $ARGS"
-          eval "python main.py $ARGS"
+          python main.py
+      
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: krx-debug-${{ github.run_number }}
+          path: /tmp/krx_debug/
+          retention-days: 7
+          if-no-files-found: ignore
       
       - name: Summary
         if: always()
         run: |
           echo "## Value-Up Monitor 실행 완료" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ github.event.inputs.period }}" ]; then
-            echo "- **조회 기간**: ${{ github.event.inputs.period }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **조회 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+          echo "- **디버그 모드**: ${{ github.event.inputs.debug || 'true' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **실행 시각**: $(date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 디버그 파일" >> $GITHUB_STEP_SUMMARY
+          if [ -d "/tmp/krx_debug" ] && [ "$(ls -A /tmp/krx_debug 2>/dev/null)" ]; then
+            echo "디버그 파일이 Artifacts에 업로드되었습니다." >> $GITHUB_STEP_SUMMARY
+            ls -la /tmp/krx_debug >> $GITHUB_STEP_SUMMARY
           else
-            echo "- **조회 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+            echo "디버그 파일이 없습니다." >> $GITHUB_STEP_SUMMARY
           fi
-          echo "- **최대 페이지**: ${{ github.event.inputs.max_pages || '10' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **PDF 업로드**: ${{ github.event.inputs.skip_pdf == 'true' && '건너뜀' || '활성화' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **실행 시각**: $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
