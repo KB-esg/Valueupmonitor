@@ -17,7 +17,7 @@ sys.stdout.reconfigure(line_buffering=True)
 def log(message: str):
     """타임스탬프와 함께 로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    log(f"[{timestamp}] {message}", flush=True)
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 class GSheetManager:
