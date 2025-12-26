@@ -1,257 +1,334 @@
 """
-Google Sheets 관리자
-밸류업 공시 목록을 Google Sheets에 기록
+KRX Value-Up 공시 크롤러
+Playwright 기반으로 KRX KIND 사이트에서 밸류업 공시를 크롤링
 """
 
+import asyncio
+import re
 import os
-from typing import List, Optional, Dict
-from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import List, Optional
+from playwright.async_api import async_playwright, Page, Browser
+
+# stdout 버퍼링 해제
+sys.stdout.reconfigure(line_buffering=True)
 
 
-class GSheetManager:
-    """Google Sheets 관리자"""
+def log(message: str):
+    """타임스탬프와 함께 로그 출력"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
+@dataclass
+class DisclosureItem:
+    """공시 항목 데이터 클래스"""
+    번호: int
+    공시일자: str
+    회사명: str
+    종목코드: str
+    공시제목: str
+    접수번호: str  # acptno
+    문서번호: str  # docNo
+    원시PDF링크: str
+    구글드라이브링크: str = ""
+
+
+class KRXValueUpCrawler:
+    """KRX 밸류업 공시 크롤러"""
     
-    SCOPES = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-    ]
+    BASE_URL = "https://kind.krx.co.kr"
+    LIST_URL = f"{BASE_URL}/valueup/disclsstat.do?method=valueupDisclsStatMain"
+    VIEWER_URL = f"{BASE_URL}/common/disclsviewer.do"
+    PDF_DOWNLOAD_URL = f"{BASE_URL}/common/pdfDownload.do"
     
-    # 시트 헤더 정의
-    HEADERS = [
-        '번호',
-        '공시일자',
-        '회사명',
-        '종목코드',
-        '공시제목',
-        '접수번호',
-        '원시PDF링크',
-        '구글드라이브링크',
-        '수집일시'
-    ]
+    def __init__(self, headless: bool = True):
+        self.headless = headless
+        self.browser: Optional[Browser] = None
+        self.page: Optional[Page] = None
+        
+    async def __aenter__(self):
+        await self.start()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+        
+    async def start(self):
+        """브라우저 시작"""
+        log("  → Playwright 브라우저 시작 중...")
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(headless=self.headless)
+        self.context = await self.browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            locale="ko-KR"
+        )
+        self.page = await self.context.new_page()
+        log("  → 브라우저 시작 완료")
+        
+    async def close(self):
+        """브라우저 종료"""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
     
-    def __init__(self, credentials_json: Optional[str] = None, spreadsheet_id: Optional[str] = None):
+    async def get_disclosure_list(self, days: int = 7) -> List[DisclosureItem]:
         """
-        초기화
+        공시 목록 조회
         
         Args:
-            credentials_json: 서비스 계정 JSON 파일 경로 또는 JSON 문자열
-            spreadsheet_id: 스프레드시트 ID
+            days: 조회할 기간(일), 기본 7일
+            
+        Returns:
+            공시 항목 리스트
         """
-        self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
-        self.client = None
-        self.spreadsheet = None
+        items = []
         
-        # 인증 정보 로드
-        creds = None
-        if credentials_json:
-            if os.path.isfile(credentials_json):
-                creds = Credentials.from_service_account_file(credentials_json, scopes=self.SCOPES)
+        # 페이지 로드
+        log("  → 브라우저에서 KRX KIND 페이지 로딩 중...")
+        await self.page.goto(self.LIST_URL, wait_until="networkidle", timeout=60000)
+        log("  → 페이지 로딩 완료")
+        await asyncio.sleep(3)
+        
+        # 기간 설정 (최근 N일)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        # 날짜 입력 필드 설정 및 검색
+        try:
+            log(f"  → 조회 기간 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
+            
+            # 시작일 설정
+            start_input = self.page.locator('input[name="fromDate"]')
+            if await start_input.count() > 0:
+                await start_input.fill(start_date.strftime("%Y-%m-%d"))
+            
+            # 종료일 설정
+            end_input = self.page.locator('input[name="toDate"]')
+            if await end_input.count() > 0:
+                await end_input.fill(end_date.strftime("%Y-%m-%d"))
+            
+            # 검색 버튼 클릭 (class="btn-search" 또는 검색 이미지 버튼)
+            log("  → 검색 버튼 클릭 중...")
+            search_btn = self.page.locator('a.btn-search, button.btn-search, input.btn-search, a:has(img[alt*="검색"])')
+            if await search_btn.count() > 0:
+                await search_btn.first.click()
+                log("  → 검색 결과 대기 중...")
+                await asyncio.sleep(3)
             else:
-                import json
-                info = json.loads(credentials_json)
-                creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
-        else:
-            creds_json = os.environ.get('GOOGLE_SERVICE')
-            if creds_json:
-                import json
-                info = json.loads(creds_json)
-                creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
+                log("  → 검색 버튼을 찾을 수 없음, 기본 목록 사용")
+        except Exception as e:
+            log(f"  → 날짜 설정 중 오류 (기본값 사용): {e}")
         
-        if creds:
-            self.client = gspread.authorize(creds)
-            if self.spreadsheet_id:
+        # 전체 페이지 수 확인 및 모든 페이지 크롤링
+        all_items = []
+        page_num = 1
+        
+        while True:
+            log(f"  → 페이지 {page_num} 파싱 중...")
+            
+            # 현재 페이지의 테이블 행 추출
+            rows = await self.page.locator('table.list tbody tr, table.tbl-list tbody tr, div.list table tbody tr').all()
+            
+            if not rows:
+                # 다른 테이블 구조 시도
+                rows = await self.page.locator('table tbody tr').all()
+            
+            log(f"  → 페이지 {page_num}: {len(rows)}개 행 발견")
+            
+            parsed_count = 0
+            for row in rows:
                 try:
-                    self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
-                    print(f"스프레드시트 연결 성공: {self.spreadsheet.title}")
-                except gspread.exceptions.SpreadsheetNotFound:
-                    print(f"스프레드시트를 찾을 수 없습니다. ID: {self.spreadsheet_id}")
-                    print("  → 서비스 계정에 스프레드시트 공유 권한이 있는지 확인하세요.")
-                except gspread.exceptions.APIError as e:
-                    print(f"Google Sheets API 오류: {e}")
+                    cells = await row.locator('td').all()
+                    if len(cells) < 4:
+                        continue
+                    
+                    # 번호
+                    번호_text = await cells[0].text_content()
+                    번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
+                    
+                    # 공시일자
+                    공시일자 = (await cells[1].text_content() or "").strip()
+                    
+                    # 회사명 및 종목코드
+                    회사명_full = (await cells[2].text_content() or "").strip()
+                    
+                    # 회사명과 종목코드 분리
+                    회사명_parts = 회사명_full.split()
+                    회사명 = 회사명_parts[0] if 회사명_parts else ""
+                    
+                    # 종목코드 추출
+                    종목코드 = ""
+                    stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
+                    if stock_code_match:
+                        종목코드 = stock_code_match.group()
+                    
+                    # 공시제목
+                    공시제목 = (await cells[3].text_content() or "").strip()
+                    
+                    # 접수번호 추출 (행의 HTML에서)
+                    row_html = await row.inner_html()
+                    접수번호 = ""
+                    
+                    # onclick 또는 href에서 acptno 추출
+                    acptno_match = re.search(r'acptno[=\'"\s:]+[\'"]?(\d+)', row_html, re.IGNORECASE)
+                    if acptno_match:
+                        접수번호 = acptno_match.group(1)
+                    
+                    if not 접수번호:
+                        # openDisclsViewer 함수 파라미터에서 추출 시도
+                        viewer_match = re.search(r'openDisclsViewer\s*\(\s*[\'"](\d+)[\'"]', row_html)
+                        if viewer_match:
+                            접수번호 = viewer_match.group(1)
+                    
+                    if 접수번호:
+                        원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
+                        
+                        item = DisclosureItem(
+                            번호=번호,
+                            공시일자=공시일자,
+                            회사명=회사명,
+                            종목코드=종목코드,
+                            공시제목=공시제목,
+                            접수번호=접수번호,
+                            문서번호="",
+                            원시PDF링크=원시PDF링크
+                        )
+                        all_items.append(item)
+                        parsed_count += 1
+                        
                 except Exception as e:
-                    print(f"스프레드시트 열기 실패: {type(e).__name__}: {e}")
-    
-    def get_or_create_worksheet(self, sheet_name: str = "밸류업공시목록") -> Optional[gspread.Worksheet]:
-        """
-        워크시트 가져오기 또는 생성
-        
-        Args:
-            sheet_name: 시트 이름
+                    log(f"  → 행 파싱 오류: {e}")
+                    continue
             
-        Returns:
-            워크시트 또는 None
-        """
-        if not self.spreadsheet:
-            return None
-        
-        try:
-            worksheet = self.spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            # 새 시트 생성
-            worksheet = self.spreadsheet.add_worksheet(
-                title=sheet_name,
-                rows=1000,
-                cols=len(self.HEADERS)
-            )
-            # 헤더 설정
-            worksheet.update('A1', [self.HEADERS])
-            # 헤더 서식 설정 (굵게)
-            worksheet.format('A1:I1', {
-                'textFormat': {'bold': True},
-                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
-            })
-        
-        return worksheet
-    
-    def get_existing_acptno_set(self, worksheet: gspread.Worksheet) -> set:
-        """
-        이미 기록된 접수번호 집합 반환
-        
-        Args:
-            worksheet: 워크시트
+            log(f"  → 페이지 {page_num}: {parsed_count}건 파싱 완료")
             
-        Returns:
-            접수번호 집합
-        """
-        try:
-            # F열 (접수번호) 전체 가져오기
-            acptno_col = worksheet.col_values(6)  # 6번째 열 = 접수번호
-            return set(acptno_col[1:])  # 헤더 제외
-        except Exception as e:
-            print(f"접수번호 조회 중 오류: {e}")
-            return set()
+            # 다음 페이지 확인
+            next_btn = self.page.locator('a.next, a:has-text("다음"), a[title="다음"]')
+            if await next_btn.count() > 0 and await next_btn.first.is_visible():
+                try:
+                    await next_btn.first.click()
+                    await asyncio.sleep(2)
+                    page_num += 1
+                    if page_num > 10:  # 최대 10페이지까지만
+                        log("  → 최대 페이지(10) 도달, 크롤링 종료")
+                        break
+                except:
+                    break
+            else:
+                log("  → 마지막 페이지 도달")
+                break
+        
+        log(f"  → 크롤링 완료: 총 {len(all_items)}건")
+        return all_items
     
-    def append_disclosures(self, disclosures: List[Dict], sheet_name: str = "밸류업공시목록") -> int:
+    async def get_doc_number(self, acptno: str) -> str:
         """
-        공시 목록 추가
-        
-        Args:
-            disclosures: 공시 정보 딕셔너리 리스트
-            sheet_name: 시트 이름
-            
-        Returns:
-            추가된 행 수
-        """
-        worksheet = self.get_or_create_worksheet(sheet_name)
-        if not worksheet:
-            return 0
-        
-        # 이미 존재하는 접수번호 확인
-        existing = self.get_existing_acptno_set(worksheet)
-        
-        # 새로운 항목만 필터링
-        new_items = []
-        for d in disclosures:
-            acptno = str(d.get('접수번호', ''))
-            if acptno and acptno not in existing:
-                new_items.append(d)
-        
-        if not new_items:
-            print("새로운 공시 항목이 없습니다.")
-            return 0
-        
-        # 행 데이터 생성
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        rows = []
-        for d in new_items:
-            row = [
-                d.get('번호', ''),
-                d.get('공시일자', ''),
-                d.get('회사명', ''),
-                d.get('종목코드', ''),
-                d.get('공시제목', ''),
-                d.get('접수번호', ''),
-                d.get('원시PDF링크', ''),
-                d.get('구글드라이브링크', ''),
-                now
-            ]
-            rows.append(row)
-        
-        # 배치로 추가
-        try:
-            worksheet.append_rows(rows, value_input_option='USER_ENTERED')
-            print(f"{len(rows)}건의 새로운 공시 추가 완료")
-            return len(rows)
-        except Exception as e:
-            print(f"행 추가 중 오류: {e}")
-            return 0
-    
-    def update_gdrive_link(self, acptno: str, gdrive_link: str, sheet_name: str = "밸류업공시목록") -> bool:
-        """
-        구글드라이브 링크 업데이트
+        공시 상세 페이지에서 문서번호(docNo) 추출
         
         Args:
             acptno: 접수번호
-            gdrive_link: 구글드라이브 링크
-            sheet_name: 시트 이름
             
         Returns:
-            성공 여부
+            문서번호
         """
-        worksheet = self.get_or_create_worksheet(sheet_name)
-        if not worksheet:
-            return False
+        viewer_url = f"{self.VIEWER_URL}?method=search&acptno={acptno}"
         
+        page = await self.context.new_page()
         try:
-            # 접수번호로 행 찾기
-            cell = worksheet.find(acptno, in_column=6)  # F열
-            if cell:
-                # H열 (구글드라이브링크) 업데이트
-                worksheet.update_cell(cell.row, 8, gdrive_link)
-                return True
+            log(f"      → 문서번호 조회 중: {acptno}")
+            await page.goto(viewer_url, wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(2)
+            
+            # mainDoc select에서 docNo 추출
+            main_doc = page.locator('select#mainDoc option[selected], select#mainDoc option:nth-child(2)')
+            if await main_doc.count() > 0:
+                value = await main_doc.first.get_attribute('value') or ""
+                # value 형식: "20251128000575|Y"
+                if '|' in value:
+                    doc_no = value.split('|')[0]
+                    log(f"      → 문서번호 발견: {doc_no}")
+                    return doc_no
+                return value
+            
+            # 또는 hidden input에서 추출
+            doc_no_input = page.locator('input#docNo, input[name="docNo"]')
+            if await doc_no_input.count() > 0:
+                doc_no = await doc_no_input.first.get_attribute('value') or ""
+                if doc_no:
+                    log(f"      → 문서번호 발견: {doc_no}")
+                return doc_no
+                
         except Exception as e:
-            print(f"링크 업데이트 중 오류: {e}")
-        
-        return False
+            log(f"      → 문서번호 추출 오류: {e}")
+        finally:
+            await page.close()
+            
+        return ""
     
-    def get_items_without_gdrive_link(self, sheet_name: str = "밸류업공시목록") -> List[Dict]:
+    async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
-        구글드라이브 링크가 없는 항목 조회
+        PDF 다운로드
         
         Args:
-            sheet_name: 시트 이름
+            acptno: 접수번호
+            doc_no: 문서번호 (없으면 자동 추출)
             
         Returns:
-            항목 리스트
+            PDF 바이너리 데이터 또는 None
         """
-        worksheet = self.get_or_create_worksheet(sheet_name)
-        if not worksheet:
-            return []
+        if not doc_no:
+            doc_no = await self.get_doc_number(acptno)
         
+        if not doc_no:
+            log(f"      → 문서번호를 찾을 수 없음: {acptno}")
+            return None
+        
+        download_url = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={acptno}&docNo={doc_no}"
+        
+        page = await self.context.new_page()
         try:
-            all_records = worksheet.get_all_records()
-            return [
-                r for r in all_records 
-                if r.get('접수번호') and not r.get('구글드라이브링크')
-            ]
+            log(f"      → PDF 다운로드 시작...")
+            # 다운로드 대기 설정
+            async with page.expect_download(timeout=60000) as download_info:
+                await page.goto(download_url)
+            
+            download = await download_info.value
+            
+            # 임시 파일로 저장 후 읽기
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                tmp_path = tmp.name
+            
+            await download.save_as(tmp_path)
+            
+            with open(tmp_path, 'rb') as f:
+                pdf_data = f.read()
+            
+            os.unlink(tmp_path)
+            log(f"      → PDF 다운로드 완료: {len(pdf_data)} bytes")
+            return pdf_data
+            
         except Exception as e:
-            print(f"항목 조회 중 오류: {e}")
-            return []
+            log(f"      → PDF 다운로드 오류: {e}")
+            return None
+        finally:
+            await page.close()
 
 
-def main():
+async def main():
     """테스트용 메인 함수"""
-    manager = GSheetManager()
-    
-    # 테스트 데이터
-    test_disclosures = [
-        {
-            '번호': 1,
-            '공시일자': '2025-12-26',
-            '회사명': '테스트기업',
-            '종목코드': '000000',
-            '공시제목': '기업가치 제고 계획(자율공시)',
-            '접수번호': 'TEST001',
-            '원시PDF링크': 'https://example.com/test.pdf',
-            '구글드라이브링크': ''
-        }
-    ]
-    
-    count = manager.append_disclosures(test_disclosures)
-    print(f"추가된 항목: {count}건")
+    async with KRXValueUpCrawler(headless=True) as crawler:
+        items = await crawler.get_disclosure_list(days=7)
+        
+        print(f"총 {len(items)}건의 공시 발견")
+        for item in items[:5]:  # 상위 5개만 출력
+            print(f"- {item.공시일자} | {item.회사명} | {item.공시제목}")
+            print(f"  접수번호: {item.접수번호}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
