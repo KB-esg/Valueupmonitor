@@ -1,6 +1,11 @@
 """
 Google Sheets 관리자
 밸류업 공시 목록을 Google Sheets에 기록
+
+Quota 고려사항:
+- 읽기: 분당 300회
+- 쓰기: 분당 60회
+- 배치 업데이트로 API 호출 최소화
 """
 
 import os
@@ -28,18 +33,24 @@ class GSheetManager:
         'https://www.googleapis.com/auth/drive'
     ]
     
-    # 시트 헤더 정의
+    # 시트 헤더 정의 (A~J열)
     HEADERS = [
-        '번호',
-        '공시일자',
-        '회사명',
-        '종목코드',
-        '공시제목',
-        '접수번호',
-        '원시PDF링크',
-        '구글드라이브링크',
-        '수집일시'
+        '번호',           # A
+        '공시일자',       # B
+        '회사명',         # C
+        '종목코드',       # D
+        '공시제목',       # E
+        '접수번호',       # F
+        '원시PDF링크',    # G
+        '구글드라이브링크', # H
+        '수집일시',       # I
+        '아티팩트링크'    # J - GitHub Actions 아티팩트 다운로드 정보
     ]
+    
+    # 열 인덱스 (1-based)
+    COL_ACPTNO = 6          # F열: 접수번호
+    COL_GDRIVE_LINK = 8     # H열: 구글드라이브링크
+    COL_ARTIFACT_LINK = 10  # J열: 아티팩트링크
     
     def __init__(self, credentials_json: Optional[str] = None, spreadsheet_id: Optional[str] = None):
         """
@@ -52,6 +63,7 @@ class GSheetManager:
         self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
         self.client = None
         self.spreadsheet = None
+        self._worksheet_cache = {}
         
         # 인증 정보 로드
         creds = None
@@ -96,8 +108,25 @@ class GSheetManager:
         if not self.spreadsheet:
             return None
         
+        # 캐시 확인
+        if sheet_name in self._worksheet_cache:
+            return self._worksheet_cache[sheet_name]
+        
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
+            
+            # 기존 시트에 J열(아티팩트링크) 헤더가 없는 경우 추가
+            try:
+                headers = worksheet.row_values(1)
+                if len(headers) < len(self.HEADERS):
+                    # 부족한 헤더 추가
+                    missing_headers = self.HEADERS[len(headers):]
+                    for idx, header in enumerate(missing_headers):
+                        col_num = len(headers) + idx + 1
+                        worksheet.update_cell(1, col_num, header)
+                    log(f"  시트에 새 열 추가: {missing_headers}")
+            except Exception as e:
+                log(f"  헤더 확인 중 오류 (무시): {e}")
         except gspread.exceptions.WorksheetNotFound:
             # 새 시트 생성
             worksheet = self.spreadsheet.add_worksheet(
@@ -108,11 +137,13 @@ class GSheetManager:
             # 헤더 설정
             worksheet.update('A1', [self.HEADERS])
             # 헤더 서식 설정 (굵게)
-            worksheet.format('A1:I1', {
+            worksheet.format('A1:J1', {
                 'textFormat': {'bold': True},
                 'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
             })
+            log(f"새 워크시트 생성: {sheet_name}")
         
+        self._worksheet_cache[sheet_name] = worksheet
         return worksheet
     
     def get_existing_acptno_set(self, worksheet: gspread.Worksheet) -> set:
@@ -127,15 +158,32 @@ class GSheetManager:
         """
         try:
             # F열 (접수번호) 전체 가져오기
-            acptno_col = worksheet.col_values(6)  # 6번째 열 = 접수번호
+            acptno_col = worksheet.col_values(self.COL_ACPTNO)
             return set(acptno_col[1:])  # 헤더 제외
         except Exception as e:
             log(f"접수번호 조회 중 오류: {e}")
             return set()
     
+    def get_all_data_with_row_numbers(self, worksheet: gspread.Worksheet) -> Dict[str, int]:
+        """
+        접수번호와 행 번호 매핑 반환 (배치 업데이트용)
+        
+        Args:
+            worksheet: 워크시트
+            
+        Returns:
+            {접수번호: 행번호} 딕셔너리
+        """
+        try:
+            acptno_col = worksheet.col_values(self.COL_ACPTNO)
+            return {acptno: row_idx + 1 for row_idx, acptno in enumerate(acptno_col) if acptno}
+        except Exception as e:
+            log(f"데이터 조회 중 오류: {e}")
+            return {}
+    
     def append_disclosures(self, disclosures: List[Dict], sheet_name: str = "밸류업공시목록") -> int:
         """
-        공시 목록 추가
+        공시 목록 추가 (배치)
         
         Args:
             disclosures: 공시 정보 딕셔너리 리스트
@@ -175,11 +223,12 @@ class GSheetManager:
                 d.get('접수번호', ''),
                 d.get('원시PDF링크', ''),
                 d.get('구글드라이브링크', ''),
-                now
+                now,
+                ''  # 아티팩트링크 (나중에 업데이트)
             ]
             rows.append(row)
         
-        # 배치로 추가
+        # 배치로 추가 (1회 API 호출)
         try:
             worksheet.append_rows(rows, value_input_option='USER_ENTERED')
             log(f"{len(rows)}건의 새로운 공시 추가 완료")
@@ -188,9 +237,82 @@ class GSheetManager:
             log(f"행 추가 중 오류: {e}")
             return 0
     
+    def batch_update_links(
+        self, 
+        updates: List[Dict], 
+        sheet_name: str = "밸류업공시목록"
+    ) -> int:
+        """
+        여러 행의 링크를 배치로 업데이트 (1회 API 호출)
+        
+        Args:
+            updates: [{'접수번호': str, '구글드라이브링크': str, '아티팩트링크': str}, ...]
+            sheet_name: 시트 이름
+            
+        Returns:
+            업데이트된 행 수
+        """
+        if not updates:
+            return 0
+        
+        worksheet = self.get_or_create_worksheet(sheet_name)
+        if not worksheet:
+            return 0
+        
+        # 접수번호 → 행 번호 매핑 조회 (1회 API 호출)
+        acptno_to_row = self.get_all_data_with_row_numbers(worksheet)
+        
+        # 업데이트할 셀 데이터 수집
+        batch_data = []
+        updated_count = 0
+        
+        for update in updates:
+            acptno = str(update.get('접수번호', ''))
+            gdrive_link = update.get('구글드라이브링크', '')
+            artifact_link = update.get('아티팩트링크', '')
+            
+            if acptno not in acptno_to_row:
+                log(f"  [WARN] 접수번호 {acptno}를 찾을 수 없음")
+                continue
+            
+            row_num = acptno_to_row[acptno]
+            
+            # H열 (구글드라이브링크) 업데이트
+            if gdrive_link:
+                cell_h = f"H{row_num}"
+                batch_data.append({
+                    'range': cell_h,
+                    'values': [[gdrive_link]]
+                })
+            
+            # J열 (아티팩트링크) 업데이트
+            if artifact_link:
+                cell_j = f"J{row_num}"
+                batch_data.append({
+                    'range': cell_j,
+                    'values': [[artifact_link]]
+                })
+            
+            updated_count += 1
+        
+        if not batch_data:
+            log("업데이트할 데이터가 없습니다.")
+            return 0
+        
+        # 배치 업데이트 (1회 API 호출)
+        try:
+            worksheet.batch_update(batch_data, value_input_option='USER_ENTERED')
+            log(f"  → {updated_count}건 링크 배치 업데이트 완료 (API 호출 1회)")
+            return updated_count
+        except Exception as e:
+            log(f"배치 업데이트 중 오류: {e}")
+            return 0
+    
     def update_gdrive_link(self, acptno: str, gdrive_link: str, sheet_name: str = "밸류업공시목록") -> bool:
         """
-        구글드라이브 링크 업데이트
+        구글드라이브 링크 업데이트 (단일 - 하위 호환용)
+        
+        주의: API quota 소모가 큼. batch_update_links 사용 권장.
         
         Args:
             acptno: 접수번호
@@ -200,21 +322,11 @@ class GSheetManager:
         Returns:
             성공 여부
         """
-        worksheet = self.get_or_create_worksheet(sheet_name)
-        if not worksheet:
-            return False
-        
-        try:
-            # 접수번호로 행 찾기
-            cell = worksheet.find(acptno, in_column=6)  # F열
-            if cell:
-                # H열 (구글드라이브링크) 업데이트
-                worksheet.update_cell(cell.row, 8, gdrive_link)
-                return True
-        except Exception as e:
-            log(f"링크 업데이트 중 오류: {e}")
-        
-        return False
+        result = self.batch_update_links([{
+            '접수번호': acptno,
+            '구글드라이브링크': gdrive_link
+        }], sheet_name)
+        return result > 0
     
     def get_items_without_gdrive_link(self, sheet_name: str = "밸류업공시목록") -> List[Dict]:
         """
@@ -235,6 +347,30 @@ class GSheetManager:
             return [
                 r for r in all_records 
                 if r.get('접수번호') and not r.get('구글드라이브링크')
+            ]
+        except Exception as e:
+            log(f"항목 조회 중 오류: {e}")
+            return []
+    
+    def get_items_without_artifact_link(self, sheet_name: str = "밸류업공시목록") -> List[Dict]:
+        """
+        아티팩트 링크가 없는 항목 조회
+        
+        Args:
+            sheet_name: 시트 이름
+            
+        Returns:
+            항목 리스트
+        """
+        worksheet = self.get_or_create_worksheet(sheet_name)
+        if not worksheet:
+            return []
+        
+        try:
+            all_records = worksheet.get_all_records()
+            return [
+                r for r in all_records 
+                if r.get('접수번호') and not r.get('아티팩트링크')
             ]
         except Exception as e:
             log(f"항목 조회 중 오류: {e}")
@@ -261,6 +397,16 @@ def main():
     
     count = manager.append_disclosures(test_disclosures)
     log(f"추가된 항목: {count}건")
+    
+    # 배치 업데이트 테스트
+    updates = [
+        {
+            '접수번호': 'TEST001',
+            '구글드라이브링크': 'https://drive.google.com/file/test',
+            '아티팩트링크': 'Archive_pdf/20251226_테스트기업_TEST001.pdf'
+        }
+    ]
+    manager.batch_update_links(updates)
 
 
 if __name__ == "__main__":
