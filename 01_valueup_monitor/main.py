@@ -8,6 +8,7 @@ import asyncio
 import os
 import sys
 import json
+import re
 from dataclasses import asdict
 from typing import Optional
 from datetime import datetime
@@ -152,7 +153,6 @@ class ValueUpMonitor:
                 
                 if new_count == 0:
                     log("  → 모든 공시가 이미 기록되어 있습니다.")
-                    return result
                 
                 # 3. PDF 다운로드 및 Google Drive 업로드
                 if self.skip_pdf:
@@ -165,6 +165,9 @@ class ValueUpMonitor:
                     # 구글드라이브 링크가 없는 항목 조회
                     pending_items = self.sheet_manager.get_items_without_gdrive_link()
                     log(f"  → 업로드 대기 항목: {len(pending_items)}건")
+                    
+                    if not pending_items:
+                        log("  → 모든 항목이 이미 업로드되어 있습니다.")
                     
                     for idx, item in enumerate(pending_items, 1):
                         acptno = item.get('접수번호', '')
@@ -298,10 +301,6 @@ async def main():
         log("  - VALUEUP_ARCHIVE_ID: (선택) 구글드라이브 폴더 ID")
         sys.exit(1)
     
-    # re 모듈 import (PDF 파일명 생성용)
-    import re
-    globals()['re'] = re
-    
     monitor = ValueUpMonitor(
         days=args.days,
         period=args.period,
@@ -319,5 +318,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import re  # 전역 import
     asyncio.run(main())
