@@ -9,9 +9,27 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: '조회 기간 (일)'
+        description: '조회 기간 (일) - period 미선택 시 사용'
         required: false
         default: '7'
+      period:
+        description: '기간 버튼 선택 (days보다 우선)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - '1주'
+          - '1개월'
+          - '3개월'
+          - '6개월'
+          - '1년'
+          - '2년'
+          - '3년'
+          - '전체'
+      max_pages:
+        description: '최대 크롤링 페이지 수'
+        required: false
+        default: '10'
       skip_pdf:
         description: 'PDF 다운로드 건너뛰기'
         required: false
@@ -60,6 +78,8 @@ jobs:
           
           # 실행 옵션
           VALUEUP_DAYS: ${{ github.event.inputs.days || '7' }}
+          VALUEUP_PERIOD: ${{ github.event.inputs.period }}
+          VALUEUP_MAX_PAGES: ${{ github.event.inputs.max_pages || '10' }}
           VALUEUP_SKIP_PDF: ${{ github.event.inputs.skip_pdf || 'false' }}
           
           # 디버그 옵션
@@ -95,7 +115,12 @@ jobs:
           echo "## Value-Up Monitor 실행 완료" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 설정" >> $GITHUB_STEP_SUMMARY
-          echo "- **조회 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.period }}" ]; then
+            echo "- **조회 기간**: ${{ github.event.inputs.period }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **조회 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **최대 페이지**: ${{ github.event.inputs.max_pages || '10' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **PDF 다운로드**: ${{ github.event.inputs.skip_pdf == 'true' && '건너뜀' || '활성화' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **실행 시각**: $(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
