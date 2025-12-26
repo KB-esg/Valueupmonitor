@@ -27,7 +27,7 @@ class GDriveUploader:
             credentials_json: 서비스 계정 JSON 파일 경로 또는 JSON 문자열
             folder_id: 업로드할 폴더 ID (없으면 루트)
         """
-        self.folder_id = folder_id or os.environ.get('GDRIVE_FOLDER_ID')
+        self.folder_id = folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         self.service = None
         
         # 인증 정보 로드
@@ -41,7 +41,7 @@ class GDriveUploader:
                 creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
         else:
             # 환경변수에서 로드
-            creds_json = os.environ.get('GOOGLE_CREDENTIALS')
+            creds_json = os.environ.get('GOOGLE_SERVICE')
             if creds_json:
                 import json
                 info = json.loads(creds_json)
