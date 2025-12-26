@@ -12,7 +12,7 @@ import json
 import re
 from dataclasses import asdict
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # stdout 버퍼링 해제 (GitHub Actions에서 실시간 출력)
 sys.stdout.reconfigure(line_buffering=True)
@@ -72,10 +72,25 @@ class ValueUpMonitor:
         self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
         self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
         self.gdrive_folder_id = gdrive_folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
-        self.days = days
         self.period = period
         self.max_pages = max_pages
         self.skip_pdf = skip_pdf
+        
+        # period에 따른 effective_days 계산
+        if period:
+            period_to_days = {
+                '1주': 7,
+                '1개월': 30,
+                '3개월': 90,
+                '6개월': 180,
+                '1년': 365,
+                '2년': 730,
+                '3년': 1095,
+                '전체': 3650  # 약 10년
+            }
+            self.days = period_to_days.get(period, days)
+        else:
+            self.days = days
         
         # Google Sheets 초기화
         self.sheet_manager = GSheetManager(
@@ -212,8 +227,29 @@ class ValueUpMonitor:
                     log("[4단계] PDF 다운로드 및 저장 중...")
                     
                     # 구글드라이브 링크가 없는 항목 조회 (아직 PDF 처리 안된 항목)
-                    pending_items = self.sheet_manager.get_items_without_gdrive_link()
-                    log(f"  → 처리 대기 항목: {len(pending_items)}건")
+                    all_pending = self.sheet_manager.get_items_without_gdrive_link()
+                    
+                    # 현재 조회 기간에 해당하는 항목만 필터링
+                    cutoff_date = datetime.now() - timedelta(days=self.days)
+                    pending_items = []
+                    
+                    for item in all_pending:
+                        date_str = item.get('공시일자', '').replace('-', '').replace(' ', '_').replace(':', '')[:8]
+                        try:
+                            if len(date_str) == 8:
+                                item_date = datetime.strptime(date_str, "%Y%m%d")
+                                if item_date >= cutoff_date:
+                                    pending_items.append(item)
+                                else:
+                                    # 기간 외 항목은 건너뜀 (로그 생략 - 너무 많을 수 있음)
+                                    pass
+                            else:
+                                pending_items.append(item)  # 날짜 파싱 실패시 포함
+                        except:
+                            pending_items.append(item)  # 예외시 포함
+                    
+                    skipped = len(all_pending) - len(pending_items)
+                    log(f"  → 처리 대기 항목: {len(pending_items)}건 (조회 기간 외 {skipped}건 제외)")
                     
                     if not pending_items:
                         log("  → 모든 항목이 이미 처리되어 있습니다.")
