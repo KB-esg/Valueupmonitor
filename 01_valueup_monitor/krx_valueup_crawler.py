@@ -585,10 +585,12 @@ class KRXValueUpCrawler:
     
     async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
-        PDF 다운로드 - 여러 방식 시도
-        1. filedownload('pdf') JavaScript 함수 호출 (가장 안정적)
-        2. PDF 버튼 클릭
-        3. 첨부문서에서 PDF 링크 찾기
+        PDF 다운로드 - 첨부문서 PDF 우선
+        
+        다운로드 순서:
+        1. 첨부문서(기타공시첨부서류)에서 PDF 링크 찾기 (기업 제출 원본 PDF)
+        2. filedownload('pdf') JavaScript 호출 (본문 PDF - fallback)
+        3. PDF 버튼 클릭 (본문 PDF - fallback)
         
         Args:
             acptno: 접수번호
@@ -610,10 +612,65 @@ class KRXValueUpCrawler:
             # 디버그: 다운로드 전 상태 저장
             await self._save_debug_screenshot(page, f"pdf_viewer_{acptno}")
             
-            # ========== 방법 1: filedownload('pdf') JavaScript 호출 (가장 안정적) ==========
-            log(f"    [방법1] filedownload('pdf') 시도...")
+            # ========== 방법 1: 첨부문서에서 PDF 링크 찾기 (우선!) ==========
+            log(f"    [방법1] 첨부문서(기타공시첨부서류)에서 PDF 검색...")
+            attach_select = page.locator('select#attachedDoc')
+            
+            if await attach_select.count() > 0:
+                options = await attach_select.locator('option').all()
+                log(f"    첨부문서 드롭다운 옵션 수: {len(options)}")
+                
+                # 옵션 목록 출력 (디버그)
+                for opt in options:
+                    opt_text = await opt.text_content() or ""
+                    opt_value = await opt.get_attribute('value') or ""
+                    log(f"      - '{opt_text[:40]}' (value: {opt_value[:30] if opt_value else 'empty'})")
+                
+                # 기타공시첨부서류 또는 첨부서류가 있는 옵션 찾기
+                for option in options:
+                    option_text = await option.text_content() or ""
+                    option_value = await option.get_attribute('value') or ""
+                    
+                    # 빈 값이거나 "선택" 옵션은 건너뛰기
+                    if not option_value or "선택" in option_text:
+                        continue
+                    
+                    # 첨부서류 관련 옵션인지 확인
+                    is_attachment = any(keyword in option_text for keyword in [
+                        '첨부', '기타공시', '기타공개', '첨부서류', '첨부문서'
+                    ])
+                    
+                    if not is_attachment:
+                        log(f"    건너뜀 (첨부서류 아님): {option_text[:40]}")
+                        continue
+                    
+                    log(f"    첨부서류 선택: {option_text[:50]}...")
+                    
+                    # 옵션 선택
+                    await attach_select.select_option(value=option_value)
+                    await asyncio.sleep(3)  # iframe 로딩 대기
+                    
+                    # 디버그: 첨부서류 선택 후 상태 저장
+                    await self._save_debug_screenshot(page, f"pdf_attached_{acptno}")
+                    
+                    # iframe에서 PDF 링크 찾기
+                    pdf_url = await self._find_pdf_in_iframe(page)
+                    if pdf_url:
+                        log(f"    PDF URL 발견: {pdf_url[:80]}...")
+                        pdf_data = await self._download_pdf_from_url(pdf_url)
+                        if pdf_data:
+                            log(f"    첨부 PDF 다운로드 성공: {len(pdf_data):,} bytes")
+                            return pdf_data
+                        else:
+                            log(f"    첨부 PDF 다운로드 실패, 다음 방법 시도")
+                    else:
+                        log(f"    iframe에서 PDF 링크를 찾을 수 없음")
+            else:
+                log(f"    첨부문서 드롭다운(#attachedDoc)을 찾을 수 없음")
+            
+            # ========== 방법 2: filedownload('pdf') JavaScript 호출 (본문 PDF) ==========
+            log(f"    [방법2] filedownload('pdf') 시도 (본문 PDF)...")
             try:
-                # docdownloadform에 필요한 값이 설정되어 있는지 확인
                 doc_no_value = await page.evaluate('''() => {
                     const form = document.getElementById("docdownloadform");
                     if (form) {
@@ -626,12 +683,11 @@ class KRXValueUpCrawler:
                 if doc_no_value:
                     log(f"    docNo 설정됨: {doc_no_value}")
                     
-                    # 다운로드 대기
                     async with page.expect_download(timeout=30000) as download_info:
                         await page.evaluate("filedownload('pdf')")
                     
                     download = await download_info.value
-                    log(f"    다운로드 시작: {download.suggested_filename}")
+                    log(f"    다운로드 파일: {download.suggested_filename}")
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                         tmp_path = tmp.name
@@ -644,18 +700,18 @@ class KRXValueUpCrawler:
                     os.unlink(tmp_path)
                     
                     if len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
-                        log(f"    filedownload 성공: {len(pdf_data)} bytes")
+                        log(f"    본문 PDF 다운로드 성공: {len(pdf_data):,} bytes")
                         return pdf_data
                     else:
                         log(f"    filedownload 결과 유효하지 않음")
                 else:
-                    log(f"    docNo가 설정되지 않음")
+                    log(f"    docNo가 설정되지 않음 (본문 없음)")
                     
             except Exception as e:
                 log(f"    filedownload 실패: {e}")
             
-            # ========== 방법 2: PDF 버튼 직접 클릭 ==========
-            log(f"    [방법2] PDF 버튼 클릭 시도...")
+            # ========== 방법 3: PDF 버튼 직접 클릭 (본문 PDF) ==========
+            log(f"    [방법3] PDF 버튼 클릭 시도 (본문 PDF)...")
             try:
                 pdf_btn = page.locator('a:has(img[src*="btn_pdf"]), a:has(img[alt*="PDF"])').first
                 if await pdf_btn.count() > 0:
@@ -663,7 +719,7 @@ class KRXValueUpCrawler:
                         await pdf_btn.click()
                     
                     download = await download_info.value
-                    log(f"    PDF 버튼 다운로드: {download.suggested_filename}")
+                    log(f"    다운로드 파일: {download.suggested_filename}")
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                         tmp_path = tmp.name
@@ -676,40 +732,12 @@ class KRXValueUpCrawler:
                     os.unlink(tmp_path)
                     
                     if len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
-                        log(f"    PDF 버튼 클릭 성공: {len(pdf_data)} bytes")
+                        log(f"    본문 PDF(버튼) 다운로드 성공: {len(pdf_data):,} bytes")
                         return pdf_data
                 else:
                     log(f"    PDF 버튼을 찾을 수 없음")
             except Exception as e:
                 log(f"    PDF 버튼 클릭 실패: {e}")
-            
-            # ========== 방법 3: 첨부문서에서 PDF 링크 찾기 ==========
-            log(f"    [방법3] 첨부문서에서 PDF 링크 검색...")
-            attach_select = page.locator('select#attachedDoc')
-            if await attach_select.count() > 0:
-                options = await attach_select.locator('option').all()
-                log(f"    첨부문서 옵션 수: {len(options)}")
-                
-                for option in options:
-                    option_text = await option.text_content() or ""
-                    option_value = await option.get_attribute('value') or ""
-                    
-                    if not option_value:
-                        continue
-                    
-                    log(f"    첨부문서: {option_text[:50]}...")
-                    
-                    # 옵션 선택
-                    await attach_select.select_option(value=option_value)
-                    await asyncio.sleep(3)
-                    
-                    # iframe에서 PDF 링크 찾기
-                    pdf_url = await self._find_pdf_in_iframe(page)
-                    if pdf_url:
-                        log(f"    PDF URL: {pdf_url[:80]}...")
-                        pdf_data = await self._download_pdf_from_url(pdf_url)
-                        if pdf_data:
-                            return pdf_data
             
             log(f"    모든 방법 실패, PDF를 찾을 수 없음")
             await self._save_debug_screenshot(page, f"pdf_not_found_{acptno}")
