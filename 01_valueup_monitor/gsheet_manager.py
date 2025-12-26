@@ -39,7 +39,7 @@ class GSheetManager:
             credentials_json: 서비스 계정 JSON 파일 경로 또는 JSON 문자열
             spreadsheet_id: 스프레드시트 ID
         """
-        self.spreadsheet_id = spreadsheet_id or os.environ.get('GSHEET_SPREADSHEET_ID')
+        self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
         self.client = None
         self.spreadsheet = None
         
@@ -53,7 +53,7 @@ class GSheetManager:
                 info = json.loads(credentials_json)
                 creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
         else:
-            creds_json = os.environ.get('GOOGLE_CREDENTIALS')
+            creds_json = os.environ.get('GOOGLE_SERVICE')
             if creds_json:
                 import json
                 info = json.loads(creds_json)
