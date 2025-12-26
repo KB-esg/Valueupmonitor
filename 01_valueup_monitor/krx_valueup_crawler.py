@@ -580,8 +580,10 @@ class KRXValueUpCrawler:
     
     async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
-        PDF 다운로드 - 첨부문서(attachedDoc)에서 PDF 링크 추출 방식
-        Colab 코드 참조: iframe 내부에서 .pdf 링크 찾기
+        PDF 다운로드 - 여러 방식 시도
+        1. 첨부문서에서 PDF 링크 찾기
+        2. filedownload('pdf') JavaScript 함수 호출
+        3. PDF 버튼 클릭
         
         Args:
             acptno: 접수번호
@@ -598,15 +600,15 @@ class KRXValueUpCrawler:
         try:
             # 1. 뷰어 페이지 열기
             await page.goto(viewer_url, wait_until="networkidle")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)  # iframe 로딩 대기
             
             # 디버그: 다운로드 전 상태 저장
             await self._save_debug_screenshot(page, f"pdf_viewer_{acptno}")
             
-            # 2. 첨부문서(attachedDoc) 드롭다운에서 PDF 찾기
+            # ========== 방법 1: 첨부문서에서 PDF 링크 찾기 ==========
+            log(f"    [방법1] 첨부문서에서 PDF 링크 검색...")
             attach_select = page.locator('select#attachedDoc')
             if await attach_select.count() > 0:
-                # 모든 옵션 가져오기
                 options = await attach_select.locator('option').all()
                 log(f"    첨부문서 옵션 수: {len(options)}")
                 
@@ -614,68 +616,95 @@ class KRXValueUpCrawler:
                     option_text = await option.text_content() or ""
                     option_value = await option.get_attribute('value') or ""
                     
-                    # 빈 값이나 선택 옵션 건너뛰기
-                    if not option_value or option_value == "":
+                    if not option_value:
                         continue
                     
                     log(f"    첨부문서: {option_text[:50]}...")
                     
-                    # 기타공시첨부서류, 기타공개첨부문서, 첨부 등 찾기
-                    keywords = ["기타공시첨부서류", "기타공개첨부문서", "첨부", "PDF", "pdf"]
-                    if any(kw in option_text for kw in keywords):
-                        # 해당 옵션 선택
-                        await attach_select.select_option(value=option_value)
-                        log(f"    선택됨: {option_text[:30]}...")
-                        await asyncio.sleep(3)
-                        
-                        # docViewFrm iframe에서 PDF 링크 찾기
-                        pdf_url = await self._find_pdf_in_iframe(page)
-                        if pdf_url:
-                            log(f"    PDF URL: {pdf_url}")
-                            pdf_data = await self._download_pdf_from_url(pdf_url)
-                            if pdf_data:
-                                return pdf_data
-                
-                # 키워드 없이 모든 첨부 옵션 시도
-                log(f"    키워드 매칭 실패, 모든 첨부문서 검색...")
-                for option in options:
-                    option_value = await option.get_attribute('value') or ""
-                    if not option_value:
-                        continue
-                    
+                    # 옵션 선택
                     await attach_select.select_option(value=option_value)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)
                     
+                    # iframe에서 PDF 링크 찾기
                     pdf_url = await self._find_pdf_in_iframe(page)
                     if pdf_url:
-                        log(f"    PDF URL: {pdf_url}")
-                        pdf_data = await self._download_pdf_from_url(pdf_url)
-                        if pdf_data:
-                            return pdf_data
-            else:
-                log(f"    첨부문서 드롭다운 없음")
-            
-            # 3. 본문(mainDoc)에서도 PDF 찾기 시도
-            log(f"    본문에서 PDF 검색...")
-            main_select = page.locator('select#mainDoc')
-            if await main_select.count() > 0:
-                options = await main_select.locator('option').all()
-                for option in options:
-                    option_value = await option.get_attribute('value') or ""
-                    if not option_value:
-                        continue
-                    
-                    await main_select.select_option(value=option_value)
-                    await asyncio.sleep(2)
-                    
-                    pdf_url = await self._find_pdf_in_iframe(page)
-                    if pdf_url:
-                        log(f"    본문 PDF URL: {pdf_url}")
+                        log(f"    PDF URL: {pdf_url[:80]}...")
                         pdf_data = await self._download_pdf_from_url(pdf_url)
                         if pdf_data:
                             return pdf_data
             
-            log(f"    PDF를 찾을 수 없음")
+            # ========== 방법 2: filedownload('pdf') JavaScript 호출 ==========
+            log(f"    [방법2] filedownload('pdf') 시도...")
+            try:
+                # docdownloadform에 필요한 값이 설정되어 있는지 확인
+                doc_no_value = await page.evaluate('''() => {
+                    const form = document.getElementById("docdownloadform");
+                    if (form) {
+                        const docNoInput = form.querySelector("#docNo, input[name='docNo']");
+                        return docNoInput ? docNoInput.value : "";
+                    }
+                    return "";
+                }''')
+                
+                if doc_no_value:
+                    log(f"    docNo 설정됨: {doc_no_value}")
+                    
+                    # 다운로드 대기
+                    async with page.expect_download(timeout=30000) as download_info:
+                        await page.evaluate("filedownload('pdf')")
+                    
+                    download = await download_info.value
+                    log(f"    다운로드 시작: {download.suggested_filename}")
+                    
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                        tmp_path = tmp.name
+                    
+                    await download.save_as(tmp_path)
+                    
+                    with open(tmp_path, 'rb') as f:
+                        pdf_data = f.read()
+                    
+                    os.unlink(tmp_path)
+                    
+                    if len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
+                        log(f"    filedownload 성공: {len(pdf_data)} bytes")
+                        return pdf_data
+                    else:
+                        log(f"    filedownload 결과 유효하지 않음")
+                else:
+                    log(f"    docNo가 설정되지 않음")
+                    
+            except Exception as e:
+                log(f"    filedownload 실패: {e}")
+            
+            # ========== 방법 3: PDF 버튼 직접 클릭 ==========
+            log(f"    [방법3] PDF 버튼 클릭 시도...")
+            try:
+                pdf_btn = page.locator('a:has(img[src*="btn_pdf"]), a:has(img[alt*="PDF"])').first
+                if await pdf_btn.count() > 0:
+                    async with page.expect_download(timeout=30000) as download_info:
+                        await pdf_btn.click()
+                    
+                    download = await download_info.value
+                    log(f"    PDF 버튼 다운로드: {download.suggested_filename}")
+                    
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                        tmp_path = tmp.name
+                    
+                    await download.save_as(tmp_path)
+                    
+                    with open(tmp_path, 'rb') as f:
+                        pdf_data = f.read()
+                    
+                    os.unlink(tmp_path)
+                    
+                    if len(pdf_data) > 1000 and pdf_data.startswith(b'%PDF'):
+                        log(f"    PDF 버튼 클릭 성공: {len(pdf_data)} bytes")
+                        return pdf_data
+            except Exception as e:
+                log(f"    PDF 버튼 클릭 실패: {e}")
+            
+            log(f"    모든 방법 실패, PDF를 찾을 수 없음")
             await self._save_debug_screenshot(page, f"pdf_not_found_{acptno}")
             return None
             
@@ -690,47 +719,97 @@ class KRXValueUpCrawler:
     async def _find_pdf_in_iframe(self, page: Page) -> Optional[str]:
         """iframe 내부에서 PDF 링크 찾기"""
         try:
-            # JavaScript로 iframe 내부 접근
-            pdf_url = await page.evaluate('''() => {
+            # JavaScript로 iframe 내부의 모든 링크 정보 수집
+            result = await page.evaluate('''() => {
                 const iframe = document.getElementById('docViewFrm');
                 if (!iframe || !iframe.contentDocument) {
-                    return null;
+                    return { error: 'iframe not accessible', links: [] };
                 }
                 
-                // PDF 링크 찾기
-                const links = iframe.contentDocument.querySelectorAll('a[href*=".pdf"], a[href*=".PDF"]');
+                const allLinks = [];
+                const links = iframe.contentDocument.querySelectorAll('a');
+                
                 for (const link of links) {
-                    const href = link.getAttribute('href');
-                    if (href && (href.toLowerCase().includes('.pdf'))) {
-                        return href;
-                    }
-                }
-                
-                // 텍스트로 PDF 찾기
-                const allLinks = iframe.contentDocument.querySelectorAll('a');
-                for (const link of allLinks) {
+                    const href = link.getAttribute('href') || '';
                     const text = link.textContent || '';
-                    if (text.toLowerCase().includes('.pdf')) {
-                        return link.getAttribute('href');
+                    if (href || text) {
+                        allLinks.push({
+                            href: href,
+                            text: text.substring(0, 100),
+                            fullHref: link.href  // 브라우저가 해석한 전체 URL
+                        });
                     }
                 }
                 
-                return null;
+                // PDF 링크 찾기 - href 또는 fullHref에서
+                for (const linkInfo of allLinks) {
+                    const href = linkInfo.href.toLowerCase();
+                    const fullHref = linkInfo.fullHref.toLowerCase();
+                    const text = linkInfo.text.toLowerCase();
+                    
+                    if (href.includes('.pdf') || fullHref.includes('.pdf') || text.includes('.pdf')) {
+                        return {
+                            found: true,
+                            href: linkInfo.href,
+                            fullHref: linkInfo.fullHref,
+                            text: linkInfo.text
+                        };
+                    }
+                }
+                
+                return { found: false, links: allLinks.slice(0, 10) };  // 디버그용 처음 10개 링크
             }''')
             
-            if pdf_url:
-                # 상대 경로를 절대 경로로 변환
-                if pdf_url.startswith('http'):
-                    return pdf_url
-                elif pdf_url.startswith('/'):
-                    return f"{self.BASE_URL}{pdf_url}"
-                else:
-                    return f"{self.BASE_URL}/{pdf_url}"
+            if result.get('error'):
+                log(f"    iframe 접근 불가: {result['error']}")
+                return None
             
-            return None
+            if result.get('found'):
+                href = result.get('href', '')
+                full_href = result.get('fullHref', '')
+                text = result.get('text', '')
+                
+                log(f"    [DEBUG] PDF 링크 발견:")
+                log(f"      - href: {href[:100]}...")
+                log(f"      - fullHref: {full_href[:100]}...")
+                log(f"      - text: {text[:50]}...")
+                
+                # fullHref 사용 (브라우저가 해석한 전체 URL)
+                if full_href and full_href.startswith('http') and '.pdf' in full_href.lower():
+                    return full_href
+                
+                # href가 전체 URL인 경우
+                if href.startswith('http'):
+                    return href
+                
+                # href가 프로토콜 상대 경로인 경우 (//로 시작)
+                if href.startswith('//'):
+                    return f"https:{href}"
+                
+                # href가 절대 경로인 경우 (/로 시작)
+                if href.startswith('/'):
+                    return f"{self.BASE_URL}{href}"
+                
+                # 상대 경로 - DART 또는 external 경로일 가능성
+                # fullHref가 유효하면 사용
+                if full_href and full_href.startswith('http'):
+                    return full_href
+                
+                log(f"    [WARN] PDF href 형식 알 수 없음: {href}")
+                return None
+            else:
+                # 디버그: 찾은 링크들 출력
+                links = result.get('links', [])
+                if links and self.debug_dir:
+                    log(f"    [DEBUG] iframe 내 링크 {len(links)}개 (PDF 없음):")
+                    for i, link in enumerate(links[:5]):
+                        log(f"      {i+1}. href={link.get('href', '')[:50]}, text={link.get('text', '')[:30]}")
+                return None
             
         except Exception as e:
             log(f"    iframe PDF 검색 오류: {e}")
+            import traceback
+            log(f"    {traceback.format_exc()}")
             return None
     
     async def _download_pdf_from_url(self, pdf_url: str) -> Optional[bytes]:
