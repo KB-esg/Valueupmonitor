@@ -6,11 +6,21 @@ Playwright 기반으로 KRX KIND 사이트에서 밸류업 공시를 크롤링
 import asyncio
 import re
 import os
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import List, Optional
 from playwright.async_api import async_playwright, Page, Browser
+
+# stdout 버퍼링 해제
+sys.stdout.reconfigure(line_buffering=True)
+
+
+def log(message: str):
+    """타임스탬프와 함께 로그 출력"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
 
 
 @dataclass
@@ -49,6 +59,7 @@ class KRXValueUpCrawler:
         
     async def start(self):
         """브라우저 시작"""
+        log("  → Playwright 브라우저 시작 중...")
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=self.headless)
         self.context = await self.browser.new_context(
@@ -56,6 +67,7 @@ class KRXValueUpCrawler:
             locale="ko-KR"
         )
         self.page = await self.context.new_page()
+        log("  → 브라우저 시작 완료")
         
     async def close(self):
         """브라우저 종료"""
@@ -77,7 +89,9 @@ class KRXValueUpCrawler:
         items = []
         
         # 페이지 로드
-        await self.page.goto(self.LIST_URL, wait_until="networkidle")
+        log("  → 브라우저에서 KRX KIND 페이지 로딩 중...")
+        await self.page.goto(self.LIST_URL, wait_until="networkidle", timeout=60000)
+        log("  → 페이지 로딩 완료")
         await asyncio.sleep(3)
         
         # 기간 설정 (최근 N일)
@@ -86,6 +100,8 @@ class KRXValueUpCrawler:
         
         # 날짜 입력 필드 설정 및 검색
         try:
+            log(f"  → 조회 기간 설정: {start_date.strftime('%Y-%m-%d')} ~ {end_date.strftime('%Y-%m-%d')}")
+            
             # 시작일 설정
             start_input = self.page.locator('input[name="fromDate"]')
             if await start_input.count() > 0:
@@ -97,18 +113,24 @@ class KRXValueUpCrawler:
                 await end_input.fill(end_date.strftime("%Y-%m-%d"))
             
             # 검색 버튼 클릭 (class="btn-search" 또는 검색 이미지 버튼)
+            log("  → 검색 버튼 클릭 중...")
             search_btn = self.page.locator('a.btn-search, button.btn-search, input.btn-search, a:has(img[alt*="검색"])')
             if await search_btn.count() > 0:
                 await search_btn.first.click()
+                log("  → 검색 결과 대기 중...")
                 await asyncio.sleep(3)
+            else:
+                log("  → 검색 버튼을 찾을 수 없음, 기본 목록 사용")
         except Exception as e:
-            print(f"날짜 설정 중 오류 (무시하고 기본값 사용): {e}")
+            log(f"  → 날짜 설정 중 오류 (기본값 사용): {e}")
         
         # 전체 페이지 수 확인 및 모든 페이지 크롤링
         all_items = []
         page_num = 1
         
         while True:
+            log(f"  → 페이지 {page_num} 파싱 중...")
+            
             # 현재 페이지의 테이블 행 추출
             rows = await self.page.locator('table.list tbody tr, table.tbl-list tbody tr, div.list table tbody tr').all()
             
@@ -116,8 +138,9 @@ class KRXValueUpCrawler:
                 # 다른 테이블 구조 시도
                 rows = await self.page.locator('table tbody tr').all()
             
-            print(f"  페이지 {page_num}: {len(rows)}개 행 발견")
+            log(f"  → 페이지 {page_num}: {len(rows)}개 행 발견")
             
+            parsed_count = 0
             for row in rows:
                 try:
                     cells = await row.locator('td').all()
@@ -176,10 +199,13 @@ class KRXValueUpCrawler:
                             원시PDF링크=원시PDF링크
                         )
                         all_items.append(item)
+                        parsed_count += 1
                         
                 except Exception as e:
-                    print(f"행 파싱 중 오류: {e}")
+                    log(f"  → 행 파싱 오류: {e}")
                     continue
+            
+            log(f"  → 페이지 {page_num}: {parsed_count}건 파싱 완료")
             
             # 다음 페이지 확인
             next_btn = self.page.locator('a.next, a:has-text("다음"), a[title="다음"]')
@@ -189,12 +215,15 @@ class KRXValueUpCrawler:
                     await asyncio.sleep(2)
                     page_num += 1
                     if page_num > 10:  # 최대 10페이지까지만
+                        log("  → 최대 페이지(10) 도달, 크롤링 종료")
                         break
                 except:
                     break
             else:
+                log("  → 마지막 페이지 도달")
                 break
         
+        log(f"  → 크롤링 완료: 총 {len(all_items)}건")
         return all_items
     
     async def get_doc_number(self, acptno: str) -> str:
@@ -211,7 +240,8 @@ class KRXValueUpCrawler:
         
         page = await self.context.new_page()
         try:
-            await page.goto(viewer_url, wait_until="networkidle")
+            log(f"      → 문서번호 조회 중: {acptno}")
+            await page.goto(viewer_url, wait_until="networkidle", timeout=30000)
             await asyncio.sleep(2)
             
             # mainDoc select에서 docNo 추출
@@ -220,16 +250,21 @@ class KRXValueUpCrawler:
                 value = await main_doc.first.get_attribute('value') or ""
                 # value 형식: "20251128000575|Y"
                 if '|' in value:
-                    return value.split('|')[0]
+                    doc_no = value.split('|')[0]
+                    log(f"      → 문서번호 발견: {doc_no}")
+                    return doc_no
                 return value
             
             # 또는 hidden input에서 추출
             doc_no_input = page.locator('input#docNo, input[name="docNo"]')
             if await doc_no_input.count() > 0:
-                return await doc_no_input.first.get_attribute('value') or ""
+                doc_no = await doc_no_input.first.get_attribute('value') or ""
+                if doc_no:
+                    log(f"      → 문서번호 발견: {doc_no}")
+                return doc_no
                 
         except Exception as e:
-            print(f"문서번호 추출 중 오류: {e}")
+            log(f"      → 문서번호 추출 오류: {e}")
         finally:
             await page.close()
             
@@ -250,15 +285,16 @@ class KRXValueUpCrawler:
             doc_no = await self.get_doc_number(acptno)
         
         if not doc_no:
-            print(f"문서번호를 찾을 수 없습니다: acptno={acptno}")
+            log(f"      → 문서번호를 찾을 수 없음: {acptno}")
             return None
         
         download_url = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={acptno}&docNo={doc_no}"
         
         page = await self.context.new_page()
         try:
+            log(f"      → PDF 다운로드 시작...")
             # 다운로드 대기 설정
-            async with page.expect_download() as download_info:
+            async with page.expect_download(timeout=60000) as download_info:
                 await page.goto(download_url)
             
             download = await download_info.value
@@ -273,10 +309,11 @@ class KRXValueUpCrawler:
                 pdf_data = f.read()
             
             os.unlink(tmp_path)
+            log(f"      → PDF 다운로드 완료: {len(pdf_data)} bytes")
             return pdf_data
             
         except Exception as e:
-            print(f"PDF 다운로드 중 오류: {e}")
+            log(f"      → PDF 다운로드 오류: {e}")
             return None
         finally:
             await page.close()
