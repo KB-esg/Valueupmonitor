@@ -64,8 +64,14 @@ class GSheetManager:
             if self.spreadsheet_id:
                 try:
                     self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+                    print(f"스프레드시트 연결 성공: {self.spreadsheet.title}")
+                except gspread.exceptions.SpreadsheetNotFound:
+                    print(f"스프레드시트를 찾을 수 없습니다. ID: {self.spreadsheet_id}")
+                    print("  → 서비스 계정에 스프레드시트 공유 권한이 있는지 확인하세요.")
+                except gspread.exceptions.APIError as e:
+                    print(f"Google Sheets API 오류: {e}")
                 except Exception as e:
-                    print(f"스프레드시트 열기 실패: {e}")
+                    print(f"스프레드시트 열기 실패: {type(e).__name__}: {e}")
     
     def get_or_create_worksheet(self, sheet_name: str = "밸류업공시목록") -> Optional[gspread.Worksheet]:
         """
