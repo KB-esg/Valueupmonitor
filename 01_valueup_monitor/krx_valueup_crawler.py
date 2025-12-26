@@ -78,102 +78,124 @@ class KRXValueUpCrawler:
         
         # 페이지 로드
         await self.page.goto(self.LIST_URL, wait_until="networkidle")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         
         # 기간 설정 (최근 N일)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
-        # 날짜 입력 필드 설정
+        # 날짜 입력 필드 설정 및 검색
         try:
             # 시작일 설정
-            start_input = self.page.locator('input[name="fromDate"], input#fromDate').first
+            start_input = self.page.locator('input[name="fromDate"]')
             if await start_input.count() > 0:
                 await start_input.fill(start_date.strftime("%Y-%m-%d"))
             
             # 종료일 설정
-            end_input = self.page.locator('input[name="toDate"], input#toDate').first
+            end_input = self.page.locator('input[name="toDate"]')
             if await end_input.count() > 0:
                 await end_input.fill(end_date.strftime("%Y-%m-%d"))
             
-            # 검색 버튼 클릭
-            search_btn = self.page.locator('button:has-text("검색"), a:has-text("검색"), input[value="검색"]').first
+            # 검색 버튼 클릭 (class="btn-search" 또는 검색 이미지 버튼)
+            search_btn = self.page.locator('a.btn-search, button.btn-search, input.btn-search, a:has(img[alt*="검색"])')
             if await search_btn.count() > 0:
-                await search_btn.click()
-                await asyncio.sleep(2)
+                await search_btn.first.click()
+                await asyncio.sleep(3)
         except Exception as e:
             print(f"날짜 설정 중 오류 (무시하고 기본값 사용): {e}")
         
-        # 테이블 행 추출
-        rows = await self.page.locator('table tbody tr').all()
+        # 전체 페이지 수 확인 및 모든 페이지 크롤링
+        all_items = []
+        page_num = 1
         
-        for row in rows:
-            try:
-                cells = await row.locator('td').all()
-                if len(cells) < 4:
+        while True:
+            # 현재 페이지의 테이블 행 추출
+            rows = await self.page.locator('table.list tbody tr, table.tbl-list tbody tr, div.list table tbody tr').all()
+            
+            if not rows:
+                # 다른 테이블 구조 시도
+                rows = await self.page.locator('table tbody tr').all()
+            
+            print(f"  페이지 {page_num}: {len(rows)}개 행 발견")
+            
+            for row in rows:
+                try:
+                    cells = await row.locator('td').all()
+                    if len(cells) < 4:
+                        continue
+                    
+                    # 번호
+                    번호_text = await cells[0].text_content()
+                    번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
+                    
+                    # 공시일자
+                    공시일자 = (await cells[1].text_content() or "").strip()
+                    
+                    # 회사명 및 종목코드
+                    회사명_full = (await cells[2].text_content() or "").strip()
+                    
+                    # 회사명과 종목코드 분리
+                    회사명_parts = 회사명_full.split()
+                    회사명 = 회사명_parts[0] if 회사명_parts else ""
+                    
+                    # 종목코드 추출
+                    종목코드 = ""
+                    stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
+                    if stock_code_match:
+                        종목코드 = stock_code_match.group()
+                    
+                    # 공시제목
+                    공시제목 = (await cells[3].text_content() or "").strip()
+                    
+                    # 접수번호 추출 (행의 HTML에서)
+                    row_html = await row.inner_html()
+                    접수번호 = ""
+                    
+                    # onclick 또는 href에서 acptno 추출
+                    acptno_match = re.search(r'acptno[=\'"\s:]+[\'"]?(\d+)', row_html, re.IGNORECASE)
+                    if acptno_match:
+                        접수번호 = acptno_match.group(1)
+                    
+                    if not 접수번호:
+                        # openDisclsViewer 함수 파라미터에서 추출 시도
+                        viewer_match = re.search(r'openDisclsViewer\s*\(\s*[\'"](\d+)[\'"]', row_html)
+                        if viewer_match:
+                            접수번호 = viewer_match.group(1)
+                    
+                    if 접수번호:
+                        원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
+                        
+                        item = DisclosureItem(
+                            번호=번호,
+                            공시일자=공시일자,
+                            회사명=회사명,
+                            종목코드=종목코드,
+                            공시제목=공시제목,
+                            접수번호=접수번호,
+                            문서번호="",
+                            원시PDF링크=원시PDF링크
+                        )
+                        all_items.append(item)
+                        
+                except Exception as e:
+                    print(f"행 파싱 중 오류: {e}")
                     continue
-                
-                # 번호
-                번호_text = await cells[0].text_content()
-                번호 = int(번호_text.strip()) if 번호_text and 번호_text.strip().isdigit() else 0
-                
-                # 공시일자
-                공시일자 = (await cells[1].text_content() or "").strip()
-                
-                # 회사명 및 종목코드
-                company_cell = cells[2]
-                회사명_full = (await company_cell.text_content() or "").strip()
-                
-                # 회사명과 종목코드 분리 (예: "삼성전자 005930" 또는 링크에서)
-                회사명 = 회사명_full.split()[0] if 회사명_full else ""
-                
-                # 종목코드 추출 (링크나 배지에서)
-                종목코드 = ""
-                stock_code_match = re.search(r'[A-Z]?\d{6}', 회사명_full)
-                if stock_code_match:
-                    종목코드 = stock_code_match.group()
-                
-                # 공시제목
-                공시제목 = (await cells[3].text_content() or "").strip()
-                
-                # 접수번호 추출 (링크에서)
-                link = await row.locator('a[onclick*="acptno"], a[href*="acptno"]').first
-                접수번호 = ""
-                if await link.count() > 0:
-                    onclick = await link.get_attribute('onclick') or ""
-                    href = await link.get_attribute('href') or ""
-                    
-                    acptno_match = re.search(r'acptno[=\'":\s]+(\d+)', onclick + href)
-                    if acptno_match:
-                        접수번호 = acptno_match.group(1)
-                
-                if not 접수번호:
-                    # 다른 방식으로 접수번호 추출 시도
-                    all_text = await row.inner_html()
-                    acptno_match = re.search(r'acptno[=\'"\s:]+(\d+)', all_text)
-                    if acptno_match:
-                        접수번호 = acptno_match.group(1)
-                
-                if 접수번호:
-                    원시PDF링크 = f"{self.PDF_DOWNLOAD_URL}?method=pdfDown&acptNo={접수번호}"
-                    
-                    item = DisclosureItem(
-                        번호=번호,
-                        공시일자=공시일자,
-                        회사명=회사명,
-                        종목코드=종목코드,
-                        공시제목=공시제목,
-                        접수번호=접수번호,
-                        문서번호="",
-                        원시PDF링크=원시PDF링크
-                    )
-                    items.append(item)
-                    
-            except Exception as e:
-                print(f"행 파싱 중 오류: {e}")
-                continue
+            
+            # 다음 페이지 확인
+            next_btn = self.page.locator('a.next, a:has-text("다음"), a[title="다음"]')
+            if await next_btn.count() > 0 and await next_btn.first.is_visible():
+                try:
+                    await next_btn.first.click()
+                    await asyncio.sleep(2)
+                    page_num += 1
+                    if page_num > 10:  # 최대 10페이지까지만
+                        break
+                except:
+                    break
+            else:
+                break
         
-        return items
+        return all_items
     
     async def get_doc_number(self, acptno: str) -> str:
         """
@@ -195,7 +217,7 @@ class KRXValueUpCrawler:
             # mainDoc select에서 docNo 추출
             main_doc = page.locator('select#mainDoc option[selected], select#mainDoc option:nth-child(2)')
             if await main_doc.count() > 0:
-                value = await main_doc.get_attribute('value') or ""
+                value = await main_doc.first.get_attribute('value') or ""
                 # value 형식: "20251128000575|Y"
                 if '|' in value:
                     return value.split('|')[0]
@@ -204,7 +226,7 @@ class KRXValueUpCrawler:
             # 또는 hidden input에서 추출
             doc_no_input = page.locator('input#docNo, input[name="docNo"]')
             if await doc_no_input.count() > 0:
-                return await doc_no_input.get_attribute('value') or ""
+                return await doc_no_input.first.get_attribute('value') or ""
                 
         except Exception as e:
             print(f"문서번호 추출 중 오류: {e}")
