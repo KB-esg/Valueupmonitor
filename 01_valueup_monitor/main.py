@@ -6,12 +6,25 @@ KRX Value-Up 모니터 메인 실행 파일
 import asyncio
 import os
 import sys
+import json
 from dataclasses import asdict
 from typing import Optional
 
 from krx_valueup_crawler import KRXValueUpCrawler, DisclosureItem
 from gdrive_uploader import GDriveUploader
 from gsheet_manager import GSheetManager
+
+
+def get_service_account_email() -> str:
+    """서비스 계정 이메일 추출"""
+    creds_json = os.environ.get('GOOGLE_SERVICE', '')
+    if creds_json:
+        try:
+            info = json.loads(creds_json)
+            return info.get('client_email', '(이메일 없음)')
+        except json.JSONDecodeError:
+            return '(JSON 파싱 실패)'
+    return '(GOOGLE_SERVICE 미설정)'
 
 
 class ValueUpMonitor:
@@ -33,9 +46,9 @@ class ValueUpMonitor:
             gdrive_folder_id: 구글드라이브 폴더 ID
             days: 조회할 기간(일)
         """
-        self.credentials_json = credentials_json or os.environ.get('GOOGLE_CREDENTIALS')
-        self.spreadsheet_id = spreadsheet_id or os.environ.get('GSHEET_SPREADSHEET_ID')
-        self.gdrive_folder_id = gdrive_folder_id or os.environ.get('GDRIVE_FOLDER_ID')
+        self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
+        self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
+        self.gdrive_folder_id = gdrive_folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         self.days = days
         
         # 컴포넌트 초기화
@@ -65,6 +78,9 @@ class ValueUpMonitor:
         print("=" * 60)
         print("KRX Value-Up 공시 모니터 시작")
         print("=" * 60)
+        print(f"서비스 계정: {get_service_account_email()}")
+        print(f"스프레드시트 ID: {self.spreadsheet_id}")
+        print(f"드라이브 폴더 ID: {self.gdrive_folder_id}")
         
         # 1. KRX에서 공시 목록 크롤링
         print(f"\n[1단계] KRX에서 최근 {self.days}일간 공시 목록 조회 중...")
@@ -157,15 +173,15 @@ class ValueUpMonitor:
 async def main():
     """메인 함수"""
     # 환경변수 확인
-    required_env = ['GOOGLE_CREDENTIALS', 'GSHEET_SPREADSHEET_ID']
+    required_env = ['GOOGLE_SERVICE', 'VALUEUP_GSPREAD_ID']
     missing = [e for e in required_env if not os.environ.get(e)]
     
     if missing:
         print(f"필수 환경변수가 설정되지 않았습니다: {', '.join(missing)}")
         print("\n필요한 환경변수:")
-        print("  - GOOGLE_CREDENTIALS: 서비스 계정 JSON")
-        print("  - GSHEET_SPREADSHEET_ID: 스프레드시트 ID")
-        print("  - GDRIVE_FOLDER_ID: (선택) 구글드라이브 폴더 ID")
+        print("  - GOOGLE_SERVICE: 서비스 계정 JSON")
+        print("  - VALUEUP_GSPREAD_ID: 스프레드시트 ID")
+        print("  - VALUEUP_ARCHIVE_ID: (선택) 구글드라이브 폴더 ID")
         sys.exit(1)
     
     # 조회 기간 (기본 7일)
