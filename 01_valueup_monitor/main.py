@@ -182,9 +182,18 @@ class ValueUpMonitor:
                     for idx, item in enumerate(pending_items, 1):
                         acptno = item.get('접수번호', '')
                         company = item.get('회사명', '')
-                        date = item.get('공시일자', '').replace('-', '').replace(' ', '_').replace(':', '')
+                        date_str = item.get('공시일자', '').replace('-', '').replace(' ', '_').replace(':', '')
                         
                         log(f"  [{idx}/{len(pending_items)}] {company} ({acptno})...")
+                        
+                        # 공시 날짜 파싱 (월별 폴더용)
+                        disclosure_date = None
+                        try:
+                            date_part = date_str[:8]  # YYYYMMDD
+                            if len(date_part) == 8:
+                                disclosure_date = datetime.strptime(date_part, "%Y%m%d")
+                        except:
+                            pass
                         
                         try:
                             # PDF 다운로드
@@ -193,7 +202,7 @@ class ValueUpMonitor:
                             if pdf_data:
                                 # 파일명 생성: 공시일자_회사명_접수번호.pdf
                                 safe_company = re.sub(r'[^\w가-힣]', '', company)
-                                filename = f"{date[:8]}_{safe_company}_{acptno}.pdf"
+                                filename = f"{date_str[:8]}_{safe_company}_{acptno}.pdf"
                                 filepath = os.path.join(self.PDF_OUTPUT_DIR, filename)
                                 
                                 # 1) 로컬에 PDF 저장 (항상)
@@ -203,9 +212,15 @@ class ValueUpMonitor:
                                 log(f"      → 로컬 저장: {filename} ({len(pdf_data):,} bytes)")
                                 
                                 # 2) Google Drive 업로드 (가능한 경우)
+                                #    월별 폴더에 저장: PDF_archive/YY_MM/
                                 gdrive_link = None
                                 if self.drive_ready:
-                                    gdrive_link = self.drive_uploader.upload_pdf(pdf_data, filename)
+                                    gdrive_link = self.drive_uploader.upload_pdf(
+                                        pdf_data, 
+                                        filename,
+                                        use_monthly_folder=True,
+                                        date=disclosure_date
+                                    )
                                     if gdrive_link:
                                         result['pdf_uploaded'] += 1
                                         log(f"      → Drive 업로드: {gdrive_link}")
