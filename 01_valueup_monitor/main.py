@@ -60,6 +60,10 @@ class ValueUpMonitor:
             credentials_json=self.credentials_json,
             folder_id=self.gdrive_folder_id
         )
+        
+        # 연결 상태 확인
+        self.sheet_ready = self.sheet_manager.spreadsheet is not None
+        self.drive_ready = self.drive_uploader.service is not None
     
     async def run(self) -> dict:
         """
@@ -81,6 +85,14 @@ class ValueUpMonitor:
         print(f"서비스 계정: {get_service_account_email()}")
         print(f"스프레드시트 ID: {self.spreadsheet_id}")
         print(f"드라이브 폴더 ID: {self.gdrive_folder_id}")
+        print(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
+        print(f"Google Drive 연결: {'성공' if self.drive_ready else '실패'}")
+        
+        if not self.sheet_ready:
+            print("\n[오류] Google Sheets에 연결할 수 없습니다.")
+            print("  → 서비스 계정에 스프레드시트 편집 권한이 있는지 확인하세요.")
+            result['errors'].append("Google Sheets 연결 실패")
+            return result
         
         # 1. KRX에서 공시 목록 크롤링
         print(f"\n[1단계] KRX에서 최근 {self.days}일간 공시 목록 조회 중...")
