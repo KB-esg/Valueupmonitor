@@ -86,20 +86,28 @@ KRX 밸류업 공시 PDF를 LLM(Claude/Gemini)으로 분석하여 기업별 목�
 
 | 변수명 | 설명 |
 |--------|------|
-| `GOOGLE_SERVICE` | 서비스 계정 JSON |
+| `GOOGLE_SERVICE` | 서비스 계정 JSON (메인 시트 접근용) |
 | `VALUEUP_GSPREAD_ID` | Google Sheets 스프레드시트 ID |
 | `ANT_ANALYTIC` | Claude API 키 (기본 분석기) |
 
-### 선택
+### 선택 - OAuth2 (기업별 시트 저장용, 개인 Drive)
+
+| 변수명 | 설명 |
+|--------|------|
+| `GDRIVE_REFRESH_TOKEN` | OAuth2 리프레시 토큰 |
+| `GDRIVE_CLIENT_ID` | OAuth2 클라이언트 ID |
+| `GDRIVE_CLIENT_SECRET` | OAuth2 클라이언트 시크릿 |
+| `VALUEUP_ARCHIVE_ID` | 01_Valueup_archive 폴더 ID |
+
+> **Note**: 기업별 스프레드시트는 OAuth2 계정의 개인 Drive에 저장됩니다.
+> 서비스 계정은 저장 공간 제한이 있어 Storage Quota 에러가 발생할 수 있습니다.
+
+### 선택 - 기타
 
 | 변수명 | 설명 |
 |--------|------|
 | `GEM_ANALYTIC` | Gemini API 키 (대체 분석기) |
 | `ANALYZER_TYPE` | 분석기 선택: `claude`(기본) / `gemini` |
-| `VALUEUP_ARCHIVE_ID` | 기업별 시트 저장 폴더 ID |
-| `GDRIVE_REFRESH_TOKEN` | OAuth2 리프레시 토큰 |
-| `GDRIVE_CLIENT_ID` | OAuth2 클라이언트 ID |
-| `GDRIVE_CLIENT_SECRET` | OAuth2 클라이언트 시크릿 |
 
 ### 실행 옵션
 
