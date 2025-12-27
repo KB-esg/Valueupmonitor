@@ -617,8 +617,19 @@ class KRXValueUpCrawler:
                     break
                 await asyncio.sleep(1)
         
-        log(f"총 {len(all_items)}건 수집 완료")
-        return all_items
+        # 중복 접수번호 제거
+        seen_acptno = set()
+        unique_items = []
+        for item in all_items:
+            if item.접수번호 not in seen_acptno:
+                seen_acptno.add(item.접수번호)
+                unique_items.append(item)
+        
+        if len(unique_items) < len(all_items):
+            log(f"  중복 제거: {len(all_items)} → {len(unique_items)}건")
+        
+        log(f"총 {len(unique_items)}건 수집 완료")
+        return unique_items
     
     async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
