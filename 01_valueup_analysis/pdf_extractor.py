@@ -50,6 +50,8 @@ def log(message: str):
     """타임스탬프와 함께 로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 class PDFExtractor:
