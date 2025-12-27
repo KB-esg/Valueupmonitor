@@ -43,14 +43,19 @@ class ClaudeAnalyzer:
     # 모델 설정
     DEFAULT_MODEL = "claude-3-5-haiku-20241022"
     
-    # 분석 결과 템플릿
+    # 분석 결과 템플릿 (확장 버전)
     RESULT_TEMPLATE = {
         "level": 0,  # 0: 언급없음, 1: 정성적, 2: 정량적
-        "current_value": None,
-        "target_min": None,    # 목표값 최소 (예: ROE 8~10% → 8)
-        "target_max": None,    # 목표값 최대 (예: ROE 8~10% → 10)
-        "target_year": None,
-        "note": ""
+        "current_value": None,        # 현재값 (누적 또는 최신 실적)
+        "mid_target_min": None,       # 중기 목표 최소 (1~2년 내)
+        "mid_target_max": None,       # 중기 목표 최대
+        "mid_target_year": None,      # 중기 목표 연도
+        "long_target_min": None,      # 장기 목표 최소 (3년 이상)
+        "long_target_max": None,      # 장기 목표 최대
+        "long_target_year": None,     # 장기 목표 연도
+        "progress_summary": "",       # 이행동향 (진행상황 요약)
+        "action_plan": "",            # 목표달성방안 (계획/전략)
+        "note": ""                    # 비고
     }
     
     def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
@@ -98,39 +103,48 @@ class ClaudeAnalyzer:
             시스템 프롬프트 텍스트
         """
         prompt = """당신은 한국 상장기업의 '기업가치 제고 계획(밸류업)' 공시를 분석하는 전문가입니다.
-주어진 PDF 텍스트를 분석하여 프레임워크에 정의된 각 항목별로 정보를 추출해주세요.
+주어진 PDF 텍스트를 분석하여 프레임워크에 정의된 각 항목별로 상세 정보를 추출해주세요.
 
 ## 추출 규칙
 
 1. **level (필수)**
    - 0: 해당 항목에 대한 언급이 전혀 없음
-   - 1: 정성적 언급만 있음 (방향/계획만, 예: "배당 확대 예정", "수익성 개선 노력")
-   - 2: 정량적 수치가 제시됨 (예: "배당성향 40% 목표", "ROE 15% 달성")
+   - 1: 정성적 언급만 있음 (방향/계획만)
+   - 2: 정량적 수치가 제시됨
 
-2. **current_value**
-   - 현재 수치 (보고서 기준연도 또는 최근 실적)
-   - 수치가 언급되지 않으면 null
+2. **current_value (현재값)**
+   - 현재 실적 또는 누적 이행 현황
+   - 예: ROE 3%, 자사주 소각 308만주 (누적), 배당성향 76%
+   - 수치가 없으면 null
 
-3. **target_min, target_max** (목표값 범위)
-   - 단일 목표: target_min = target_max (예: "배당성향 60%" → target_min: 60, target_max: 60)
-   - 범위 목표: target_min ≠ target_max (예: "ROE 8~10%" → target_min: 8, target_max: 10)
-   - 이상/이하 표현: (예: "ROE 10% 이상" → target_min: 10, target_max: null)
-   - 수치가 언급되지 않으면 null
+3. **중기 목표 (1~2년 내)**
+   - mid_target_min: 중기 목표 최소값
+   - mid_target_max: 중기 목표 최대값 (범위가 아니면 min과 동일)
+   - mid_target_year: 중기 목표 연도 (예: 2025, 2026)
 
-4. **target_year**
-   - 목표 달성 연도 (예: 2025, 2027)
-   - 연도가 언급되지 않으면 null
+4. **장기 목표 (3년 이상)**
+   - long_target_min: 장기 목표 최소값
+   - long_target_max: 장기 목표 최대값
+   - long_target_year: 장기 목표 연도 (예: 2027, 2030)
 
-5. **note**
-   - 관련 문장 인용 또는 요약 (50자 이내)
-   - 언급이 없으면 빈 문자열
+5. **progress_summary (이행동향)**
+   - 현재까지의 진행상황을 간결하게 요약 (100자 이내)
+   - 예: "24년 저점으로 25년부터 개선세 진입", "25.4월 5만주, 25.9월 303만주 소각 완료"
+
+6. **action_plan (목표달성방안)**
+   - 향후 계획/전략을 블릿 포인트로 정리 (150자 이내)
+   - 예: "• A,B,C 영역 투자성과 창출\\n• 계열사 경쟁력 강화\\n• 광화문빌딩 매각대금 활용"
+
+7. **note (비고)**
+   - 특이사항이나 추가 설명 (50자 이내)
 
 ## 주의사항
-- 금액 단위는 억원으로 통일 (1조원 = 10000억원)
-- 비율은 % 단위로 통일 (% 기호 제외, 숫자만)
-- 불확실한 정보는 추측하지 말고 null로 표시
+- 금액 단위: 억원 (1조원 = 10000억원), 주식수는 주 단위
+- 비율: % 단위 (기호 제외, 숫자만)
+- 목표가 단일값이면 min = max로 동일하게 입력
+- 중기/장기 구분이 불명확하면 문맥상 판단 (보통 1~2년=중기, 3년 이상=장기)
 - Core 항목(is_core=true)은 반드시 분석 시도
-- 응답은 반드시 JSON 형식으로만 해주세요
+- 응답은 반드시 JSON 형식으로만
 
 """
         # 프레임워크 항목 추가
@@ -171,9 +185,14 @@ class ClaudeAnalyzer:
 ```
 
 ## 응답 형식
-아래 JSON 형식으로 응답하세요. 각 항목에 대해 level, current_value, target_min, target_max, target_year, note를 분석해주세요.
-- target_min, target_max: 목표가 범위인 경우 (예: ROE 8~10% → target_min: 8, target_max: 10)
-- 단일 목표인 경우: target_min = target_max (예: 배당성향 60% → target_min: 60, target_max: 60)
+각 항목에 대해 상세 분석 결과를 JSON으로 응답하세요.
+
+**필드 설명:**
+- current_value: 현재 실적/누적 이행 현황 (예: ROE 3, 자사주 소각 308만주)
+- mid_target_min/max: 중기(1~2년) 목표 범위, mid_target_year: 중기 목표연도
+- long_target_min/max: 장기(3년+) 목표 범위, long_target_year: 장기 목표연도
+- progress_summary: 이행동향 요약 (예: "24년 저점으로 개선세 진입")
+- action_plan: 목표달성방안 (예: "• ABC 영역 투자\\n• 자본효율화")
 
 ```json
 {{
@@ -186,9 +205,14 @@ class ClaudeAnalyzer:
             prompt += f"""    "{item_id}": {{
       "level": 0,
       "current_value": null,
-      "target_min": null,
-      "target_max": null,
-      "target_year": null,
+      "mid_target_min": null,
+      "mid_target_max": null,
+      "mid_target_year": null,
+      "long_target_min": null,
+      "long_target_max": null,
+      "long_target_year": null,
+      "progress_summary": "",
+      "action_plan": "",
       "note": ""
     }}{comma}
 """
@@ -198,8 +222,22 @@ class ClaudeAnalyzer:
     "total_items_mentioned": 0,
     "core_items_mentioned": 0,
     "key_highlights": []
-  }
+  },
+  "special_notes": []
 }
+```
+
+**special_notes 예시:** 광화문빌딩 매각(4000억)처럼 특별 이벤트가 있으면 별도 배열로 기록:
+```json
+"special_notes": [
+  {
+    "title": "광화문빌딩 매각",
+    "amount": "4000억원",
+    "date": "2025-12-31",
+    "usage": "• 미래투자 (설비/R&D/M&A)\\n• 주주환원 재원",
+    "status": "확정 (활용방안 검토중)"
+  }
+]
 ```
 
 위 형식을 정확히 따라 JSON으로만 응답해주세요.
@@ -223,10 +261,14 @@ class ClaudeAnalyzer:
         prompt = f"""## 분석 대상
 - 회사명: {company_name}
 
-첨부된 PDF 문서를 분석하여 아래 JSON 형식으로 응답해주세요.
-각 항목에 대해 level, current_value, target_min, target_max, target_year, note를 분석해주세요.
-- target_min, target_max: 목표가 범위인 경우 (예: ROE 8~10% → target_min: 8, target_max: 10)
-- 단일 목표인 경우: target_min = target_max (예: 배당성향 60% → target_min: 60, target_max: 60)
+첨부된 PDF 문서를 분석하여 JSON 형식으로 응답해주세요.
+
+**필드 설명:**
+- current_value: 현재 실적/누적 이행 현황 (예: ROE 3, 자사주 소각 308만주)
+- mid_target_min/max: 중기(1~2년) 목표 범위, mid_target_year: 중기 목표연도
+- long_target_min/max: 장기(3년+) 목표 범위, long_target_year: 장기 목표연도
+- progress_summary: 이행동향 요약 (예: "24년 저점으로 개선세 진입")
+- action_plan: 목표달성방안 (예: "• ABC 영역 투자\\n• 자본효율화")
 
 ```json
 {{
@@ -239,9 +281,14 @@ class ClaudeAnalyzer:
             prompt += f"""    "{item_id}": {{
       "level": 0,
       "current_value": null,
-      "target_min": null,
-      "target_max": null,
-      "target_year": null,
+      "mid_target_min": null,
+      "mid_target_max": null,
+      "mid_target_year": null,
+      "long_target_min": null,
+      "long_target_max": null,
+      "long_target_year": null,
+      "progress_summary": "",
+      "action_plan": "",
       "note": ""
     }}{comma}
 """
@@ -251,8 +298,22 @@ class ClaudeAnalyzer:
     "total_items_mentioned": 0,
     "core_items_mentioned": 0,
     "key_highlights": []
-  }
+  },
+  "special_notes": []
 }
+```
+
+**special_notes 예시:** 광화문빌딩 매각(4000억)처럼 특별 이벤트가 있으면 별도 배열로 기록:
+```json
+"special_notes": [
+  {
+    "title": "광화문빌딩 매각",
+    "amount": "4000억원",
+    "date": "2025-12-31",
+    "usage": "• 미래투자 (설비/R&D/M&A)\\n• 주주환원 재원",
+    "status": "확정 (활용방안 검토중)"
+  }
+]
 ```
 
 위 형식을 정확히 따라 JSON으로만 응답해주세요.
@@ -594,25 +655,45 @@ class ClaudeAnalyzer:
         for item in framework.items:
             item_data = analysis_items.get(item.item_id, self.RESULT_TEMPLATE.copy())
             
-            # target_value 하위 호환 (기존 데이터 지원)
-            target_min = item_data.get('target_min')
-            target_max = item_data.get('target_max')
+            # 하위 호환: 이전 버전 target_min/max 또는 target_value
+            mid_target_min = item_data.get('mid_target_min')
+            mid_target_max = item_data.get('mid_target_max')
+            long_target_min = item_data.get('long_target_min')
+            long_target_max = item_data.get('long_target_max')
             
-            # 이전 버전 호환: target_value만 있는 경우
-            if target_min is None and target_max is None:
-                old_target = item_data.get('target_value')
-                if old_target is not None:
-                    target_min = old_target
-                    target_max = old_target
+            # 이전 버전 호환: target_min/max만 있는 경우 → 장기 목표로 매핑
+            if mid_target_min is None and long_target_min is None:
+                old_target_min = item_data.get('target_min')
+                old_target_max = item_data.get('target_max')
+                old_target_year = item_data.get('target_year')
+                
+                if old_target_min is None and old_target_max is None:
+                    # target_value만 있는 아주 오래된 버전
+                    old_target = item_data.get('target_value')
+                    if old_target is not None:
+                        long_target_min = old_target
+                        long_target_max = old_target
+                else:
+                    long_target_min = old_target_min
+                    long_target_max = old_target_max
+                
+                # target_year도 장기로 매핑
+                if item_data.get('long_target_year') is None and old_target_year:
+                    item_data['long_target_year'] = old_target_year
             
             sheet_data['items'][item.item_id] = {
                 'item_name': item.item_name,
                 'is_core': item.is_core,
                 'level': item_data.get('level', 0),
                 'current_value': item_data.get('current_value'),
-                'target_min': target_min,
-                'target_max': target_max,
-                'target_year': item_data.get('target_year'),
+                'mid_target_min': mid_target_min,
+                'mid_target_max': mid_target_max,
+                'mid_target_year': item_data.get('mid_target_year'),
+                'long_target_min': long_target_min,
+                'long_target_max': long_target_max,
+                'long_target_year': item_data.get('long_target_year'),
+                'progress_summary': item_data.get('progress_summary', ''),
+                'action_plan': item_data.get('action_plan', ''),
                 'note': item_data.get('note', '')
             }
         
@@ -623,6 +704,9 @@ class ClaudeAnalyzer:
             'core_items_mentioned': summary.get('core_items_mentioned', 0),
             'key_highlights': summary.get('key_highlights', [])
         }
+        
+        # 특기사항
+        sheet_data['special_notes'] = result.get('special_notes', [])
         
         return sheet_data
 
