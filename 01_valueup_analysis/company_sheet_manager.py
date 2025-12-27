@@ -85,32 +85,32 @@ class CompanySheetManager:
         self._init_clients()
     
     def _init_clients(self):
-        """Google API 클라이언트 초기화 (OAuth2 우선)"""
+        """Google API 클라이언트 초기화 (OAuth2 전용 - 서비스 계정 fallback 없음)"""
         if not self.archive_folder_id:
             log("[WARN] VALUEUP_ARCHIVE_ID 환경변수가 설정되지 않았습니다. 기업별 시트 저장 비활성화.")
             return
         
-        # 1. OAuth2 인증 시도 (개인 계정 - 우선)
+        # OAuth2 인증만 사용 (서비스 계정은 Storage Quota 문제로 사용 안함)
         if self.refresh_token and self.client_id and self.client_secret:
             try:
                 self._init_oauth2()
                 self.auth_method = 'OAuth2'
-                log(f"CompanySheetManager 초기화 완료 (OAuth2 - 개인 계정)")
+                
+                # OAuth2 계정 이메일 확인
+                oauth_email = self._get_oauth_email()
+                if oauth_email:
+                    log(f"CompanySheetManager 초기화 완료 (OAuth2: {oauth_email})")
+                else:
+                    log(f"CompanySheetManager 초기화 완료 (OAuth2)")
                 return
             except Exception as e:
-                log(f"[WARN] OAuth2 인증 실패: {e}")
-        
-        # 2. 서비스 계정 인증 (fallback)
-        if self.credentials_json:
-            try:
-                self._init_service_account()
-                self.auth_method = 'ServiceAccount'
-                log(f"CompanySheetManager 초기화 완료 (서비스 계정)")
+                log(f"[ERROR] OAuth2 인증 실패: {e}")
+                log("[ERROR] 기업별 시트 저장을 위해서는 OAuth2 인증이 필요합니다.")
+                log("  → GDRIVE_REFRESH_TOKEN, GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET 환경변수를 확인하세요.")
                 return
-            except Exception as e:
-                log(f"[ERROR] 서비스 계정 인증 실패: {e}")
         
-        log("[ERROR] 기업별 시트 저장을 위한 인증 정보가 없습니다.")
+        log("[ERROR] 기업별 시트 저장을 위한 OAuth2 인증 정보가 없습니다.")
+        log("  → 서비스 계정은 Storage Quota 제한으로 사용할 수 없습니다.")
     
     def _init_oauth2(self):
         """OAuth2 인증 초기화 (개인 계정)"""
@@ -135,31 +135,20 @@ class CompanySheetManager:
         # Drive API 클라이언트
         self.drive_service = build('drive', 'v3', credentials=creds)
     
-    def _init_service_account(self):
-        """서비스 계정 인증 초기화 (fallback)"""
-        from google.oauth2.service_account import Credentials
-        
-        creds_info = json.loads(self.credentials_json)
-        creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
-        
-        # gspread 클라이언트
-        self.gc = gspread.authorize(creds)
-        
-        # Drive API 클라이언트
-        self.drive_service = build('drive', 'v3', credentials=creds)
-    
     def _get_or_create_analysis_folder(self) -> Optional[str]:
         """
-        ValueUp_analysis 폴더 ID 조회 또는 생성
+        ValueUp_analysis 폴더 ID 조회 또는 생성 (OAuth2 전용)
         
         로직:
-        1. OAuth2로 폴더 검색
-        2. 못 찾으면 서비스 계정으로 재검색
-        3. 서비스 계정 폴더 발견 시 OAuth2 계정에 권한 추가 + 소유권 이전 시도
-        4. 그래도 없으면 OAuth2로 새로 생성
+        1. OAuth2로 폴더 검색 (내가 Owner인 폴더)
+        2. 못 찾으면 서비스 계정 소유 폴더 체크 → 있으면 에러 (삭제 필요)
+        3. 없으면 OAuth2로 새로 생성
         
         Returns:
             폴더 ID 또는 None
+            
+        Raises:
+            RuntimeError: 서비스 계정 소유 폴더가 존재할 경우
         """
         if self.analysis_folder_id:
             return self.analysis_folder_id
@@ -168,7 +157,9 @@ class CompanySheetManager:
             return None
         
         try:
-            # 1. OAuth2 계정으로 폴더 검색
+            # 1. OAuth2 계정으로 폴더 검색 (내가 Owner인 폴더)
+            oauth_email = self._get_oauth_email()
+            
             query = (
                 f"name = '{self.ANALYSIS_FOLDER_NAME}' and "
                 f"'{self.archive_folder_id}' in parents and "
@@ -185,23 +176,40 @@ class CompanySheetManager:
             files = results.get('files', [])
             
             if files:
-                self.analysis_folder_id = files[0]['id']
-                log(f"기존 {self.ANALYSIS_FOLDER_NAME} 폴더 발견 (OAuth2): {self.analysis_folder_id}")
-                return self.analysis_folder_id
+                folder = files[0]
+                folder_id = folder['id']
+                owners = folder.get('owners', [])
+                
+                # Owner 확인
+                owner_emails = [o.get('emailAddress', '') for o in owners]
+                
+                if oauth_email and oauth_email in owner_emails:
+                    # OAuth2 계정이 Owner - 정상
+                    self.analysis_folder_id = folder_id
+                    log(f"기존 {self.ANALYSIS_FOLDER_NAME} 폴더 발견 (Owner: {oauth_email})")
+                    return self.analysis_folder_id
+                else:
+                    # OAuth2 계정이 Owner가 아님 (서비스 계정 등)
+                    owner_str = ', '.join(owner_emails) if owner_emails else 'Unknown'
+                    log(f"[ERROR] {self.ANALYSIS_FOLDER_NAME} 폴더의 Owner가 OAuth2 계정이 아닙니다!")
+                    log(f"  → 현재 Owner: {owner_str}")
+                    log(f"  → OAuth2 계정: {oauth_email}")
+                    log(f"  → 해당 폴더를 삭제하고 다시 실행하세요.")
+                    self._storage_quota_exceeded = True
+                    raise RuntimeError(f"서비스 계정 소유 폴더 존재: {folder_id}")
             
-            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색
+            # 2. OAuth2로 못 찾았으면 서비스 계정 소유 폴더 체크
             sa_folder_id = self._search_folder_with_service_account()
             
             if sa_folder_id:
-                # 3. 서비스 계정 폴더 발견 → OAuth2 계정에 권한 추가 및 소유권 이전
-                log(f"서비스 계정 소유 폴더 발견: {sa_folder_id}")
-                if self._transfer_ownership(sa_folder_id):
-                    self.analysis_folder_id = sa_folder_id
-                    return self.analysis_folder_id
-                else:
-                    log("[WARN] 소유권 이전 실패, 새 폴더 생성...")
+                log(f"[ERROR] 서비스 계정 소유 {self.ANALYSIS_FOLDER_NAME} 폴더가 존재합니다!")
+                log(f"  → 폴더 ID: {sa_folder_id}")
+                log(f"  → Google Drive에서 해당 폴더를 삭제하고 다시 실행하세요.")
+                log(f"  → (서비스 계정 소유 폴더는 Storage Quota 문제로 사용할 수 없습니다)")
+                self._storage_quota_exceeded = True
+                raise RuntimeError(f"서비스 계정 소유 폴더 존재: {sa_folder_id}")
             
-            # 4. 폴더가 없으면 OAuth2로 새로 생성
+            # 3. 폴더가 없으면 OAuth2로 새로 생성
             folder_metadata = {
                 'name': self.ANALYSIS_FOLDER_NAME,
                 'mimeType': 'application/vnd.google-apps.folder',
@@ -215,9 +223,11 @@ class CompanySheetManager:
             ).execute()
             
             self.analysis_folder_id = folder['id']
-            log(f"{self.ANALYSIS_FOLDER_NAME} 폴더 생성 완료 (OAuth2): {self.analysis_folder_id}")
+            log(f"{self.ANALYSIS_FOLDER_NAME} 폴더 생성 완료 (Owner: {oauth_email})")
             return self.analysis_folder_id
             
+        except RuntimeError:
+            raise  # 서비스 계정 폴더 존재 에러는 그대로 전파
         except Exception as e:
             log(f"[ERROR] 폴더 조회/생성 실패: {e}")
             return None
@@ -261,86 +271,6 @@ class CompanySheetManager:
         except Exception as e:
             log(f"[WARN] 서비스 계정 폴더 검색 실패: {e}")
             return None
-    
-    def _transfer_ownership(self, folder_id: str) -> bool:
-        """
-        서비스 계정 소유 폴더의 소유권을 OAuth2 계정으로 이전
-        
-        Args:
-            folder_id: 폴더 ID
-            
-        Returns:
-            성공 여부
-        """
-        if not self.credentials_json:
-            return False
-        
-        try:
-            from google.oauth2.service_account import Credentials
-            
-            # 서비스 계정 Drive 클라이언트
-            creds_info = json.loads(self.credentials_json)
-            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
-            sa_drive = build('drive', 'v3', credentials=creds)
-            
-            # OAuth2 계정 이메일 가져오기
-            oauth_email = self._get_oauth_email()
-            if not oauth_email:
-                log("[WARN] OAuth2 계정 이메일을 가져올 수 없음")
-                return False
-            
-            log(f"소유권 이전 시도: {folder_id} → {oauth_email}")
-            
-            # 1. OAuth2 계정에 writer 권한 추가 (먼저 접근 가능하게)
-            try:
-                permission = {
-                    'type': 'user',
-                    'role': 'writer',
-                    'emailAddress': oauth_email
-                }
-                sa_drive.permissions().create(
-                    fileId=folder_id,
-                    body=permission,
-                    sendNotificationEmail=False
-                ).execute()
-                log(f"  → writer 권한 추가 완료")
-                time.sleep(1)
-            except Exception as e:
-                if 'already has access' not in str(e).lower():
-                    log(f"  → writer 권한 추가 실패: {e}")
-            
-            # 2. 소유권 이전 시도 (owner로 변경)
-            try:
-                permission = {
-                    'type': 'user',
-                    'role': 'owner',
-                    'emailAddress': oauth_email
-                }
-                sa_drive.permissions().create(
-                    fileId=folder_id,
-                    body=permission,
-                    transferOwnership=True,
-                    sendNotificationEmail=False
-                ).execute()
-                log(f"  → 소유권 이전 완료: {oauth_email}")
-                return True
-                
-            except Exception as e:
-                error_str = str(e)
-                if 'cannotShareWithOwner' in error_str or 'already the owner' in error_str:
-                    log(f"  → 이미 소유자임")
-                    return True
-                elif 'transferOwnership' in error_str or 'forbidden' in error_str.lower():
-                    # 소유권 이전 불가 (도메인 제한 등) - writer 권한만으로도 OK
-                    log(f"  → 소유권 이전 불가 (도메인 제한), writer 권한으로 사용")
-                    return True
-                else:
-                    log(f"  → 소유권 이전 실패: {e}")
-                    return False
-                    
-        except Exception as e:
-            log(f"[ERROR] 소유권 이전 중 오류: {e}")
-            return False
     
     def _get_oauth_email(self) -> Optional[str]:
         """
@@ -406,13 +336,16 @@ class CompanySheetManager:
             sa_file_id = self._search_spreadsheet_with_service_account(file_name, folder_id)
             
             if sa_file_id:
-                # 3. 서비스 계정 파일 발견 → OAuth2 계정에 권한 추가
-                log(f"서비스 계정 소유 스프레드시트 발견: {file_name}")
-                if self._transfer_ownership(sa_file_id):
-                    return sa_file_id
+                # 서비스 계정 소유 스프레드시트 발견 → 에러 발생
+                log(f"[ERROR] 서비스 계정 소유 스프레드시트 발견: {file_name}")
+                log(f"  → 해당 파일을 삭제하고 다시 실행하세요.")
+                self._storage_quota_exceeded = True
+                raise RuntimeError(f"서비스 계정 소유 스프레드시트 존재: {file_name}")
             
             return None
             
+        except RuntimeError:
+            raise  # RuntimeError는 그대로 전파
         except Exception as e:
             log(f"[ERROR] 스프레드시트 검색 실패: {e}")
             return None
@@ -579,33 +512,40 @@ class CompanySheetManager:
             
         Returns:
             gspread.Spreadsheet 객체 또는 None
+            
+        Raises:
+            RuntimeError: Storage Quota 초과 또는 서비스 계정 폴더 존재 시
         """
         if not self.gc or not self.drive_service:
             log("[WARN] 클라이언트 미초기화 - 기업별 시트 저장 건너뜀")
             return None
         
-        # Storage quota 초과 시 새 스프레드시트 생성 건너뛰기
+        # Storage quota 초과 시 에러 발생
         if self._storage_quota_exceeded:
-            log("[WARN] Drive 저장 공간 부족 - 기업별 시트 저장 건너뜀")
-            return None
-        
-        # 1. 기존 스프레드시트 검색
-        spreadsheet_id = self._find_company_spreadsheet(company_name, stock_code)
-        
-        # 2. 없으면 생성
-        if not spreadsheet_id:
-            log(f"기업 스프레드시트 생성 중: {company_name}_{stock_code}")
-            spreadsheet_id = self._create_company_spreadsheet(company_name, stock_code, industry)
-        else:
-            log(f"기존 스프레드시트 발견: {company_name}_{stock_code}")
-        
-        if not spreadsheet_id:
-            return None
+            raise RuntimeError("Drive 저장 공간 부족 - 기업별 시트 생성 불가")
         
         try:
-            import time
+            # 1. 기존 스프레드시트 검색
+            spreadsheet_id = self._find_company_spreadsheet(company_name, stock_code)
+            
+            # 2. 없으면 생성
+            if not spreadsheet_id:
+                log(f"기업 스프레드시트 생성 중: {company_name}_{stock_code}")
+                spreadsheet_id = self._create_company_spreadsheet(company_name, stock_code, industry)
+            else:
+                log(f"기존 스프레드시트 발견: {company_name}_{stock_code}")
+            
+            # 스프레드시트 생성 실패 시 (Storage Quota 등)
+            if not spreadsheet_id:
+                if self._storage_quota_exceeded:
+                    raise RuntimeError("Drive 저장 공간 부족 - 기업별 시트 생성 불가")
+                return None
+            
             time.sleep(0.5)  # API 호출 간 딜레이
             return self.gc.open_by_key(spreadsheet_id)
+            
+        except RuntimeError:
+            raise  # RuntimeError는 그대로 전파
         except Exception as e:
             log(f"[ERROR] 스프레드시트 열기 실패: {e}")
             return None
