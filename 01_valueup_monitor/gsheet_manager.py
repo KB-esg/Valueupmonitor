@@ -115,23 +115,14 @@ class GSheetManager:
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
             
-            # 기존 시트에 J열(아티팩트링크) 헤더가 없는 경우 추가
-            try:
-                headers = worksheet.row_values(1)
-                if len(headers) < len(self.HEADERS):
-                    # 부족한 헤더 추가
-                    missing_headers = self.HEADERS[len(headers):]
-                    for idx, header in enumerate(missing_headers):
-                        col_num = len(headers) + idx + 1
-                        worksheet.update_cell(1, col_num, header)
-                    log(f"  시트에 새 열 추가: {missing_headers}")
-            except Exception as e:
-                log(f"  헤더 확인 중 오류 (무시): {e}")
+            # 기존 시트 열/헤더 확장
+            self._ensure_columns_and_headers(worksheet)
+                    
         except gspread.exceptions.WorksheetNotFound:
             # 새 시트 생성
             worksheet = self.spreadsheet.add_worksheet(
                 title=sheet_name,
-                rows=1000,
+                rows=2000,  # 넉넉하게 2000행
                 cols=len(self.HEADERS)
             )
             # 헤더 설정
@@ -145,6 +136,54 @@ class GSheetManager:
         
         self._worksheet_cache[sheet_name] = worksheet
         return worksheet
+    
+    def _ensure_columns_and_headers(self, worksheet: gspread.Worksheet):
+        """열 수 및 헤더 확인/확장"""
+        try:
+            current_cols = worksheet.col_count
+            required_cols = len(self.HEADERS)
+            
+            # 열 수가 부족하면 확장
+            if current_cols < required_cols:
+                worksheet.add_cols(required_cols - current_cols)
+                log(f"  시트 열 확장: {current_cols} → {required_cols}")
+            
+            # 헤더 확인 및 추가
+            headers = worksheet.row_values(1)
+            if len(headers) < len(self.HEADERS):
+                missing_headers = self.HEADERS[len(headers):]
+                for idx, header in enumerate(missing_headers):
+                    col_num = len(headers) + idx + 1
+                    worksheet.update_cell(1, col_num, header)
+                log(f"  시트에 새 헤더 추가: {missing_headers}")
+                
+        except Exception as e:
+            log(f"  시트 열/헤더 확장 중 오류: {e}")
+    
+    def _ensure_row_capacity(self, worksheet: gspread.Worksheet, needed_rows: int):
+        """
+        필요한 행 수만큼 시트 용량 확보
+        
+        Args:
+            worksheet: 워크시트
+            needed_rows: 추가할 행 수
+        """
+        try:
+            current_rows = worksheet.row_count
+            # 현재 데이터 행 수 확인
+            all_values = worksheet.col_values(1)  # A열 기준
+            used_rows = len(all_values)
+            
+            # 필요한 총 행 수
+            required_rows = used_rows + needed_rows + 100  # 여유분 100행
+            
+            if current_rows < required_rows:
+                rows_to_add = required_rows - current_rows
+                worksheet.add_rows(rows_to_add)
+                log(f"  시트 행 확장: {current_rows} → {required_rows} (+{rows_to_add}행)")
+                
+        except Exception as e:
+            log(f"  시트 행 확장 중 오류: {e}")
     
     def get_existing_acptno_set(self, worksheet: gspread.Worksheet) -> set:
         """
@@ -209,6 +248,9 @@ class GSheetManager:
         if not new_items:
             log("새로운 공시 항목이 없습니다.")
             return 0
+        
+        # 행 용량 확보
+        self._ensure_row_capacity(worksheet, len(new_items))
         
         # 행 데이터 생성
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
