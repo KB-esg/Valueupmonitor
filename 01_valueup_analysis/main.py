@@ -171,6 +171,10 @@ class ValueUpAnalyzer:
         log(f"  → 총 항목: {len(self.framework.items)}개")
         log(f"  → Core 항목: {len(self.framework.core_items)}개")
         
+        # CompanySheetManager에 프레임워크 설정 (영역, 카테고리 정보 참조용)
+        if self.company_sheet_ready:
+            self.company_sheet_manager.set_framework(self.framework)
+        
         # 2. 분석 대기 공시 조회
         log("")
         log("[2단계] 분석 대기 공시 조회 중...")
