@@ -279,9 +279,12 @@ class KRXValueUpCrawler:
             return 1
     
     async def go_to_page(self, page_num: int) -> bool:
-        """특정 페이지로 이동 - 페이지네이션 영역 내에서만 검색"""
+        """특정 페이지로 이동 - 데이터 변경 확인"""
         try:
-            # 페이지네이션 영역 내에서만 페이지 번호 찾기 (정확한 텍스트 매칭)
+            # 현재 첫 번째 행의 데이터 기록 (변경 확인용)
+            old_first_row = await self._get_first_row_text()
+            
+            # 방법 1: 페이지네이션 링크 클릭
             paging_selectors = [
                 f'.paging a:text-is("{page_num}")',
                 f'.paging-group a:text-is("{page_num}")',
@@ -290,6 +293,7 @@ class KRXValueUpCrawler:
                 f'div.paging a:text-is("{page_num}")',
             ]
             
+            clicked = False
             for selector in paging_selectors:
                 try:
                     page_link = self.page.locator(selector).first
@@ -298,35 +302,90 @@ class KRXValueUpCrawler:
                         if is_visible:
                             await page_link.click()
                             log(f"  페이지 {page_num}으로 이동 (셀렉터: {selector})")
-                            await asyncio.sleep(2)
-                            return True
+                            clicked = True
+                            break
                 except Exception:
                     continue
             
-            # JavaScript로 페이지 이동 시도 (fnPageGo 함수 - Colab 코드에서 발견)
-            try:
-                await self.page.evaluate(f"fnPageGo('{page_num}')")
-                log(f"  JavaScript fnPageGo('{page_num}')로 이동")
-                await asyncio.sleep(2)
-                return True
-            except Exception:
-                pass
+            # 방법 2: JavaScript fnPageGo
+            if not clicked:
+                try:
+                    # fnPageGo가 form을 submit할 수 있으므로 navigation 대기
+                    async with self.page.expect_navigation(wait_until="networkidle", timeout=10000):
+                        await self.page.evaluate(f"fnPageGo('{page_num}')")
+                    log(f"  JavaScript fnPageGo('{page_num}')로 이동 (navigation 완료)")
+                    clicked = True
+                except Exception as e:
+                    # navigation이 발생하지 않을 수 있음 (AJAX)
+                    log(f"  fnPageGo navigation 없음, AJAX 방식 확인: {e}")
+                    try:
+                        await self.page.evaluate(f"fnPageGo('{page_num}')")
+                        await asyncio.sleep(2)
+                        clicked = True
+                    except:
+                        pass
             
-            # goPage 함수 시도
-            try:
-                await self.page.evaluate(f'goPage({page_num})')
-                log(f"  JavaScript goPage({page_num})로 이동")
-                await asyncio.sleep(2)
-                return True
-            except Exception:
-                pass
+            # 방법 3: form에 pageIndex 설정 후 submit
+            if not clicked:
+                try:
+                    await self.page.evaluate(f"""
+                        var form = document.querySelector('form[name="searchform"]') || 
+                                   document.querySelector('form[name="searchForm"]') ||
+                                   document.querySelector('form#searchform');
+                        if (form) {{
+                            var pageInput = form.querySelector('input[name="pageIndex"]') ||
+                                           form.querySelector('input[name="curPage"]') ||
+                                           form.querySelector('input[name="page"]');
+                            if (pageInput) {{
+                                pageInput.value = '{page_num}';
+                                form.submit();
+                            }}
+                        }}
+                    """)
+                    log(f"  form submit으로 페이지 {page_num} 이동 시도")
+                    await self.page.wait_for_load_state("networkidle")
+                    clicked = True
+                except Exception:
+                    pass
             
-            log(f"  페이지 {page_num} 링크를 찾을 수 없음 (1페이지만 존재할 수 있음)")
+            # 방법 4: goPage 함수
+            if not clicked:
+                try:
+                    await self.page.evaluate(f'goPage({page_num})')
+                    log(f"  JavaScript goPage({page_num})로 이동")
+                    await asyncio.sleep(2)
+                    clicked = True
+                except Exception:
+                    pass
+            
+            if not clicked:
+                log(f"  페이지 {page_num} 링크를 찾을 수 없음 (1페이지만 존재할 수 있음)")
+                return False
+            
+            # 데이터가 변경될 때까지 대기 (최대 10초)
+            for i in range(20):
+                await asyncio.sleep(0.5)
+                new_first_row = await self._get_first_row_text()
+                if new_first_row and new_first_row != old_first_row:
+                    log(f"  페이지 {page_num} 데이터 로드 완료")
+                    return True
+            
+            log(f"  [WARN] 페이지 {page_num} 데이터 변경 감지 실패 (같은 데이터)")
             return False
             
         except Exception as e:
             log(f"  페이지 이동 오류: {e}")
             return False
+    
+    async def _get_first_row_text(self) -> str:
+        """첫 번째 행의 텍스트 반환 (페이지 변경 감지용)"""
+        try:
+            first_row = self.page.locator('table.list tbody tr').first
+            if await first_row.count() > 0:
+                return await first_row.inner_text()
+        except:
+            pass
+        return ""
     
     async def parse_current_page(self) -> List[DisclosureItem]:
         """현재 페이지의 공시 목록 파싱 - 밸류업 페이지 특화"""
@@ -542,8 +601,8 @@ class KRXValueUpCrawler:
             except Exception as e:
                 log(f"날짜 설정 오류: {e}")
         
-        # 컷오프 날짜 설정 (항상 적용)
-        cutoff_date = end_date - timedelta(days=effective_days)
+        # 컷오프 날짜 설정 (항상 적용) - 시간 제거하여 날짜만 비교
+        cutoff_date = (end_date - timedelta(days=effective_days)).replace(hour=0, minute=0, second=0, microsecond=0)
         log(f"  컷오프 날짜: {cutoff_date.strftime('%Y-%m-%d')} 이전 공시는 제외")
         
         # 디버그: 검색 후 저장
@@ -552,6 +611,7 @@ class KRXValueUpCrawler:
         
         # 페이지별 크롤링
         consecutive_old_count = 0  # 연속으로 오래된 공시가 나온 횟수
+        seen_acptno = set()  # 이미 수집한 접수번호 (실시간 중복 방지)
         
         for page_num in range(1, max_pages + 1):
             log(f"페이지 {page_num} 파싱 중...")
@@ -563,11 +623,17 @@ class KRXValueUpCrawler:
                 log("  더 이상 항목 없음, 종료")
                 break
             
-            # 날짜 필터링
+            # 중복 및 날짜 필터링
             filtered_items = []
             old_items_in_page = 0
+            duplicate_count = 0
             
             for item in page_items:
+                # 중복 체크 (실시간)
+                if item.접수번호 in seen_acptno:
+                    duplicate_count += 1
+                    continue
+                
                 try:
                     # 날짜 파싱
                     date_str = item.공시일자.replace('.', '-').strip()
@@ -580,10 +646,12 @@ class KRXValueUpCrawler:
                         item_date = datetime.strptime(date_str, "%Y%m%d")
                     else:
                         # 날짜 파싱 실패시 포함
+                        seen_acptno.add(item.접수번호)
                         filtered_items.append(item)
                         continue
                     
                     if item_date >= cutoff_date:
+                        seen_acptno.add(item.접수번호)
                         filtered_items.append(item)
                         consecutive_old_count = 0  # 리셋
                     else:
@@ -592,7 +660,24 @@ class KRXValueUpCrawler:
                         
                 except Exception as e:
                     # 예외 발생시 포함 (안전)
+                    seen_acptno.add(item.접수번호)
                     filtered_items.append(item)
+            
+            # 페이지 전체가 중복인 경우 → 페이지 이동 실패로 판단
+            if duplicate_count == len(page_items):
+                log(f"  [WARN] 페이지 전체가 중복 데이터, 페이지 이동 실패로 판단하여 종료")
+                break
+            
+            # 새로 추가된 항목이 0개인 경우 → 더 이상 새 데이터 없음
+            if len(filtered_items) == 0:
+                if duplicate_count > 0:
+                    log(f"  [WARN] 새로운 항목 없음 (중복 {duplicate_count}건), 페이지 이동 실패로 판단하여 종료")
+                else:
+                    log(f"  새로운 항목 없음, 크롤링 종료")
+                break
+            
+            if duplicate_count > 0:
+                log(f"  중복 건너뜀: {duplicate_count}건")
             
             all_items.extend(filtered_items)
             log(f"  필터 후: {len(filtered_items)}건 추가 (제외: {old_items_in_page}건)")
@@ -614,22 +699,12 @@ class KRXValueUpCrawler:
             # 다음 페이지로 이동
             if page_num < max_pages:
                 if not await self.go_to_page(page_num + 1):
+                    log(f"  페이지 {page_num + 1} 이동 실패, 크롤링 종료")
                     break
                 await asyncio.sleep(1)
         
-        # 중복 접수번호 제거
-        seen_acptno = set()
-        unique_items = []
-        for item in all_items:
-            if item.접수번호 not in seen_acptno:
-                seen_acptno.add(item.접수번호)
-                unique_items.append(item)
-        
-        if len(unique_items) < len(all_items):
-            log(f"  중복 제거: {len(all_items)} → {len(unique_items)}건")
-        
-        log(f"총 {len(unique_items)}건 수집 완료")
-        return unique_items
+        log(f"총 {len(all_items)}건 수집 완료")
+        return all_items
     
     async def download_pdf(self, acptno: str, doc_no: str = "") -> Optional[bytes]:
         """
