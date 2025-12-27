@@ -146,17 +146,21 @@ class GDriveUploader:
         # 캐시 확인
         cache_key = (parent_id, folder_name)
         if cache_key in self._folder_cache:
+            log(f"  [캐시] 폴더 발견: {folder_name}")
             return self._folder_cache[cache_key]
         
-        query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        if parent_id:
-            query += f" and '{parent_id}' in parents"
-        
         try:
+            # 방법 1: 부모 폴더가 있으면 부모 폴더의 하위 항목 중에서 검색
+            if parent_id:
+                query = f"'{parent_id}' in parents and name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            else:
+                query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            
             results = self.service.files().list(
                 q=query,
                 spaces='drive',
-                fields='files(id, name)',
+                fields='files(id, name, parents)',
+                pageSize=100,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True
             ).execute()
@@ -165,11 +169,20 @@ class GDriveUploader:
             if files:
                 folder_id = files[0]['id']
                 self._folder_cache[cache_key] = folder_id
+                
+                if len(files) > 1:
+                    log(f"  [주의] 동일 이름 폴더 {len(files)}개 발견: {folder_name}, 첫 번째 사용")
+                else:
+                    log(f"  [기존] 폴더 발견: {folder_name}")
+                
                 return folder_id
+            
+            # 폴더를 찾지 못함
             return None
             
         except Exception as e:
             log(f"폴더 검색 중 오류: {e}")
+            return None
             return None
     
     def create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
@@ -207,7 +220,6 @@ class GDriveUploader:
             cache_key = (parent_id, folder_name)
             self._folder_cache[cache_key] = folder_id
             
-            log(f"  폴더 생성됨: {folder_name} (ID: {folder_id[:20]}...)")
             return folder_id
             
         except Exception as e:
@@ -231,6 +243,7 @@ class GDriveUploader:
             return folder_id
         
         # 없으면 생성
+        log(f"  [신규] 폴더 생성: {folder_name}")
         return self.create_folder(folder_name, parent_id)
     
     def get_monthly_folder_id(self, date: Optional[datetime] = None) -> Optional[str]:
