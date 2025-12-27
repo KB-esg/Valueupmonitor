@@ -6,12 +6,12 @@ gspread>=6.0.0
 google-auth>=2.25.0
 google-auth-oauthlib>=1.2.0
 
+# Google Drive API (PDF 다운로드용)
+google-api-python-client>=2.100.0
+
 # PDF 처리
 pdfplumber>=0.10.0
 PyPDF2>=3.0.0
 
-# HTTP 요청
-requests>=2.31.0
-
-# Gemini API
-google-generativeai>=0.8.0
+# Gemini API (새로운 패키지)
+google-genai>=1.0.0
