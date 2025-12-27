@@ -449,17 +449,31 @@ class GSheetAnalyzer:
         """
         worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
         if not worksheet:
+            log("  [ERROR] 밸류업공시목록 시트를 찾을 수 없습니다.")
             return 0
         
         try:
+            # 현재 시트 크기 확인
+            current_cols = worksheet.col_count
+            log(f"  현재 시트 열 수: {current_cols}")
+            
+            # K열(11번째)이 필요하므로 열이 부족하면 확장
+            if current_cols < 11:
+                log(f"  시트 열 확장 중: {current_cols} → 15")
+                worksheet.resize(cols=15)
+            
             # K열 헤더 확인 및 생성
             headers = worksheet.row_values(1)
-            if len(headers) < 11:
+            log(f"  현재 헤더 수: {len(headers)}")
+            
+            # K열 헤더가 없거나 다른 값이면 설정
+            if len(headers) < 11 or headers[10] != '예상토큰수':
                 worksheet.update_cell(1, 11, '예상토큰수')
                 log("  K열 '예상토큰수' 헤더 추가됨")
             
             # F열(접수번호) 전체 조회
             acptno_col = worksheet.col_values(6)
+            log(f"  접수번호 데이터 행 수: {len(acptno_col)}")
             
             # 접수번호 → 행 번호 매핑
             acptno_to_row = {}
@@ -479,6 +493,8 @@ class GSheetAnalyzer:
                         'range': f'K{row_idx}',
                         'values': [[tokens]]
                     })
+                else:
+                    log(f"  [WARN] 접수번호 {acptno}를 시트에서 찾을 수 없음")
             
             if batch_data:
                 worksheet.batch_update(batch_data)
@@ -488,7 +504,9 @@ class GSheetAnalyzer:
             return 0
             
         except Exception as e:
-            log(f"  [ERROR] 일괄 토큰 수 업데이트 실패: {e}")
+            log(f"  [ERROR] 일괄 토큰 수 업데이트 실패: {type(e).__name__}: {e}")
+            import traceback
+            log(f"  {traceback.format_exc()[:300]}")
             return 0
 
 
