@@ -198,10 +198,26 @@ class GSheetManager:
         try:
             # F열 (접수번호) 전체 가져오기
             acptno_col = worksheet.col_values(self.COL_ACPTNO)
-            return set(acptno_col[1:])  # 헤더 제외
+            # 접수번호 정규화 (숫자/텍스트 모두 문자열로)
+            result = set()
+            for val in acptno_col[1:]:  # 헤더 제외
+                normalized = self._normalize_acptno(val)
+                if normalized:
+                    result.add(normalized)
+            return result
         except Exception as e:
             log(f"접수번호 조회 중 오류: {e}")
             return set()
+    
+    def _normalize_acptno(self, value) -> str:
+        """접수번호 정규화 - 숫자/텍스트 모두 문자열로 변환"""
+        if value is None or value == '':
+            return ''
+        if isinstance(value, (int, float)):
+            # 숫자인 경우 정수로 변환 후 문자열로
+            return str(int(value))
+        # 문자열인 경우 앞뒤 공백 및 ' 제거
+        return str(value).strip().lstrip("'")
     
     def get_all_data_with_row_numbers(self, worksheet: gspread.Worksheet) -> Dict[str, int]:
         """
@@ -215,7 +231,12 @@ class GSheetManager:
         """
         try:
             acptno_col = worksheet.col_values(self.COL_ACPTNO)
-            return {acptno: row_idx + 1 for row_idx, acptno in enumerate(acptno_col) if acptno}
+            result = {}
+            for row_idx, acptno in enumerate(acptno_col):
+                normalized = self._normalize_acptno(acptno)
+                if normalized:
+                    result[normalized] = row_idx + 1
+            return result
         except Exception as e:
             log(f"데이터 조회 중 오류: {e}")
             return {}
@@ -238,10 +259,10 @@ class GSheetManager:
         # 이미 존재하는 접수번호 확인
         existing = self.get_existing_acptno_set(worksheet)
         
-        # 새로운 항목만 필터링
+        # 새로운 항목만 필터링 (접수번호 정규화하여 비교)
         new_items = []
         for d in disclosures:
-            acptno = str(d.get('접수번호', ''))
+            acptno = self._normalize_acptno(d.get('접수번호', ''))
             if acptno and acptno not in existing:
                 new_items.append(d)
         
@@ -256,13 +277,22 @@ class GSheetManager:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         for d in new_items:
+            # 종목코드와 접수번호는 텍스트로 저장 (앞에 ' 붙여서 숫자 변환 방지)
+            종목코드 = d.get('종목코드', '')
+            if 종목코드:
+                종목코드 = "'" + str(종목코드).zfill(6)  # 6자리 패딩 + 텍스트 표시
+            
+            접수번호 = d.get('접수번호', '')
+            if 접수번호:
+                접수번호 = "'" + str(접수번호)  # 텍스트로 저장
+            
             row = [
                 d.get('번호', ''),
                 d.get('공시일자', ''),
                 d.get('회사명', ''),
-                d.get('종목코드', ''),
+                종목코드,
                 d.get('공시제목', ''),
-                d.get('접수번호', ''),
+                접수번호,
                 d.get('원시PDF링크', ''),
                 d.get('구글드라이브링크', ''),
                 now,
@@ -309,7 +339,7 @@ class GSheetManager:
         updated_count = 0
         
         for update in updates:
-            acptno = str(update.get('접수번호', ''))
+            acptno = self._normalize_acptno(update.get('접수번호', ''))
             gdrive_link = update.get('구글드라이브링크', '')
             artifact_link = update.get('아티팩트링크', '')
             
