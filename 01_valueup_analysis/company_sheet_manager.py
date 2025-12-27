@@ -537,16 +537,16 @@ class CompanySheetManager:
                 ['최신 공시일', '', '', ''],
                 ['총 보고서 수', '0', '', ''],
                 ['', '', '', ''],
-                ['최신 목표 현황', '', '', '', '', '', '', ''],
-                ['영역', '카테고리', '항목', 'Core', '현재값', '목표값', '목표연도', '비고'],
+                ['최신 목표 현황', '', '', '', '', '', '', '', '', '', ''],
+                ['영역', '카테고리', '항목', 'Core', '현재값', '중기목표', '중기연도', '장기목표', '장기연도', '이행동향', '비고'],
             ]
-            ws_summary.update('A1:H11', summary_headers)
+            ws_summary.update('A1:K11', summary_headers)
             
             # Summary 시트 포맷팅 (gspread-formatting 라이브러리 필요)
             if HAS_FORMATTING:
                 try:
                     # 제목 행 (기업 기본 정보) - 진한 파란색 배경
-                    format_cell_range(ws_summary, 'A1:H1', CellFormat(
+                    format_cell_range(ws_summary, 'A1:K1', CellFormat(
                         backgroundColor=Color(0.2, 0.4, 0.7),
                         textFormat=TextFormat(bold=True, foregroundColor=Color(1, 1, 1))
                     ))
@@ -556,19 +556,20 @@ class CompanySheetManager:
                         textFormat=TextFormat(bold=True)
                     ))
                     # 최신 목표 현황 제목 - 진한 파란색 배경
-                    format_cell_range(ws_summary, 'A10:H10', CellFormat(
+                    format_cell_range(ws_summary, 'A10:K10', CellFormat(
                         backgroundColor=Color(0.2, 0.4, 0.7),
                         textFormat=TextFormat(bold=True, foregroundColor=Color(1, 1, 1))
                     ))
                     # 최신 목표 현황 헤더 - 연한 파란색 배경
-                    format_cell_range(ws_summary, 'A11:H11', CellFormat(
+                    format_cell_range(ws_summary, 'A11:K11', CellFormat(
                         backgroundColor=Color(0.8, 0.9, 1),
                         textFormat=TextFormat(bold=True)
                     ))
                     # 열 너비 설정
                     set_column_width(ws_summary, 'A', 100)
-                    set_column_width(ws_summary, 'B', 150)
-                    set_column_width(ws_summary, 'H', 200)
+                    set_column_width(ws_summary, 'B', 120)
+                    set_column_width(ws_summary, 'J', 150)
+                    set_column_width(ws_summary, 'K', 200)
                     # 헤더 행 고정
                     set_frozen(ws_summary, rows=2)
                 except Exception as e:
@@ -785,7 +786,13 @@ class CompanySheetManager:
         
         # 4. 분석 결과 기록
         analysis_items = analysis_result.get('analysis_items', {})
-        sub_types = ['현재값', '목표값_최소', '목표값_최대', '목표연도', '달성률', '전기대비', '목표변화']
+        sub_types = [
+            '현재값', 
+            '중기_목표_최소', '중기_목표_최대', '중기_목표연도',
+            '장기_목표_최소', '장기_목표_최대', '장기_목표연도',
+            '달성률', '전기대비', '목표변화',
+            '이행동향', '목표달성방안'
+        ]
         
         updates = []  # batch update용
         new_rows = []  # 새로 추가할 행들
@@ -810,30 +817,47 @@ class CompanySheetManager:
                     item_name = fw_item.item_name or item_id
                     is_core = fw_item.is_core
             
-            # target_min, target_max 가져오기 (하위 호환)
-            target_min = item_data.get('target_min')
-            target_max = item_data.get('target_max')
+            # 새로운 필드 가져오기
+            mid_target_min = item_data.get('mid_target_min')
+            mid_target_max = item_data.get('mid_target_max')
+            mid_target_year = item_data.get('mid_target_year')
+            long_target_min = item_data.get('long_target_min')
+            long_target_max = item_data.get('long_target_max')
+            long_target_year = item_data.get('long_target_year')
+            progress_summary = item_data.get('progress_summary', '')
+            action_plan = item_data.get('action_plan', '')
             
-            # 이전 버전 호환: target_value만 있는 경우
-            if target_min is None and target_max is None:
-                old_target = item_data.get('target_value')
-                if old_target is not None:
-                    target_min = old_target
-                    target_max = old_target
+            # 하위 호환: 이전 버전 target_min/max → 장기 목표로 매핑
+            if mid_target_min is None and long_target_min is None:
+                old_target_min = item_data.get('target_min')
+                old_target_max = item_data.get('target_max')
+                old_target_year = item_data.get('target_year')
+                
+                if old_target_min is None and old_target_max is None:
+                    old_target = item_data.get('target_value')
+                    if old_target is not None:
+                        long_target_min = old_target
+                        long_target_max = old_target
+                else:
+                    long_target_min = old_target_min
+                    long_target_max = old_target_max
+                
+                if long_target_year is None and old_target_year:
+                    long_target_year = old_target_year
             
-            # 목표변화 계산 (이전 보고서 대비)
+            # 목표변화 계산 (이전 보고서 대비 장기 목표 비교)
             target_change = ''
             if item_id in item_row_map and prev_col_idx is not None:
                 try:
-                    # 이전 목표값_최소 가져오기
-                    if '목표값_최소' in item_row_map[item_id]:
-                        prev_row = item_row_map[item_id]['목표값_최소']
+                    # 이전 장기_목표_최소 가져오기
+                    if '장기_목표_최소' in item_row_map[item_id]:
+                        prev_row = item_row_map[item_id]['장기_목표_최소']
                         if prev_row <= len(all_values) and prev_col_idx < len(all_values[prev_row - 1]):
-                            prev_target_min = all_values[prev_row - 1][prev_col_idx]
-                            if prev_target_min and target_min:
+                            prev_target = all_values[prev_row - 1][prev_col_idx]
+                            if prev_target and long_target_min:
                                 try:
-                                    prev_val = float(str(prev_target_min).replace(',', ''))
-                                    curr_val = float(str(target_min).replace(',', ''))
+                                    prev_val = float(str(prev_target).replace(',', ''))
+                                    curr_val = float(str(long_target_min).replace(',', ''))
                                     if curr_val > prev_val:
                                         target_change = '상향'
                                     elif curr_val < prev_val:
@@ -847,15 +871,20 @@ class CompanySheetManager:
             elif item_id not in item_row_map:
                 target_change = '신규'
             
-            # 값 매핑
+            # 값 매핑 (새로운 구조)
             values = {
                 '현재값': str(item_data.get('current_value', '')) if item_data.get('current_value') else '',
-                '목표값_최소': str(target_min) if target_min else '',
-                '목표값_최대': str(target_max) if target_max else '',
-                '목표연도': str(item_data.get('target_year', '')) if item_data.get('target_year') else '',
+                '중기_목표_최소': str(mid_target_min) if mid_target_min else '',
+                '중기_목표_최대': str(mid_target_max) if mid_target_max else '',
+                '중기_목표연도': str(mid_target_year) if mid_target_year else '',
+                '장기_목표_최소': str(long_target_min) if long_target_min else '',
+                '장기_목표_최대': str(long_target_max) if long_target_max else '',
+                '장기_목표연도': str(long_target_year) if long_target_year else '',
                 '달성률': '',  # 추후 계산
                 '전기대비': '',  # 추후 계산
-                '목표변화': target_change
+                '목표변화': target_change,
+                '이행동향': progress_summary,
+                '목표달성방안': action_plan
             }
             
             col_letter = self._get_column_letter(report_col_idx + 1)
@@ -955,26 +984,53 @@ class CompanySheetManager:
                     item_name = fw_item.item_name or item_id
                     is_core = fw_item.is_core
             
-            # target_min, target_max 가져오기 (하위 호환)
-            target_min = item_data.get('target_min')
-            target_max = item_data.get('target_max')
+            # 새로운 필드 가져오기
+            mid_target_min = item_data.get('mid_target_min')
+            mid_target_max = item_data.get('mid_target_max')
+            mid_target_year = item_data.get('mid_target_year')
+            long_target_min = item_data.get('long_target_min')
+            long_target_max = item_data.get('long_target_max')
+            long_target_year = item_data.get('long_target_year')
+            progress_summary = item_data.get('progress_summary', '')
+            action_plan = item_data.get('action_plan', '')
             
-            # 이전 버전 호환: target_value만 있는 경우
-            if target_min is None and target_max is None:
-                old_target = item_data.get('target_value')
-                if old_target is not None:
-                    target_min = old_target
-                    target_max = old_target
+            # 하위 호환
+            if mid_target_min is None and long_target_min is None:
+                old_target_min = item_data.get('target_min')
+                old_target_max = item_data.get('target_max')
+                old_target_year = item_data.get('target_year')
+                
+                if old_target_min is None and old_target_max is None:
+                    old_target = item_data.get('target_value')
+                    if old_target is not None:
+                        long_target_min = old_target
+                        long_target_max = old_target
+                else:
+                    long_target_min = old_target_min
+                    long_target_max = old_target_max
+                
+                if long_target_year is None and old_target_year:
+                    long_target_year = old_target_year
             
-            # 목표값 표시 (범위 또는 단일값)
-            if target_min and target_max and target_min != target_max:
-                target_display = f"{target_min}~{target_max}"
-            elif target_min:
-                target_display = str(target_min)
-            elif target_max:
-                target_display = str(target_max)
+            # 중기 목표 표시
+            if mid_target_min and mid_target_max and str(mid_target_min) != str(mid_target_max):
+                mid_target_display = f"{mid_target_min}~{mid_target_max}"
+            elif mid_target_min:
+                mid_target_display = str(mid_target_min)
+            elif mid_target_max:
+                mid_target_display = str(mid_target_max)
             else:
-                target_display = ''
+                mid_target_display = ''
+            
+            # 장기 목표 표시
+            if long_target_min and long_target_max and str(long_target_min) != str(long_target_max):
+                long_target_display = f"{long_target_min}~{long_target_max}"
+            elif long_target_min:
+                long_target_display = str(long_target_min)
+            elif long_target_max:
+                long_target_display = str(long_target_max)
+            else:
+                long_target_display = ''
             
             row = [
                 area_name,
@@ -982,8 +1038,11 @@ class CompanySheetManager:
                 item_name,
                 'Y' if is_core else '',
                 str(item_data.get('current_value', '')) if item_data.get('current_value') else '',
-                target_display,
-                str(item_data.get('target_year', '')) if item_data.get('target_year') else '',
+                mid_target_display,
+                str(mid_target_year) if mid_target_year else '',
+                long_target_display,
+                str(long_target_year) if long_target_year else '',
+                progress_summary[:50] if progress_summary else '',  # 요약 50자 제한
                 item_data.get('note', '')
             ]
             rows_to_add.append(row)
@@ -992,8 +1051,35 @@ class CompanySheetManager:
             # 기존 목표 현황 삭제 후 새로 작성 (12행부터)
             start_row = 12
             end_row = start_row + len(rows_to_add) - 1
-            range_str = f'A{start_row}:H{end_row}'
+            range_str = f'A{start_row}:K{end_row}'
             ws.update(range_str, rows_to_add)
+        
+        # 특기사항 추가 (분석 결과에 special_notes가 있으면)
+        special_notes = analysis_result.get('special_notes', [])
+        if special_notes:
+            # 특기사항 섹션 시작 위치 (목표 현황 다음)
+            notes_start_row = start_row + len(rows_to_add) + 2 if rows_to_add else 12
+            
+            # 특기사항 헤더
+            ws.update_acell(f'A{notes_start_row}', '특기사항')
+            ws.update(f'A{notes_start_row + 1}:E{notes_start_row + 1}', 
+                     [['제목', '금액', '일자', '활용방안', '상태']])
+            
+            # 특기사항 데이터
+            notes_rows = []
+            for note in special_notes:
+                notes_rows.append([
+                    note.get('title', ''),
+                    note.get('amount', ''),
+                    note.get('date', ''),
+                    note.get('usage', ''),
+                    note.get('status', '')
+                ])
+            
+            if notes_rows:
+                notes_data_start = notes_start_row + 2
+                notes_data_end = notes_data_start + len(notes_rows) - 1
+                ws.update(f'A{notes_data_start}:E{notes_data_end}', notes_rows)
 
 
 def main():
