@@ -27,7 +27,7 @@ if ANALYZER_TYPE == 'gemini':
     ANALYZER_NAME = 'Gemini'
 else:
     from claude_analyzer import ClaudeAnalyzer as LLMAnalyzer
-    DEFAULT_API_KEY_ENV = 'ANTHROPIC_API_KEY'
+    DEFAULT_API_KEY_ENV = 'ANT_ANALYTIC'
     ANALYZER_NAME = 'Claude'
 
 
