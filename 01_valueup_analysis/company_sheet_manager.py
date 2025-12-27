@@ -12,8 +12,8 @@ Google Drive에 기업별 스프레드시트를 생성/업데이트
     └── ...
 
 인증 방식:
-- OAuth2 (개인 계정) 우선: 개인 Drive에 파일 생성
-- 서비스 계정 fallback: 공유 폴더에 파일 생성
+- OAuth2 (개인 계정) 전용: 개인 Drive에 파일 생성
+- 서비스 계정은 Storage Quota 문제로 사용 안함
 
 분석 메타정보는 VALUEUP_GSPREAD_ID의 "밸류업공시목록" 시트 L열부터 관리
 """
@@ -27,6 +27,19 @@ from datetime import datetime
 
 import gspread
 from googleapiclient.discovery import build
+
+# gspread_formatting (셀 포맷팅용 - 선택 라이브러리)
+try:
+    from gspread_formatting import (
+        format_cell_range, CellFormat, Color, TextFormat, 
+        set_frozen, set_column_width
+    )
+    HAS_FORMATTING = True
+except ImportError:
+    HAS_FORMATTING = False
+
+# Framework 참조 (영역, 카테고리 정보 조회용)
+from framework_loader import Framework
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -51,13 +64,15 @@ class CompanySheetManager:
     
     def __init__(
         self, 
-        # OAuth2 인증 정보 (개인 계정 - 우선)
+        # OAuth2 인증 정보 (개인 계정)
         refresh_token: Optional[str] = None,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
-        # 서비스 계정 인증 정보 (fallback)
+        # 서비스 계정 인증 정보 (폴더/파일 검색용)
         credentials_json: Optional[str] = None, 
-        archive_folder_id: Optional[str] = None
+        archive_folder_id: Optional[str] = None,
+        # 프레임워크 (영역, 카테고리 정보 조회용)
+        framework: Optional[Framework] = None
     ):
         """
         초기화
@@ -66,15 +81,16 @@ class CompanySheetManager:
             refresh_token: OAuth2 리프레시 토큰
             client_id: OAuth2 클라이언트 ID
             client_secret: OAuth2 클라이언트 시크릿
-            credentials_json: 서비스 계정 JSON 문자열 (fallback)
+            credentials_json: 서비스 계정 JSON 문자열 (폴더/파일 검색용)
             archive_folder_id: 01_Valueup_archive 폴더 ID
+            framework: Framework 객체 (영역, 카테고리 정보 조회용)
         """
         # OAuth2 인증 정보
         self.refresh_token = refresh_token or os.environ.get('GDRIVE_REFRESH_TOKEN')
         self.client_id = client_id or os.environ.get('GDRIVE_CLIENT_ID')
         self.client_secret = client_secret or os.environ.get('GDRIVE_CLIENT_SECRET')
         
-        # 서비스 계정 인증 정보 (fallback)
+        # 서비스 계정 인증 정보 (폴더/파일 검색용)
         self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
         self.archive_folder_id = archive_folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         
@@ -83,8 +99,13 @@ class CompanySheetManager:
         self.analysis_folder_id = None  # ValueUp_analysis 폴더 ID (캐시)
         self.auth_method = None  # 인증 방식
         self._storage_quota_exceeded = False  # 저장 공간 부족 플래그
+        self.framework = framework  # 프레임워크 (영역, 카테고리 정보)
         
         self._init_clients()
+    
+    def set_framework(self, framework: Framework):
+        """프레임워크 설정 (나중에 설정 가능)"""
+        self.framework = framework
     
     def _init_clients(self):
         """Google API 클라이언트 초기화 (OAuth2 전용 - 서비스 계정 fallback 없음)"""
@@ -325,8 +346,9 @@ class CompanySheetManager:
         if not folder_id:
             return None
         
-        # 파일명 형식: "기업명_종목코드"
-        file_name = f"{company_name}_{stock_code}"
+        # 파일명 형식: "기업명_종목코드" (종목코드 6자리 유지)
+        stock_code_6 = str(stock_code).zfill(6)
+        file_name = f"{company_name}_{stock_code_6}"
         oauth_email = self._get_oauth_email()
         
         try:
@@ -439,11 +461,12 @@ class CompanySheetManager:
         if not folder_id:
             return None
         
-        file_name = f"{company_name}_{stock_code}"
+        # 종목코드 6자리 유지
+        stock_code_6 = str(stock_code).zfill(6)
+        file_name = f"{company_name}_{stock_code_6}"
         
         try:
             # API 호출 전 딜레이 (quota 관리)
-            import time
             time.sleep(1)
             
             # 1. 스프레드시트 생성
@@ -463,7 +486,7 @@ class CompanySheetManager:
             
             # 2. 시트 구조 초기화
             time.sleep(1)  # API 호출 간 딜레이
-            self._init_spreadsheet_structure(spreadsheet_id, company_name, stock_code, industry)
+            self._init_spreadsheet_structure(spreadsheet_id, company_name, stock_code_6, industry)
             
             return spreadsheet_id
             
@@ -490,22 +513,25 @@ class CompanySheetManager:
         Args:
             spreadsheet_id: 스프레드시트 ID
             company_name: 기업명
-            stock_code: 종목코드
+            stock_code: 종목코드 (6자리)
             industry: 업종
         """
+        # 종목코드 6자리 유지
+        stock_code_6 = str(stock_code).zfill(6)
+        
         try:
             spreadsheet = self.gc.open_by_key(spreadsheet_id)
             
             # 기본 시트 이름 변경 (Sheet1 → Summary)
-            worksheet = spreadsheet.sheet1
-            worksheet.update_title('Summary')
+            ws_summary = spreadsheet.sheet1
+            ws_summary.update_title('Summary')
             
             # Summary 시트 헤더 설정
             summary_headers = [
                 ['기업 기본 정보', '', '', ''],
                 ['항목', '값', '', ''],
                 ['기업명', company_name, '', ''],
-                ['종목코드', stock_code, '', ''],
+                ['종목코드', stock_code_6, '', ''],
                 ['업종', industry, '', ''],
                 ['최초 공시일', '', '', ''],
                 ['최신 공시일', '', '', ''],
@@ -514,7 +540,39 @@ class CompanySheetManager:
                 ['최신 목표 현황', '', '', '', '', '', '', ''],
                 ['영역', '카테고리', '항목', 'Core', '현재값', '목표값', '목표연도', '비고'],
             ]
-            worksheet.update('A1:H11', summary_headers)
+            ws_summary.update('A1:H11', summary_headers)
+            
+            # Summary 시트 포맷팅 (gspread-formatting 라이브러리 필요)
+            if HAS_FORMATTING:
+                try:
+                    # 제목 행 (기업 기본 정보) - 진한 파란색 배경
+                    format_cell_range(ws_summary, 'A1:H1', CellFormat(
+                        backgroundColor=Color(0.2, 0.4, 0.7),
+                        textFormat=TextFormat(bold=True, foregroundColor=Color(1, 1, 1))
+                    ))
+                    # 헤더 행 (항목, 값) - 연한 파란색 배경
+                    format_cell_range(ws_summary, 'A2:B2', CellFormat(
+                        backgroundColor=Color(0.8, 0.9, 1),
+                        textFormat=TextFormat(bold=True)
+                    ))
+                    # 최신 목표 현황 제목 - 진한 파란색 배경
+                    format_cell_range(ws_summary, 'A10:H10', CellFormat(
+                        backgroundColor=Color(0.2, 0.4, 0.7),
+                        textFormat=TextFormat(bold=True, foregroundColor=Color(1, 1, 1))
+                    ))
+                    # 최신 목표 현황 헤더 - 연한 파란색 배경
+                    format_cell_range(ws_summary, 'A11:H11', CellFormat(
+                        backgroundColor=Color(0.8, 0.9, 1),
+                        textFormat=TextFormat(bold=True)
+                    ))
+                    # 열 너비 설정
+                    set_column_width(ws_summary, 'A', 100)
+                    set_column_width(ws_summary, 'B', 150)
+                    set_column_width(ws_summary, 'H', 200)
+                    # 헤더 행 고정
+                    set_frozen(ws_summary, rows=2)
+                except Exception as e:
+                    log(f"  [WARN] Summary 포맷팅 일부 실패: {e}")
             
             # Target_History 시트 생성 (피벗 구조)
             ws_history = spreadsheet.add_worksheet(title='Target_History', rows=500, cols=50)
@@ -524,6 +582,24 @@ class CompanySheetManager:
             header_row2 = ['영역', '카테고리', '항목ID', '항목명', 'Core', '세부분류', 'Level', '보고서일']
             ws_history.update('A1:H1', [header_row1])
             ws_history.update('A2:H2', [header_row2])
+            
+            # Target_History 시트 포맷팅 (gspread-formatting 라이브러리 필요)
+            if HAS_FORMATTING:
+                try:
+                    # 헤더 행 1 - 진한 파란색 배경
+                    format_cell_range(ws_history, 'A1:Z1', CellFormat(
+                        backgroundColor=Color(0.2, 0.4, 0.7),
+                        textFormat=TextFormat(bold=True, foregroundColor=Color(1, 1, 1))
+                    ))
+                    # 헤더 행 2 - 연한 파란색 배경
+                    format_cell_range(ws_history, 'A2:Z2', CellFormat(
+                        backgroundColor=Color(0.8, 0.9, 1),
+                        textFormat=TextFormat(bold=True)
+                    ))
+                    # 헤더 행 고정
+                    set_frozen(ws_history, rows=2)
+                except Exception as e:
+                    log(f"  [WARN] Target_History 포맷팅 일부 실패: {e}")
             
             log(f"  → 시트 구조 초기화 완료 (Summary, Target_History 피벗)")
             
@@ -702,9 +778,14 @@ class CompanySheetManager:
                         item_row_map[item_id] = {}
                     item_row_map[item_id][sub_type] = row_idx
         
+        # 이전 보고서 열 찾기 (목표변화 계산용)
+        prev_col_idx = None
+        if report_col_idx > 7:
+            prev_col_idx = report_col_idx - 1
+        
         # 4. 분석 결과 기록
         analysis_items = analysis_result.get('analysis_items', {})
-        sub_types = ['현재값', '목표값', '목표연도', '달성률', '전기대비']
+        sub_types = ['현재값', '목표값_최소', '목표값_최대', '목표연도', '달성률', '전기대비', '목표변화']
         
         updates = []  # batch update용
         new_rows = []  # 새로 추가할 행들
@@ -715,13 +796,66 @@ class CompanySheetManager:
             if level == 0:
                 continue
             
+            # 프레임워크에서 영역, 카테고리 정보 가져오기
+            area_name = ''
+            category_name = ''
+            item_name = item_data.get('item_name', item_id)
+            is_core = item_data.get('is_core', False)
+            
+            if self.framework:
+                fw_item = self.framework.get_item(item_id)
+                if fw_item:
+                    area_name = fw_item.area_name or ''
+                    category_name = fw_item.category_name or ''
+                    item_name = fw_item.item_name or item_id
+                    is_core = fw_item.is_core
+            
+            # target_min, target_max 가져오기 (하위 호환)
+            target_min = item_data.get('target_min')
+            target_max = item_data.get('target_max')
+            
+            # 이전 버전 호환: target_value만 있는 경우
+            if target_min is None and target_max is None:
+                old_target = item_data.get('target_value')
+                if old_target is not None:
+                    target_min = old_target
+                    target_max = old_target
+            
+            # 목표변화 계산 (이전 보고서 대비)
+            target_change = ''
+            if item_id in item_row_map and prev_col_idx is not None:
+                try:
+                    # 이전 목표값_최소 가져오기
+                    if '목표값_최소' in item_row_map[item_id]:
+                        prev_row = item_row_map[item_id]['목표값_최소']
+                        if prev_row <= len(all_values) and prev_col_idx < len(all_values[prev_row - 1]):
+                            prev_target_min = all_values[prev_row - 1][prev_col_idx]
+                            if prev_target_min and target_min:
+                                try:
+                                    prev_val = float(str(prev_target_min).replace(',', ''))
+                                    curr_val = float(str(target_min).replace(',', ''))
+                                    if curr_val > prev_val:
+                                        target_change = '상향'
+                                    elif curr_val < prev_val:
+                                        target_change = '하향'
+                                    else:
+                                        target_change = '유지'
+                                except ValueError:
+                                    pass
+                except Exception:
+                    pass
+            elif item_id not in item_row_map:
+                target_change = '신규'
+            
             # 값 매핑
             values = {
                 '현재값': str(item_data.get('current_value', '')) if item_data.get('current_value') else '',
-                '목표값': str(item_data.get('target_value', '')) if item_data.get('target_value') else '',
+                '목표값_최소': str(target_min) if target_min else '',
+                '목표값_최대': str(target_max) if target_max else '',
                 '목표연도': str(item_data.get('target_year', '')) if item_data.get('target_year') else '',
                 '달성률': '',  # 추후 계산
-                '전기대비': ''  # 추후 계산
+                '전기대비': '',  # 추후 계산
+                '목표변화': target_change
             }
             
             col_letter = self._get_column_letter(report_col_idx + 1)
@@ -737,11 +871,11 @@ class CompanySheetManager:
                 # 새 항목: 행 그룹 추가
                 for sub_type in sub_types:
                     new_row = [
-                        item_data.get('area_name', ''),
-                        item_data.get('category_name', ''),
+                        area_name,
+                        category_name,
                         item_id,
-                        item_data.get('item_name', item_id),
-                        'Y' if item_data.get('is_core', False) else '',
+                        item_name,
+                        'Y' if is_core else '',
                         sub_type,
                         level,
                         ''  # 보고서일 열은 빈칸 (헤더에서 관리)
@@ -807,13 +941,48 @@ class CompanySheetManager:
             if level == 0:
                 continue
             
+            # 프레임워크에서 영역, 카테고리 정보 가져오기
+            area_name = ''
+            category_name = ''
+            item_name = item_data.get('item_name', item_id)
+            is_core = item_data.get('is_core', False)
+            
+            if self.framework:
+                fw_item = self.framework.get_item(item_id)
+                if fw_item:
+                    area_name = fw_item.area_name or ''
+                    category_name = fw_item.category_name or ''
+                    item_name = fw_item.item_name or item_id
+                    is_core = fw_item.is_core
+            
+            # target_min, target_max 가져오기 (하위 호환)
+            target_min = item_data.get('target_min')
+            target_max = item_data.get('target_max')
+            
+            # 이전 버전 호환: target_value만 있는 경우
+            if target_min is None and target_max is None:
+                old_target = item_data.get('target_value')
+                if old_target is not None:
+                    target_min = old_target
+                    target_max = old_target
+            
+            # 목표값 표시 (범위 또는 단일값)
+            if target_min and target_max and target_min != target_max:
+                target_display = f"{target_min}~{target_max}"
+            elif target_min:
+                target_display = str(target_min)
+            elif target_max:
+                target_display = str(target_max)
+            else:
+                target_display = ''
+            
             row = [
-                item_data.get('area_name', ''),
-                item_data.get('category_name', ''),
-                item_data.get('item_name', item_id),
-                'Y' if item_data.get('is_core', False) else '',
+                area_name,
+                category_name,
+                item_name,
+                'Y' if is_core else '',
                 str(item_data.get('current_value', '')) if item_data.get('current_value') else '',
-                str(item_data.get('target_value', '')) if item_data.get('target_value') else '',
+                target_display,
                 str(item_data.get('target_year', '')) if item_data.get('target_year') else '',
                 item_data.get('note', '')
             ]
