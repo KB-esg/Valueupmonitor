@@ -71,7 +71,7 @@ jobs:
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           
           # LLM API 키
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANT_ANALYTIC: ${{ secrets.ANT_ANALYTIC }}
           GEM_ANALYTIC: ${{ secrets.GEM_ANALYTIC }}
           
           # 분석기 선택 (기본값: claude)
@@ -101,7 +101,7 @@ jobs:
           echo "- **실행 시각**: $(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### API 설정" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+          if [ -n "${{ secrets.ANT_ANALYTIC }}" ]; then
             echo "- **Claude API**: 설정됨 ✅" >> $GITHUB_STEP_SUMMARY
           else
             echo "- **Claude API**: 미설정 ❌" >> $GITHUB_STEP_SUMMARY
