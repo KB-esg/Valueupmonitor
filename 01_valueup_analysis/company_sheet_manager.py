@@ -38,12 +38,14 @@ def log(message: str):
 
 
 class CompanySheetManager:
-    """기업별 분석 결과 스프레드시트 관리자 (OAuth2 우선)"""
+    """기업별 분석 결과 스프레드시트 관리자 (OAuth2 전용)"""
     
     ANALYSIS_FOLDER_NAME = "ValueUp_analysis"
     
+    # pdf_extractor.py와 동일한 SCOPES 사용 (refresh token 호환)
+    # drive scope는 스프레드시트 생성/수정 권한 포함
     SCOPES = [
-        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive.readonly',
         'https://www.googleapis.com/auth/drive'
     ]
     
