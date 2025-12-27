@@ -18,9 +18,14 @@ import sys
 import re
 import io
 import json
+import logging
 import tempfile
 from typing import Optional, Tuple, Dict, Any
 from datetime import datetime
+
+# pdfminer 경고 메시지 숨기기 (pdfplumber 내부에서 발생)
+# "Cannot set gray non-stroke color..." 등의 불필요한 경고 억제
+logging.getLogger('pdfminer').setLevel(logging.ERROR)
 
 # PDF 텍스트 추출
 try:
