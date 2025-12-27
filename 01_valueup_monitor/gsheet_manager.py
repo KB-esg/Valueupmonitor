@@ -386,10 +386,21 @@ class GSheetManager:
         
         try:
             all_records = worksheet.get_all_records()
-            return [
-                r for r in all_records 
-                if r.get('접수번호') and not r.get('구글드라이브링크')
-            ]
+            result = []
+            for r in all_records:
+                if not r.get('접수번호'):
+                    continue
+                
+                gdrive_link = str(r.get('구글드라이브링크', '')).strip()
+                
+                # 실제 Google Drive 링크가 있으면 제외 (이미 업로드 완료)
+                if gdrive_link.startswith('https://drive.google.com/'):
+                    continue
+                
+                # 비어있거나, [로컬저장] 등 다른 값이면 포함 (재처리 필요)
+                result.append(r)
+            
+            return result
         except Exception as e:
             log(f"항목 조회 중 오류: {e}")
             return []
