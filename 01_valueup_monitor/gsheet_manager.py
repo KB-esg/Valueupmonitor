@@ -220,7 +220,7 @@ class GSheetManager:
             log(f"데이터 조회 중 오류: {e}")
             return {}
     
-    def append_disclosures(self, disclosures: List[Dict], sheet_name: str = "밸류업공시목록") -> int:
+    def append_disclosures(self, disclosures: List[Dict], sheet_name: str = "밸류업공시목록") -> List[Dict]:
         """
         공시 목록 추가 (배치)
         
@@ -229,11 +229,11 @@ class GSheetManager:
             sheet_name: 시트 이름
             
         Returns:
-            추가된 행 수
+            새로 추가된 항목 리스트 (PDF 처리용)
         """
         worksheet = self.get_or_create_worksheet(sheet_name)
         if not worksheet:
-            return 0
+            return []
         
         # 이미 존재하는 접수번호 확인
         existing = self.get_existing_acptno_set(worksheet)
@@ -247,7 +247,7 @@ class GSheetManager:
         
         if not new_items:
             log("새로운 공시 항목이 없습니다.")
-            return 0
+            return []
         
         # 행 용량 확보
         self._ensure_row_capacity(worksheet, len(new_items))
@@ -274,10 +274,10 @@ class GSheetManager:
         try:
             worksheet.append_rows(rows, value_input_option='USER_ENTERED')
             log(f"{len(rows)}건의 새로운 공시 추가 완료")
-            return len(rows)
+            return new_items  # 추가된 항목 리스트 반환
         except Exception as e:
             log(f"행 추가 중 오류: {e}")
-            return 0
+            return []
     
     def batch_update_links(
         self, 
