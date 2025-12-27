@@ -441,10 +441,10 @@ class CompanySheetManager:
         except Exception as e:
             error_str = str(e)
             
-            # Storage Quota 초과 에러 체크
+            # Storage Quota 초과 에러 체크 → 바로 종료
             if 'storageQuotaExceeded' in error_str or 'storage quota' in error_str.lower():
-                log(f"[ERROR] Drive 저장 공간 부족 - 기업 시트 생성 건너뜀: {file_name}")
                 self._storage_quota_exceeded = True
+                raise RuntimeError(f"Drive 저장 공간 부족 - 기업 시트 생성 불가: {file_name}")
             else:
                 log(f"[ERROR] 스프레드시트 생성 실패: {e}")
             
