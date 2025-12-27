@@ -4,8 +4,8 @@ Claude API 분석기
 Anthropic Claude Haiku 모델 사용
 
 분석 방식:
-1. 텍스트 전달 (우선) - 토큰 효율적
-2. PDF 직접 전달 (fallback) - Claude의 문서 이해 기능 활용
+1. PDF 직접 전달 (우선) - Claude의 문서 이해 기능 활용
+2. 텍스트 전달 (fallback) - PDF 분석 실패 시
 """
 
 import os
@@ -284,25 +284,9 @@ class ClaudeAnalyzer:
         
         result = None
         
-        # 1. 텍스트 우선 시도 (토큰 절약 - 텍스트가 500자 이상이면)
-        if pdf_text and len(pdf_text) >= 500:
-            log(f"  [방식1] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
-            sys.stdout.flush()
-            
-            result = self._analyze_with_text(pdf_text, company_name, framework, max_retries=3)
-            sys.stdout.flush()
-            
-            if result:
-                self.last_analysis_method = "TEXT_FIRST"
-                log("  ✓ 텍스트 전달 성공!")
-                sys.stdout.flush()
-            else:
-                log("  ✗ 텍스트 전달 실패, PDF 직접 전달로 전환...")
-                sys.stdout.flush()
-        
-        # 2. PDF 직접 전달 (텍스트 실패 시 또는 텍스트 없을 때)
-        if not result and pdf_bytes:
-            log(f"  [방식2] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
+        # 1. PDF 직접 전달 우선 시도 (Claude의 문서 이해 기능 활용)
+        if pdf_bytes:
+            log(f"  [방식1] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
             sys.stdout.flush()
             
             result = self._analyze_with_pdf(pdf_bytes, company_name, framework, max_retries=3)
@@ -313,7 +297,23 @@ class ClaudeAnalyzer:
                 log("  ✓ PDF 직접 전달 성공!")
                 sys.stdout.flush()
             else:
-                log("  ✗ PDF 직접 전달도 실패")
+                log("  ✗ PDF 직접 전달 실패, 텍스트 분석으로 전환...")
+                sys.stdout.flush()
+        
+        # 2. 텍스트 분석 (PDF 실패 시 또는 PDF 없을 때)
+        if not result and pdf_text and len(pdf_text) >= 500:
+            log(f"  [방식2] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
+            sys.stdout.flush()
+            
+            result = self._analyze_with_text(pdf_text, company_name, framework, max_retries=3)
+            sys.stdout.flush()
+            
+            if result:
+                self.last_analysis_method = "TEXT_FALLBACK"
+                log("  ✓ 텍스트 전달 성공!")
+                sys.stdout.flush()
+            else:
+                log("  ✗ 텍스트 전달도 실패")
                 sys.stdout.flush()
         
         # 결과 통계 출력
