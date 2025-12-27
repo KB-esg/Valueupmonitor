@@ -177,6 +177,10 @@ class ValueUpAnalyzer:
             log("")
             log(f"[{idx}/{len(items_to_analyze)}] {company} ({acptno})")
             
+            # 디버깅: 공시 데이터 키 출력
+            log(f"  공시 데이터 키: {list(disclosure.keys())}")
+            log(f"  구글드라이브링크: {gdrive_url[:60] if gdrive_url else '(없음)'}...")
+            
             # 구글 드라이브 링크 확인
             if not gdrive_url:
                 log("  [WARN] 구글드라이브링크가 없습니다. 건너뜁니다.")
@@ -191,18 +195,13 @@ class ValueUpAnalyzer:
                 log("  구글 드라이브에서 PDF 다운로드 중...")
                 pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text_from_gdrive(gdrive_url)
                 
-                if not pdf_bytes and not pdf_text:
-                    log("  [WARN] PDF 다운로드 및 텍스트 추출 모두 실패")
+                if not pdf_bytes:
+                    log("  [ERROR] PDF 다운로드 실패")
                     if not self.dry_run:
                         self.sheet_analyzer.save_error_result(disclosure, "PDF 다운로드 실패")
                     result['errors'] += 1
                     result['error_details'].append(f"{company}: PDF 다운로드 실패")
                     continue
-                
-                if pdf_bytes:
-                    log(f"  PDF 다운로드 완료: {len(pdf_bytes):,} bytes")
-                if pdf_text:
-                    log(f"  텍스트 추출 완료: {len(pdf_text):,}자 (fallback용)")
                 
                 # 3-2. Gemini 분석 (PDF 직접 전달 우선, 텍스트 fallback)
                 log("  Gemini 분석 시작...")
