@@ -5,8 +5,9 @@ KRX KIND 사이트에서 기업가치 제고(밸류업) 공시를 자동으로 �
 ## 주요 기능
 
 - **공시 목록 크롤링**: KRX KIND 밸류업 공시 페이지에서 공시 목록 수집
+- **조회 기간 기준 조기 종료**: 설정된 기간 외 공시가 발견되면 크롤링 자동 종료
 - **종목코드 자동 조회**: 회사명으로 6자리 종목코드 자동 매핑 (pykrx/KRX API)
-- **Google Sheets 연동**: 공시 목록을 스프레드시트에 자동 기록 (배치 업데이트로 quota 절약)
+- **Google Sheets 연동**: 배치 업데이트로 API quota 절약, 시트 행/열 자동 확장
 - **PDF 다운로드**: 기업이 제출한 원본 첨부 PDF 다운로드 (첨부문서 우선)
 - **Google Drive 업로드**: OAuth2 인증으로 개인 드라이브에 월별 폴더 구조로 저장
 - **GitHub Actions 아티팩트**: PDF 파일 90일 보관, 시트에 아티팩트 정보 기록
@@ -17,7 +18,7 @@ KRX KIND 사이트에서 기업가치 제고(밸류업) 공시를 자동으로 �
 01_valueup_monitor/
 ├── main.py                 # 메인 실행 파일
 ├── krx_valueup_crawler.py  # KRX 밸류업 공시 크롤러 (Playwright)
-├── gsheet_manager.py       # Google Sheets 관리 (배치 업데이트)
+├── gsheet_manager.py       # Google Sheets 관리 (배치 업데이트, 자동 확장)
 ├── gdrive_uploader.py      # Google Drive 업로더 (OAuth2 지원)
 ├── stock_code_mapper.py    # 종목코드 조회 모듈
 ├── OAUTH_SETUP_GUIDE.md    # OAuth2 설정 가이드
@@ -35,16 +36,21 @@ requirements/
 
 ```
 [1단계] KRX에서 공시 목록 조회
+    ├── 날짜 범위 설정 (days 또는 period)
+    ├── 조회 기간 외 공시 다수 발견 시 조기 종료
     ↓
 [2단계] 종목코드 조회 (회사명 → 종목코드)
     ↓
 [3단계] Google Sheets에 공시 목록 기록
+    ├── 시트 행/열 부족 시 자동 확장
+    ├── 배치 추가 (1회 API 호출)
     ↓
 [4단계] PDF 다운로드 및 저장
+    ├── 조회 기간 내 공시만 처리
     ├── 로컬: Archive_pdf/
     └── Drive: PDF_archive/YY_MM/ (OAuth2 설정 시)
     ↓
-[5단계] 시트에 링크 정보 배치 업데이트
+[5단계] 시트에 링크 정보 배치 업데이트 (1회 API 호출)
     ├── H열: 구글드라이브링크
     └── J열: 아티팩트링크
 ```
@@ -63,6 +69,12 @@ requirements/
 | H | 구글드라이브링크 | Drive 링크 또는 [로컬저장] 파일명 |
 | I | 수집일시 | 데이터 수집 시각 |
 | J | 아티팩트링크 | GitHub Actions 아티팩트 정보 |
+
+### 시트 자동 확장
+
+- **열 부족**: 기존 시트가 9열이면 10열로 자동 확장
+- **행 부족**: 데이터 추가 전 필요한 행 수 + 100행 여유분 확보
+- **새 시트 생성**: 2000행 × 10열로 생성
 
 ## Google Drive 폴더 구조
 
@@ -139,7 +151,7 @@ python main.py --days 30
 python main.py --period 3개월
 
 # 전체 기간 아카이브
-python main.py --period 전체 --max-pages 20
+python main.py --period 전체 --max-pages 50
 
 # 목록만 수집 (PDF 다운로드 건너뜀)
 python main.py --period 1년 --skip-pdf
@@ -157,6 +169,33 @@ python main.py --period 1년 --skip-pdf
 
 3. **스케줄 실행**
    - 매주 월요일 오전 9시 (KST) 자동 실행
+
+## 조기 종료 조건
+
+조회 기간 외 공시가 발견되면 크롤링을 조기 종료합니다:
+
+```
+페이지 3 파싱 중...
+  발견: 20건
+    [SKIP] 파트론 - 2025-12-08 (기간 외)
+    [SKIP] 이녹스첨단소재 - 2025-12-05 (기간 외)
+  필터 후: 5건 추가 (제외: 15건)
+  조회 기간 외 공시 다수 발견, 크롤링 종료
+```
+
+**종료 조건:**
+- 페이지의 절반 이상이 기간 외 공시인 경우
+- 전체 페이지가 기간 외인 경우 즉시 종료
+
+## API Quota 최적화
+
+Google Sheets API quota를 절약하기 위한 배치 처리:
+
+| 작업 | 이전 | 이후 |
+|------|------|------|
+| 공시 추가 | 건별 호출 | `append_rows()` 1회 |
+| 링크 업데이트 | 건별 `update_cell()` | `batch_update()` 1회 |
+| 시트 확장 | 오류 발생 후 처리 | 사전 용량 확보 |
 
 ## OAuth2 설정 (Google Drive 업로드)
 
@@ -215,6 +254,10 @@ pykrx>=1.0.45            # 종목코드 조회
 ```
 
 ## 문제 해결
+
+### "Range exceeds grid limits"
+- 시트 열/행 수 부족
+- 자동 확장 기능으로 해결됨 (v2.0+)
 
 ### "스프레드시트를 찾을 수 없습니다"
 - 서비스 계정 이메일에 스프레드시트 편집 권한 부여 필요
