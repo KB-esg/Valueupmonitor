@@ -201,16 +201,30 @@ class CompanySheetManager:
                     self._storage_quota_exceeded = True
                     raise RuntimeError(f"서비스 계정 소유 폴더 존재: {folder_id}")
             
-            # 2. OAuth2로 못 찾았으면 서비스 계정 소유 폴더 체크
-            sa_folder_id = self._search_folder_with_service_account()
+            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색 (drive.file scope 제한 우회)
+            sa_folder_info = self._search_folder_with_service_account()
             
-            if sa_folder_id:
-                log(f"[ERROR] 서비스 계정 소유 {self.ANALYSIS_FOLDER_NAME} 폴더가 존재합니다!")
-                log(f"  → 폴더 ID: {sa_folder_id}")
-                log(f"  → Google Drive에서 해당 폴더를 삭제하고 다시 실행하세요.")
-                log(f"  → (서비스 계정 소유 폴더는 Storage Quota 문제로 사용할 수 없습니다)")
-                self._storage_quota_exceeded = True
-                raise RuntimeError(f"서비스 계정 소유 폴더 존재: {sa_folder_id}")
+            if sa_folder_info:
+                sa_folder_id = sa_folder_info['id']
+                sa_folder_owners = sa_folder_info.get('owners', [])
+                owner_emails = [o.get('emailAddress', '') for o in sa_folder_owners]
+                
+                # 실제 owner 확인
+                if oauth_email and oauth_email in owner_emails:
+                    # OAuth 계정이 owner → drive.file scope 때문에 검색 못한 것뿐, 사용 가능
+                    self.analysis_folder_id = sa_folder_id
+                    log(f"기존 {self.ANALYSIS_FOLDER_NAME} 폴더 발견 (Owner: {oauth_email})")
+                    return self.analysis_folder_id
+                else:
+                    # 서비스 계정 등 다른 계정이 owner → 에러
+                    owner_str = ', '.join(owner_emails) if owner_emails else 'Unknown'
+                    log(f"[ERROR] {self.ANALYSIS_FOLDER_NAME} 폴더의 Owner가 OAuth2 계정이 아닙니다!")
+                    log(f"  → 폴더 ID: {sa_folder_id}")
+                    log(f"  → 현재 Owner: {owner_str}")
+                    log(f"  → OAuth2 계정: {oauth_email}")
+                    log(f"  → Google Drive에서 해당 폴더를 삭제하고 다시 실행하세요.")
+                    self._storage_quota_exceeded = True
+                    raise RuntimeError(f"서비스 계정 소유 폴더 존재: {sa_folder_id}")
             
             # 3. 폴더가 없으면 OAuth2로 새로 생성
             folder_metadata = {
@@ -235,12 +249,12 @@ class CompanySheetManager:
             log(f"[ERROR] 폴더 조회/생성 실패: {e}")
             return None
     
-    def _search_folder_with_service_account(self) -> Optional[str]:
+    def _search_folder_with_service_account(self) -> Optional[Dict[str, Any]]:
         """
         서비스 계정으로 ValueUp_analysis 폴더 검색
         
         Returns:
-            폴더 ID 또는 None
+            {'id': 폴더ID, 'owners': [owner정보]} 또는 None
         """
         if not self.credentials_json:
             return None
@@ -262,12 +276,12 @@ class CompanySheetManager:
             results = sa_drive.files().list(
                 q=query,
                 spaces='drive',
-                fields='files(id, name)'
+                fields='files(id, name, owners)'  # owners 정보 추가
             ).execute()
             
             files = results.get('files', [])
             if files:
-                return files[0]['id']
+                return files[0]  # {'id': ..., 'owners': [...]}
             
             return None
             
@@ -298,8 +312,7 @@ class CompanySheetManager:
         
         로직:
         1. OAuth2로 스프레드시트 검색
-        2. 못 찾으면 서비스 계정으로 재검색
-        3. 서비스 계정 파일 발견 시 OAuth2 계정에 권한 추가
+        2. 못 찾으면 서비스 계정으로 재검색 + owner 확인
         
         Args:
             company_name: 기업명
@@ -314,6 +327,7 @@ class CompanySheetManager:
         
         # 파일명 형식: "기업명_종목코드"
         file_name = f"{company_name}_{stock_code}"
+        oauth_email = self._get_oauth_email()
         
         try:
             # 1. OAuth2 계정으로 검색
@@ -335,15 +349,27 @@ class CompanySheetManager:
             if files:
                 return files[0]['id']
             
-            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색
-            sa_file_id = self._search_spreadsheet_with_service_account(file_name, folder_id)
+            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색 (drive.file scope 제한 우회)
+            sa_file_info = self._search_spreadsheet_with_service_account(file_name, folder_id)
             
-            if sa_file_id:
-                # 서비스 계정 소유 스프레드시트 발견 → 에러 발생
-                log(f"[ERROR] 서비스 계정 소유 스프레드시트 발견: {file_name}")
-                log(f"  → 해당 파일을 삭제하고 다시 실행하세요.")
-                self._storage_quota_exceeded = True
-                raise RuntimeError(f"서비스 계정 소유 스프레드시트 존재: {file_name}")
+            if sa_file_info:
+                sa_file_id = sa_file_info['id']
+                sa_file_owners = sa_file_info.get('owners', [])
+                owner_emails = [o.get('emailAddress', '') for o in sa_file_owners]
+                
+                # 실제 owner 확인
+                if oauth_email and oauth_email in owner_emails:
+                    # OAuth 계정이 owner → drive.file scope 때문에 검색 못한 것뿐, 사용 가능
+                    log(f"기존 스프레드시트 발견: {file_name} (Owner: {oauth_email})")
+                    return sa_file_id
+                else:
+                    # 서비스 계정 등 다른 계정이 owner → 에러
+                    owner_str = ', '.join(owner_emails) if owner_emails else 'Unknown'
+                    log(f"[ERROR] 스프레드시트 '{file_name}'의 Owner가 OAuth2 계정이 아닙니다!")
+                    log(f"  → 현재 Owner: {owner_str}")
+                    log(f"  → 해당 파일을 삭제하고 다시 실행하세요.")
+                    self._storage_quota_exceeded = True
+                    raise RuntimeError(f"서비스 계정 소유 스프레드시트 존재: {file_name}")
             
             return None
             
@@ -353,7 +379,7 @@ class CompanySheetManager:
             log(f"[ERROR] 스프레드시트 검색 실패: {e}")
             return None
     
-    def _search_spreadsheet_with_service_account(self, file_name: str, folder_id: str) -> Optional[str]:
+    def _search_spreadsheet_with_service_account(self, file_name: str, folder_id: str) -> Optional[Dict[str, Any]]:
         """
         서비스 계정으로 스프레드시트 검색
         
@@ -362,7 +388,7 @@ class CompanySheetManager:
             folder_id: 폴더 ID
             
         Returns:
-            스프레드시트 ID 또는 None
+            {'id': 파일ID, 'owners': [owner정보]} 또는 None
         """
         if not self.credentials_json:
             return None
@@ -384,12 +410,12 @@ class CompanySheetManager:
             results = sa_drive.files().list(
                 q=query,
                 spaces='drive',
-                fields='files(id, name)'
+                fields='files(id, name, owners)'  # owners 정보 추가
             ).execute()
             
             files = results.get('files', [])
             if files:
-                return files[0]['id']
+                return files[0]  # {'id': ..., 'owners': [...]}
             
             return None
             
