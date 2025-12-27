@@ -4,10 +4,10 @@ Framework 기반으로 PDF를 분석하여 Google Sheets에 기록
 """
 
 import argparse
-import asyncio
 import os
 import sys
 import json
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -74,7 +74,8 @@ class ValueUpAnalyzer:
             spreadsheet_id=self.spreadsheet_id
         )
         
-        self.pdf_extractor = PDFExtractor()
+        # PDF 추출기 (OAuth2 우선, 서비스 계정 fallback)
+        self.pdf_extractor = PDFExtractor()  # 환경변수에서 자동 로드
         
         self.gemini_analyzer = GeminiAnalyzer(
             api_key=self.gemini_api_key
@@ -82,7 +83,8 @@ class ValueUpAnalyzer:
         
         # 연결 상태
         self.sheet_ready = self.sheet_analyzer.spreadsheet is not None
-        self.gemini_ready = self.gemini_analyzer.model is not None
+        self.gemini_ready = self.gemini_analyzer.client is not None
+        self.drive_ready = self.pdf_extractor.drive_service is not None
         
         # 프레임워크
         self.framework: Optional[Framework] = None
@@ -111,11 +113,20 @@ class ValueUpAnalyzer:
         log(f"최대 분석 수: {self.max_items}건")
         log(f"테스트 모드: {'예' if self.dry_run else '아니오'}")
         log(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
-        log(f"Gemini 모델 연결: {'성공' if self.gemini_ready else '실패'}")
+        if self.drive_ready:
+            log(f"Google Drive 연결: 성공 ({self.pdf_extractor.auth_method})")
+        else:
+            log("Google Drive 연결: 실패")
+        log(f"Gemini 클라이언트 연결: {'성공' if self.gemini_ready else '실패'}")
         
         if not self.sheet_ready:
             log("[오류] Google Sheets에 연결할 수 없습니다.")
             result['error_details'].append("Google Sheets 연결 실패")
+            return result
+        
+        if not self.drive_ready:
+            log("[오류] Google Drive에 연결할 수 없습니다.")
+            result['error_details'].append("Google Drive 연결 실패")
             return result
         
         if not self.gemini_ready:
@@ -161,14 +172,24 @@ class ValueUpAnalyzer:
         for idx, disclosure in enumerate(items_to_analyze, 1):
             acptno = disclosure.get('접수번호', '')
             company = disclosure.get('회사명', '')
+            gdrive_url = disclosure.get('구글드라이브링크', '')
             
             log("")
             log(f"[{idx}/{len(items_to_analyze)}] {company} ({acptno})")
             
+            # 구글 드라이브 링크 확인
+            if not gdrive_url:
+                log("  [WARN] 구글드라이브링크가 없습니다. 건너뜁니다.")
+                if not self.dry_run:
+                    self.sheet_analyzer.save_error_result(disclosure, "구글드라이브링크 없음")
+                result['errors'] += 1
+                result['error_details'].append(f"{company}: 구글드라이브링크 없음")
+                continue
+            
             try:
-                # 3-1. PDF 다운로드 및 텍스트 추출
-                log("  PDF 다운로드 중...")
-                pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text(acptno)
+                # 3-1. 구글 드라이브에서 PDF 다운로드 및 텍스트 추출
+                log("  구글 드라이브에서 PDF 다운로드 중...")
+                pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text_from_gdrive(gdrive_url)
                 
                 if not pdf_text:
                     log("  [WARN] PDF 텍스트 추출 실패")
@@ -206,6 +227,7 @@ class ValueUpAnalyzer:
                 # 3-3. 결과 저장
                 if self.dry_run:
                     log("  [DRY-RUN] 저장 건너뜀")
+                    result['analyzed'] += 1
                 else:
                     log("  결과 저장 중...")
                     success = self.sheet_analyzer.save_analysis_result(
@@ -221,7 +243,6 @@ class ValueUpAnalyzer:
                         result['error_details'].append(f"{company}: 저장 실패")
                 
                 # API 호출 간 딜레이
-                import time
                 time.sleep(2)
                 
             except Exception as e:
@@ -333,7 +354,7 @@ def main():
             f.write(f"analyzed={result['analyzed']}\n")
             f.write(f"errors={result['errors']}\n")
     
-    # 오류 발생 시 종료 코드 1
+    # 오류만 있고 분석 성공이 없을 때만 실패
     if result['errors'] > 0 and result['analyzed'] == 0:
         sys.exit(1)
 
