@@ -74,6 +74,10 @@ class GeminiAnalyzer:
         
         # 클라이언트 초기화
         try:
+            # API 키 확인용 로그 (앞 8자만 출력)
+            key_prefix = self.api_key[:8] if len(self.api_key) > 8 else "???"
+            log(f"Gemini API 키 확인: {key_prefix}...")
+            
             self.client = genai.Client(api_key=self.api_key)
             log(f"Gemini 클라이언트 초기화 완료: {self.model_name}")
         except Exception as e:
@@ -286,31 +290,12 @@ class GeminiAnalyzer:
         
         result = None
         
-        # [임시] 토큰 절약 모드: 텍스트 우선, PDF는 텍스트 실패 시에만
-        # Free Tier 제한 때문에 PDF 직접 전달은 건너뜀
-        
-        # 1. 텍스트 전달 시도 (토큰 절약)
-        if pdf_text and len(pdf_text) >= 100:
-            log(f"  [방식1] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
+        # 1. PDF 직접 전달 우선 시도 (Gemini의 멀티모달 기능 활용)
+        if pdf_bytes:
+            log(f"  [방식1] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
             sys.stdout.flush()
             
-            result = self._analyze_with_text(pdf_text, company_name, framework, max_retries=1)
-            sys.stdout.flush()
-            
-            if result:
-                self.last_analysis_method = "TEXT_ONLY"
-                log("  ✓ 텍스트 전달 성공!")
-                sys.stdout.flush()
-            else:
-                log("  ✗ 텍스트 전달 실패")
-                sys.stdout.flush()
-        
-        # 2. PDF 직접 전달 (텍스트 실패 시 또는 텍스트 없을 때만)
-        if not result and pdf_bytes:
-            log(f"  [방식2] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
-            sys.stdout.flush()
-            
-            result = self._analyze_with_pdf(pdf_bytes, company_name, framework, max_retries=1)
+            result = self._analyze_with_pdf(pdf_bytes, company_name, framework, max_retries=2)
             sys.stdout.flush()
             
             if result:
@@ -318,7 +303,23 @@ class GeminiAnalyzer:
                 log("  ✓ PDF 직접 전달 성공!")
                 sys.stdout.flush()
             else:
-                log("  ✗ PDF 직접 전달도 실패")
+                log("  ✗ PDF 직접 전달 실패, 텍스트 분석으로 전환...")
+                sys.stdout.flush()
+        
+        # 2. 텍스트 분석 (PDF 실패 시 또는 PDF 없을 때)
+        if not result and pdf_text and len(pdf_text) >= 100:
+            log(f"  [방식2] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
+            sys.stdout.flush()
+            
+            result = self._analyze_with_text(pdf_text, company_name, framework, max_retries=2)
+            sys.stdout.flush()
+            
+            if result:
+                self.last_analysis_method = "TEXT_FALLBACK"
+                log("  ✓ 텍스트 전달 성공!")
+                sys.stdout.flush()
+            else:
+                log("  ✗ 텍스트 전달도 실패")
                 sys.stdout.flush()
         
         # 결과 통계 출력
