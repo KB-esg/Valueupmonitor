@@ -16,8 +16,19 @@ sys.stdout.reconfigure(line_buffering=True)
 
 from gsheet_analyzer import GSheetAnalyzer
 from pdf_extractor import PDFExtractor
-from gemini_analyzer import GeminiAnalyzer
 from framework_loader import Framework
+
+# 분석기 선택: ANALYZER_TYPE 환경변수로 결정 (기본값: claude)
+ANALYZER_TYPE = os.environ.get('ANALYZER_TYPE', 'claude').lower()
+
+if ANALYZER_TYPE == 'gemini':
+    from gemini_analyzer import GeminiAnalyzer as LLMAnalyzer
+    DEFAULT_API_KEY_ENV = 'GEM_ANALYTIC'
+    ANALYZER_NAME = 'Gemini'
+else:
+    from claude_analyzer import ClaudeAnalyzer as LLMAnalyzer
+    DEFAULT_API_KEY_ENV = 'ANTHROPIC_API_KEY'
+    ANALYZER_NAME = 'Claude'
 
 
 def log(message: str):
@@ -47,7 +58,7 @@ class ValueUpAnalyzer:
         self,
         credentials_json: Optional[str] = None,
         spreadsheet_id: Optional[str] = None,
-        gemini_api_key: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
         days: int = 7,
         max_items: int = 10,
         dry_run: bool = False
@@ -58,14 +69,14 @@ class ValueUpAnalyzer:
         Args:
             credentials_json: 서비스 계정 JSON
             spreadsheet_id: 스프레드시트 ID
-            gemini_api_key: Gemini API 키
+            llm_api_key: LLM API 키 (Claude 또는 Gemini)
             days: 분석할 공시 기간(일)
             max_items: 최대 분석 항목 수
             dry_run: 테스트 모드 (저장 안함)
         """
         self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
         self.spreadsheet_id = spreadsheet_id or os.environ.get('VALUEUP_GSPREAD_ID')
-        self.gemini_api_key = gemini_api_key or os.environ.get('GEM_ANALYTIC')
+        self.llm_api_key = llm_api_key or os.environ.get(DEFAULT_API_KEY_ENV)
         self.days = days
         self.max_items = max_items
         self.dry_run = dry_run
@@ -79,13 +90,13 @@ class ValueUpAnalyzer:
         # PDF 추출기 (OAuth2 우선, 서비스 계정 fallback)
         self.pdf_extractor = PDFExtractor()  # 환경변수에서 자동 로드
         
-        self.gemini_analyzer = GeminiAnalyzer(
-            api_key=self.gemini_api_key
+        self.llm_analyzer = LLMAnalyzer(
+            api_key=self.llm_api_key
         )
         
         # 연결 상태
         self.sheet_ready = self.sheet_analyzer.spreadsheet is not None
-        self.gemini_ready = self.gemini_analyzer.client is not None
+        self.llm_ready = self.llm_analyzer.client is not None
         self.drive_ready = self.pdf_extractor.drive_service is not None
         
         # 프레임워크
@@ -110,7 +121,8 @@ class ValueUpAnalyzer:
         log("=" * 60)
         log(f"서비스 계정: {get_service_account_email()}")
         log(f"스프레드시트 ID: {self.spreadsheet_id}")
-        log(f"Gemini API: {'설정됨' if self.gemini_api_key else '미설정'}")
+        log(f"LLM 분석기: {ANALYZER_NAME}")
+        log(f"{ANALYZER_NAME} API: {'설정됨' if self.llm_api_key else '미설정'}")
         log(f"분석 기간: 최근 {self.days}일")
         log(f"최대 분석 수: {self.max_items}건")
         log(f"테스트 모드: {'예' if self.dry_run else '아니오'}")
@@ -119,7 +131,7 @@ class ValueUpAnalyzer:
             log(f"Google Drive 연결: 성공 ({self.pdf_extractor.auth_method})")
         else:
             log("Google Drive 연결: 실패")
-        log(f"Gemini 클라이언트 연결: {'성공' if self.gemini_ready else '실패'}")
+        log(f"{ANALYZER_NAME} 클라이언트 연결: {'성공' if self.llm_ready else '실패'}")
         
         if not self.sheet_ready:
             log("[오류] Google Sheets에 연결할 수 없습니다.")
@@ -131,9 +143,9 @@ class ValueUpAnalyzer:
             result['error_details'].append("Google Drive 연결 실패")
             return result
         
-        if not self.gemini_ready:
-            log("[오류] Gemini API에 연결할 수 없습니다.")
-            result['error_details'].append("Gemini API 연결 실패")
+        if not self.llm_ready:
+            log(f"[오류] {ANALYZER_NAME} API에 연결할 수 없습니다.")
+            result['error_details'].append(f"{ANALYZER_NAME} API 연결 실패")
             return result
         
         # 1. 프레임워크 로드
@@ -334,11 +346,11 @@ class ValueUpAnalyzer:
                     result['error_details'].append(f"{company}: PDF 다운로드 실패")
                     continue
                 
-                # 4-2. Gemini 분석 (PDF 직접 전달 우선, 텍스트 fallback)
-                log("  [STEP 2] Gemini 분석 시작...")
+                # 4-2. LLM 분석 (텍스트 우선, PDF fallback)
+                log(f"  [STEP 2] {ANALYZER_NAME} 분석 시작...")
                 sys.stdout.flush()
                 
-                analysis_result = self.gemini_analyzer.analyze(
+                analysis_result = self.llm_analyzer.analyze(
                     company_name=company,
                     framework=self.framework,
                     pdf_bytes=pdf_bytes,
@@ -354,25 +366,25 @@ class ValueUpAnalyzer:
                 sys.stdout.flush()
                 
                 if not analysis_result:
-                    log("  [WARN] Gemini 분석 실패")
+                    log(f"  [WARN] {ANALYZER_NAME} 분석 실패")
                     sys.stdout.flush()
                     if not self.dry_run:
-                        self.sheet_analyzer.save_error_result(disclosure, "Gemini 분석 실패")
+                        self.sheet_analyzer.save_error_result(disclosure, f"{ANALYZER_NAME} 분석 실패")
                     result['errors'] += 1
-                    result['error_details'].append(f"{company}: Gemini 분석 실패")
+                    result['error_details'].append(f"{company}: {ANALYZER_NAME} 분석 실패")
                     
                     # 연속 실패 체크 (일일 할당량 초과 가능성)
-                    consecutive_failures = sum(1 for err in result['error_details'][-3:] if 'Gemini 분석 실패' in err)
+                    consecutive_failures = sum(1 for err in result['error_details'][-3:] if f'{ANALYZER_NAME} 분석 실패' in err)
                     if consecutive_failures >= 3:
                         log("")
-                        log("  [WARN] 연속 3회 Gemini 분석 실패 - 일일 할당량 초과 가능성")
-                        log("  [WARN] 남은 공시 분석을 중단합니다. 내일 다시 시도하세요.")
+                        log(f"  [WARN] 연속 3회 {ANALYZER_NAME} 분석 실패 - Rate Limit 초과 가능성")
+                        log("  [WARN] 남은 공시 분석을 중단합니다. 나중에 다시 시도하세요.")
                         break
                     
                     continue
                 
-                # 분석 방식 기록 (PDF_DIRECT 또는 TEXT_FALLBACK)
-                analysis_method = self.gemini_analyzer.last_analysis_method
+                # 분석 방식 기록 (PDF_DIRECT 또는 TEXT_FIRST)
+                analysis_method = self.llm_analyzer.last_analysis_method
                 
                 # 4-3. 결과 저장
                 if self.dry_run:
