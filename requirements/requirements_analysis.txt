@@ -1,17 +1,12 @@
-# 밸류업 공시 분석 모듈 의존성
-# Python 3.11+
-
-# Google Sheets API
-gspread>=6.0.0
+# Google APIs
+gspread>=5.12.0
 google-auth>=2.25.0
-google-auth-oauthlib>=1.2.0
+google-auth-oauthlib>=1.1.0
+google-api-python-client>=2.111.0
 
-# Google Drive API (PDF 다운로드용)
-google-api-python-client>=2.100.0
+# PDF Processing
+pdfplumber>=0.10.3
 
-# PDF 처리
-pdfplumber>=0.10.0
-PyPDF2>=3.0.0
-
-# Gemini API (새로운 패키지)
-google-genai>=1.0.0
+# LLM APIs
+anthropic>=0.39.0    # Claude API (기본)
+# google-genai>=0.3.0  # Gemini API (선택, 필요 시 주석 해제)
