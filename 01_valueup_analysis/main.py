@@ -427,16 +427,26 @@ class ValueUpAnalyzer:
                             stock_code = disclosure.get('종목코드', '')
                             report_date = disclosure.get('공시일자', '')[:10] if disclosure.get('공시일자') else ''
                             
-                            company_sheet_url = self.company_sheet_manager.add_analysis_result(
-                                company_name=company,
-                                stock_code=stock_code,
-                                acptno=acptno,
-                                report_date=report_date,
-                                analysis_result=analysis_result
-                            ) or ""
-                            
-                            if company_sheet_url:
-                                log(f"  [STEP 3] 기업별 시트 저장 완료")
+                            try:
+                                company_sheet_url = self.company_sheet_manager.add_analysis_result(
+                                    company_name=company,
+                                    stock_code=stock_code,
+                                    acptno=acptno,
+                                    report_date=report_date,
+                                    analysis_result=analysis_result
+                                ) or ""
+                                
+                                if company_sheet_url:
+                                    log(f"  [STEP 3] 기업별 시트 저장 완료")
+                            except RuntimeError as e:
+                                # Storage Quota 초과 또는 서비스 계정 폴더 존재 - 프로그램 종료
+                                log(f"")
+                                log(f"=" * 60)
+                                log(f"[FATAL ERROR] 기업별 시트 생성 실패!")
+                                log(f"  원인: {e}")
+                                log(f"  → 서비스 계정 소유 'ValueUp_analysis' 폴더를 삭제하고 다시 실행하세요.")
+                                log(f"=" * 60)
+                                sys.exit(1)
                         
                         # 3-3. 메타정보 업데이트 데이터 수집 (나중에 일괄 처리)
                         meta_updates.append({
