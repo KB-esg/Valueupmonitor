@@ -165,21 +165,31 @@ class StockCodeMapper:
         if not company_name:
             return None
         
+        code = None
+        
         # 정확히 일치
         if company_name in self._cache:
-            return self._cache[company_name]
+            code = self._cache[company_name]
         
         # 정규화된 이름으로 검색
-        normalized = self._normalize_name(company_name)
-        if normalized in self._cache:
-            return self._cache[normalized]
+        if not code:
+            normalized = self._normalize_name(company_name)
+            if normalized in self._cache:
+                code = self._cache[normalized]
         
         # 부분 일치 검색 (회사명이 포함된 경우)
-        for cached_name, code in self._cache.items():
-            if normalized in self._normalize_name(cached_name):
-                return code
-            if self._normalize_name(cached_name) in normalized:
-                return code
+        if not code:
+            for cached_name, cached_code in self._cache.items():
+                if normalized in self._normalize_name(cached_name):
+                    code = cached_code
+                    break
+                if self._normalize_name(cached_name) in normalized:
+                    code = cached_code
+                    break
+        
+        # 6자리로 패딩 (예: 3490 → 003490)
+        if code:
+            return str(code).zfill(6)
         
         return None
     
