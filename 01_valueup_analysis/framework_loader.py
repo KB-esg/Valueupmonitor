@@ -82,6 +82,14 @@ class Framework:
                 return item
         return None
     
+    def get_item(self, item_id: str) -> Optional[FrameworkItem]:
+        """항목 ID로 검색 (get_item_by_id의 별칭)"""
+        return self.get_item_by_id(item_id)
+    
+    def get_item_ids(self) -> List[str]:
+        """모든 항목 ID 목록 반환"""
+        return [item.item_id for item in self.items]
+    
     def to_prompt_text(self, include_non_core: bool = True) -> str:
         """LLM 프롬프트용 텍스트 생성"""
         lines = []
