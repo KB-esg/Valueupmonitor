@@ -398,6 +398,115 @@ class PDFExtractor:
         
         # 텍스트 추출 실패해도 pdf_bytes는 반환 (Gemini가 직접 읽을 수 있음)
         return pdf_bytes, text
+    
+    def estimate_tokens(self, pdf_bytes: Optional[bytes] = None, text: Optional[str] = None) -> int:
+        """
+        PDF/텍스트의 예상 토큰 수 추정
+        
+        Gemini 토큰 계산 기준:
+        - 텍스트: 한글 1글자 ≈ 2-3 토큰, 영문 4글자 ≈ 1 토큰
+        - 이미지 PDF: 페이지당 약 258 토큰
+        
+        Args:
+            pdf_bytes: PDF 바이너리 데이터
+            text: 추출된 텍스트 (있으면 텍스트 기반 추정)
+            
+        Returns:
+            예상 토큰 수
+        """
+        # 1. 텍스트가 있으면 텍스트 기반 추정
+        if text and len(text) > 100:
+            # 한글/영문 혼합 기준: 평균 2 토큰/글자
+            estimated = int(len(text) * 2.0)
+            return estimated
+        
+        # 2. PDF 바이트가 있으면 페이지 수 기반 추정 (이미지 PDF 가정)
+        if pdf_bytes:
+            page_count = self._count_pdf_pages(pdf_bytes)
+            if page_count > 0:
+                # 이미지 PDF: 페이지당 258 토큰 + 여유분
+                estimated = page_count * 300
+                return estimated
+            
+            # 페이지 수 확인 실패 시 바이트 기반 추정
+            # 일반적으로 PDF 1KB ≈ 50-100 토큰
+            estimated = int(len(pdf_bytes) / 1024 * 75)
+            return estimated
+        
+        return 0
+    
+    def _count_pdf_pages(self, pdf_bytes: bytes) -> int:
+        """
+        PDF 페이지 수 확인
+        
+        Args:
+            pdf_bytes: PDF 바이너리 데이터
+            
+        Returns:
+            페이지 수 (실패 시 0)
+        """
+        temp_path = os.path.join(
+            self.temp_dir, 
+            f"temp_count_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.pdf"
+        )
+        
+        try:
+            with open(temp_path, 'wb') as f:
+                f.write(pdf_bytes)
+            
+            if HAS_PYPDF2:
+                with open(temp_path, 'rb') as f:
+                    reader = PdfReader(f)
+                    return len(reader.pages)
+            
+            if HAS_PDFPLUMBER:
+                with pdfplumber.open(temp_path) as pdf:
+                    return len(pdf.pages)
+            
+            return 0
+            
+        except Exception as e:
+            log(f"  [WARN] 페이지 수 확인 실패: {e}")
+            return 0
+            
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    
+    def get_pdf_info(self, gdrive_url: str) -> Dict[str, Any]:
+        """
+        PDF 정보 조회 (다운로드 + 텍스트 추출 + 토큰 추정)
+        
+        Args:
+            gdrive_url: 구글 드라이브 공유 링크
+            
+        Returns:
+            {
+                'pdf_bytes': bytes or None,
+                'text': str,
+                'estimated_tokens': int,
+                'page_count': int,
+                'file_size': int
+            }
+        """
+        result = {
+            'pdf_bytes': None,
+            'text': '',
+            'estimated_tokens': 0,
+            'page_count': 0,
+            'file_size': 0
+        }
+        
+        pdf_bytes, text = self.get_pdf_and_text_from_gdrive(gdrive_url)
+        
+        if pdf_bytes:
+            result['pdf_bytes'] = pdf_bytes
+            result['text'] = text
+            result['file_size'] = len(pdf_bytes)
+            result['page_count'] = self._count_pdf_pages(pdf_bytes)
+            result['estimated_tokens'] = self.estimate_tokens(pdf_bytes, text)
+        
+        return result
 
 
 def parse_artifact_link(artifact_link: str) -> Tuple[str, str]:
