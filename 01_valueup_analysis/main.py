@@ -191,22 +191,26 @@ class ValueUpAnalyzer:
                 log("  구글 드라이브에서 PDF 다운로드 중...")
                 pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text_from_gdrive(gdrive_url)
                 
-                if not pdf_text:
-                    log("  [WARN] PDF 텍스트 추출 실패")
+                if not pdf_bytes and not pdf_text:
+                    log("  [WARN] PDF 다운로드 및 텍스트 추출 모두 실패")
                     if not self.dry_run:
-                        self.sheet_analyzer.save_error_result(disclosure, "PDF 텍스트 추출 실패")
+                        self.sheet_analyzer.save_error_result(disclosure, "PDF 다운로드 실패")
                     result['errors'] += 1
-                    result['error_details'].append(f"{company}: PDF 추출 실패")
+                    result['error_details'].append(f"{company}: PDF 다운로드 실패")
                     continue
                 
-                log(f"  텍스트 추출 완료: {len(pdf_text):,}자")
+                if pdf_bytes:
+                    log(f"  PDF 다운로드 완료: {len(pdf_bytes):,} bytes")
+                if pdf_text:
+                    log(f"  텍스트 추출 완료: {len(pdf_text):,}자 (fallback용)")
                 
-                # 3-2. Gemini 분석
-                log("  Gemini 분석 중...")
+                # 3-2. Gemini 분석 (PDF 직접 전달 우선, 텍스트 fallback)
+                log("  Gemini 분석 시작...")
                 analysis_result = self.gemini_analyzer.analyze(
-                    pdf_text=pdf_text,
                     company_name=company,
-                    framework=self.framework
+                    framework=self.framework,
+                    pdf_bytes=pdf_bytes,
+                    pdf_text=pdf_text
                 )
                 
                 if not analysis_result:
@@ -217,12 +221,8 @@ class ValueUpAnalyzer:
                     result['error_details'].append(f"{company}: Gemini 분석 실패")
                     continue
                 
-                # 분석 결과 요약 출력
-                items = analysis_result.get('analysis_items', {})
-                mentioned = sum(1 for d in items.values() if d.get('level', 0) > 0)
-                quantitative = sum(1 for d in items.values() if d.get('level', 0) == 2)
-                
-                log(f"  분석 완료: {mentioned}개 항목 언급 ({quantitative}개 정량적)")
+                # 분석 방식 기록 (PDF_DIRECT 또는 TEXT_FALLBACK)
+                analysis_method = self.gemini_analyzer.last_analysis_method
                 
                 # 3-3. 결과 저장
                 if self.dry_run:
