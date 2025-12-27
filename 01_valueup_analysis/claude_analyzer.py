@@ -47,7 +47,8 @@ class ClaudeAnalyzer:
     RESULT_TEMPLATE = {
         "level": 0,  # 0: 언급없음, 1: 정성적, 2: 정량적
         "current_value": None,
-        "target_value": None,
+        "target_min": None,    # 목표값 최소 (예: ROE 8~10% → 8)
+        "target_max": None,    # 목표값 최대 (예: ROE 8~10% → 10)
         "target_year": None,
         "note": ""
     }
@@ -110,8 +111,10 @@ class ClaudeAnalyzer:
    - 현재 수치 (보고서 기준연도 또는 최근 실적)
    - 수치가 언급되지 않으면 null
 
-3. **target_value**
-   - 목표 수치
+3. **target_min, target_max** (목표값 범위)
+   - 단일 목표: target_min = target_max (예: "배당성향 60%" → target_min: 60, target_max: 60)
+   - 범위 목표: target_min ≠ target_max (예: "ROE 8~10%" → target_min: 8, target_max: 10)
+   - 이상/이하 표현: (예: "ROE 10% 이상" → target_min: 10, target_max: null)
    - 수치가 언급되지 않으면 null
 
 4. **target_year**
@@ -124,7 +127,7 @@ class ClaudeAnalyzer:
 
 ## 주의사항
 - 금액 단위는 억원으로 통일 (1조원 = 10000억원)
-- 비율은 % 단위로 통일
+- 비율은 % 단위로 통일 (% 기호 제외, 숫자만)
 - 불확실한 정보는 추측하지 말고 null로 표시
 - Core 항목(is_core=true)은 반드시 분석 시도
 - 응답은 반드시 JSON 형식으로만 해주세요
@@ -168,7 +171,9 @@ class ClaudeAnalyzer:
 ```
 
 ## 응답 형식
-아래 JSON 형식으로 응답하세요. 각 항목에 대해 level, current_value, target_value, target_year, note를 분석해주세요.
+아래 JSON 형식으로 응답하세요. 각 항목에 대해 level, current_value, target_min, target_max, target_year, note를 분석해주세요.
+- target_min, target_max: 목표가 범위인 경우 (예: ROE 8~10% → target_min: 8, target_max: 10)
+- 단일 목표인 경우: target_min = target_max (예: 배당성향 60% → target_min: 60, target_max: 60)
 
 ```json
 {{
@@ -181,7 +186,8 @@ class ClaudeAnalyzer:
             prompt += f"""    "{item_id}": {{
       "level": 0,
       "current_value": null,
-      "target_value": null,
+      "target_min": null,
+      "target_max": null,
       "target_year": null,
       "note": ""
     }}{comma}
@@ -218,7 +224,9 @@ class ClaudeAnalyzer:
 - 회사명: {company_name}
 
 첨부된 PDF 문서를 분석하여 아래 JSON 형식으로 응답해주세요.
-각 항목에 대해 level, current_value, target_value, target_year, note를 분석해주세요.
+각 항목에 대해 level, current_value, target_min, target_max, target_year, note를 분석해주세요.
+- target_min, target_max: 목표가 범위인 경우 (예: ROE 8~10% → target_min: 8, target_max: 10)
+- 단일 목표인 경우: target_min = target_max (예: 배당성향 60% → target_min: 60, target_max: 60)
 
 ```json
 {{
@@ -231,7 +239,8 @@ class ClaudeAnalyzer:
             prompt += f"""    "{item_id}": {{
       "level": 0,
       "current_value": null,
-      "target_value": null,
+      "target_min": null,
+      "target_max": null,
       "target_year": null,
       "note": ""
     }}{comma}
@@ -585,12 +594,24 @@ class ClaudeAnalyzer:
         for item in framework.items:
             item_data = analysis_items.get(item.item_id, self.RESULT_TEMPLATE.copy())
             
+            # target_value 하위 호환 (기존 데이터 지원)
+            target_min = item_data.get('target_min')
+            target_max = item_data.get('target_max')
+            
+            # 이전 버전 호환: target_value만 있는 경우
+            if target_min is None and target_max is None:
+                old_target = item_data.get('target_value')
+                if old_target is not None:
+                    target_min = old_target
+                    target_max = old_target
+            
             sheet_data['items'][item.item_id] = {
                 'item_name': item.item_name,
                 'is_core': item.is_core,
                 'level': item_data.get('level', 0),
                 'current_value': item_data.get('current_value'),
-                'target_value': item_data.get('target_value'),
+                'target_min': target_min,
+                'target_max': target_max,
                 'target_year': item_data.get('target_year'),
                 'note': item_data.get('note', '')
             }
