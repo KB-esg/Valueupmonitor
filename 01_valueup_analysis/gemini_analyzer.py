@@ -57,7 +57,7 @@ class GeminiAnalyzer:
         
         Args:
             api_key: Gemini API 키 (기본값: GEM_ANALYTIC 환경변수)
-            model_name: 모델명 (기본값: gemini-1.5-flash)
+            model_name: 모델명 (기본값: gemini-2.0-flash-lite)
         """
         self.api_key = api_key or os.environ.get('GEM_ANALYTIC')
         self.model_name = model_name or self.DEFAULT_MODEL
@@ -286,12 +286,31 @@ class GeminiAnalyzer:
         
         result = None
         
-        # 1. PDF 직접 전달 시도
-        if pdf_bytes:
-            log(f"  [방식1] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
+        # [임시] 토큰 절약 모드: 텍스트 우선, PDF는 텍스트 실패 시에만
+        # Free Tier 제한 때문에 PDF 직접 전달은 건너뜀
+        
+        # 1. 텍스트 전달 시도 (토큰 절약)
+        if pdf_text and len(pdf_text) >= 100:
+            log(f"  [방식1] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
             sys.stdout.flush()
             
-            result = self._analyze_with_pdf(pdf_bytes, company_name, framework)
+            result = self._analyze_with_text(pdf_text, company_name, framework, max_retries=1)
+            sys.stdout.flush()
+            
+            if result:
+                self.last_analysis_method = "TEXT_ONLY"
+                log("  ✓ 텍스트 전달 성공!")
+                sys.stdout.flush()
+            else:
+                log("  ✗ 텍스트 전달 실패")
+                sys.stdout.flush()
+        
+        # 2. PDF 직접 전달 (텍스트 실패 시 또는 텍스트 없을 때만)
+        if not result and pdf_bytes:
+            log(f"  [방식2] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
+            sys.stdout.flush()
+            
+            result = self._analyze_with_pdf(pdf_bytes, company_name, framework, max_retries=1)
             sys.stdout.flush()
             
             if result:
@@ -299,23 +318,7 @@ class GeminiAnalyzer:
                 log("  ✓ PDF 직접 전달 성공!")
                 sys.stdout.flush()
             else:
-                log("  ✗ PDF 직접 전달 실패, 텍스트 방식으로 전환...")
-                sys.stdout.flush()
-        
-        # 2. 텍스트 전달 (fallback)
-        if not result and pdf_text:
-            log(f"  [방식2] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
-            sys.stdout.flush()
-            
-            result = self._analyze_with_text(pdf_text, company_name, framework)
-            sys.stdout.flush()
-            
-            if result:
-                self.last_analysis_method = "TEXT_FALLBACK"
-                log("  ✓ 텍스트 전달 성공!")
-                sys.stdout.flush()
-            else:
-                log("  ✗ 텍스트 전달도 실패")
+                log("  ✗ PDF 직접 전달도 실패")
                 sys.stdout.flush()
         
         # 결과 통계 출력
@@ -406,6 +409,10 @@ class GeminiAnalyzer:
                 
                 # Rate Limit 오류 처리
                 if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    # 오류 상세 메시지 출력 (처음 1회만)
+                    if attempt == 0:
+                        log(f"    → Rate Limit 오류 상세: {error_str[:300]}...")
+                    
                     # retryDelay 파싱 시도
                     wait_time = self._parse_retry_delay(error_str)
                     
@@ -520,6 +527,10 @@ class GeminiAnalyzer:
                 
                 # Rate Limit 오류 처리
                 if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    # 오류 상세 메시지 출력 (처음 1회만)
+                    if attempt == 0:
+                        log(f"    → Rate Limit 오류 상세: {error_str[:300]}...")
+                    
                     wait_time = self._parse_retry_delay(error_str)
                     
                     if attempt < max_retries - 1:
