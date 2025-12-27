@@ -19,7 +19,7 @@ import re
 import io
 import json
 import tempfile
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from datetime import datetime
 
 # PDF 텍스트 추출
