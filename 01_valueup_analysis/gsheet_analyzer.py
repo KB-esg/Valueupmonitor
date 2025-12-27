@@ -508,6 +508,100 @@ class GSheetAnalyzer:
             import traceback
             log(f"  {traceback.format_exc()[:300]}")
             return 0
+    
+    def update_disclosure_analysis_meta(
+        self, 
+        acptno: str, 
+        status: str,
+        items_count: int,
+        core_count: int,
+        company_sheet_url: str = ""
+    ) -> bool:
+        """
+        밸류업공시목록 시트의 L열부터 분석 메타정보 업데이트
+        
+        컬럼 구조 (L열부터):
+        - L: 분석상태 (completed/error)
+        - M: 분석일시
+        - N: 분석항목수
+        - O: Core항목수
+        - P: 기업시트링크
+        
+        Args:
+            acptno: 접수번호
+            status: 분석상태
+            items_count: 분석항목 수
+            core_count: Core항목 수
+            company_sheet_url: 기업별 시트 URL
+            
+        Returns:
+            성공 여부
+        """
+        worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
+        if not worksheet:
+            return False
+        
+        try:
+            # 접수번호로 행 찾기 (A열)
+            acptno_col = worksheet.col_values(1)  # A열
+            
+            row_idx = None
+            for i, val in enumerate(acptno_col):
+                if str(val).strip() == str(acptno).strip():
+                    row_idx = i + 1
+                    break
+            
+            if not row_idx:
+                log(f"  [WARN] 접수번호 {acptno}를 밸류업공시목록에서 찾을 수 없음")
+                return False
+            
+            # L~P열 업데이트
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            update_data = [[status, now, items_count, core_count, company_sheet_url]]
+            
+            worksheet.update(f'L{row_idx}:P{row_idx}', update_data)
+            log(f"    → 밸류업공시목록 메타정보 업데이트 완료 (L~P열)")
+            return True
+            
+        except Exception as e:
+            log(f"  [ERROR] 메타정보 업데이트 실패: {e}")
+            return False
+    
+    def update_company_sheet_url(self, acptno: str, company_sheet_url: str) -> bool:
+        """
+        밸류업공시목록 시트의 P열에 기업시트링크 업데이트
+        
+        Args:
+            acptno: 접수번호
+            company_sheet_url: 기업별 시트 URL
+            
+        Returns:
+            성공 여부
+        """
+        worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
+        if not worksheet:
+            return False
+        
+        try:
+            # 접수번호로 행 찾기
+            acptno_col = worksheet.col_values(1)
+            
+            row_idx = None
+            for i, val in enumerate(acptno_col):
+                if str(val).strip() == str(acptno).strip():
+                    row_idx = i + 1
+                    break
+            
+            if not row_idx:
+                return False
+            
+            # P열 업데이트
+            worksheet.update_acell(f'P{row_idx}', company_sheet_url)
+            return True
+            
+        except Exception as e:
+            log(f"  [ERROR] 기업시트링크 업데이트 실패: {e}")
+            return False
 
 
 def main():
