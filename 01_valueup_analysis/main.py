@@ -17,6 +17,7 @@ sys.stdout.reconfigure(line_buffering=True)
 from gsheet_analyzer import GSheetAnalyzer
 from pdf_extractor import PDFExtractor
 from framework_loader import Framework
+from company_sheet_manager import CompanySheetManager
 
 # 분석기 선택: ANALYZER_TYPE 환경변수로 결정 (기본값: claude)
 ANALYZER_TYPE = os.environ.get('ANALYZER_TYPE', 'claude').lower()
@@ -94,10 +95,16 @@ class ValueUpAnalyzer:
             api_key=self.llm_api_key
         )
         
+        # 기업별 분석 결과 저장 관리자 (VALUEUP_ARCHIVE_ID가 있을 때만 활성화)
+        self.company_sheet_manager = CompanySheetManager(
+            credentials_json=self.credentials_json
+        )
+        
         # 연결 상태
         self.sheet_ready = self.sheet_analyzer.spreadsheet is not None
         self.llm_ready = self.llm_analyzer.client is not None
         self.drive_ready = self.pdf_extractor.drive_service is not None
+        self.company_sheet_ready = self.company_sheet_manager.gc is not None
         
         # 프레임워크
         self.framework: Optional[Framework] = None
@@ -127,6 +134,7 @@ class ValueUpAnalyzer:
         log(f"최대 분석 수: {self.max_items}건")
         log(f"테스트 모드: {'예' if self.dry_run else '아니오'}")
         log(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
+        log(f"기업별 시트 저장: {'활성화' if self.company_sheet_ready else '비활성화 (VALUEUP_ARCHIVE_ID 미설정)'}")
         if self.drive_ready:
             log(f"Google Drive 연결: 성공 ({self.pdf_extractor.auth_method})")
         else:
@@ -391,7 +399,9 @@ class ValueUpAnalyzer:
                     log("  [DRY-RUN] 저장 건너뜀")
                     result['analyzed'] += 1
                 else:
-                    log("  결과 저장 중...")
+                    log("  [STEP 3] 결과 저장 중...")
+                    
+                    # 3-1. 메인 스프레드시트(분석결과 시트)에 저장
                     success = self.sheet_analyzer.save_analysis_result(
                         disclosure=disclosure,
                         analysis_result=analysis_result,
@@ -400,6 +410,38 @@ class ValueUpAnalyzer:
                     
                     if success:
                         result['analyzed'] += 1
+                        
+                        # 분석 항목 수 계산
+                        analysis_items = analysis_result.get('analysis_items', {})
+                        items_count = sum(1 for v in analysis_items.values() if v.get('level', 0) > 0)
+                        core_count = sum(1 for k, v in analysis_items.items() 
+                                        if v.get('level', 0) > 0 and v.get('is_core', False))
+                        
+                        # 3-2. 기업별 스프레드시트에 저장 (CompanySheetManager)
+                        company_sheet_url = ""
+                        if self.company_sheet_ready:
+                            stock_code = disclosure.get('종목코드', '')
+                            report_date = disclosure.get('공시일자', '')[:10] if disclosure.get('공시일자') else ''
+                            
+                            company_sheet_url = self.company_sheet_manager.add_analysis_result(
+                                company_name=company,
+                                stock_code=stock_code,
+                                acptno=acptno,
+                                report_date=report_date,
+                                analysis_result=analysis_result
+                            ) or ""
+                            
+                            if company_sheet_url:
+                                log(f"  [STEP 3] 기업별 시트 저장 완료")
+                        
+                        # 3-3. 밸류업공시목록 시트 L~P열에 메타정보 저장
+                        self.sheet_analyzer.update_disclosure_analysis_meta(
+                            acptno=acptno,
+                            status="completed",
+                            items_count=items_count,
+                            core_count=core_count,
+                            company_sheet_url=company_sheet_url
+                        )
                     else:
                         result['errors'] += 1
                         result['error_details'].append(f"{company}: 저장 실패")
