@@ -40,7 +40,7 @@ class GeminiAnalyzer:
     """Gemini API를 사용한 밸류업 분석기"""
     
     # 모델 설정
-    DEFAULT_MODEL = "gemini-1.5-flash"
+    DEFAULT_MODEL = "gemini-2.0-flash-lite"
     
     # 분석 결과 템플릿
     RESULT_TEMPLATE = {
