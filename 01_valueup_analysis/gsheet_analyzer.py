@@ -177,11 +177,12 @@ class GSheetAnalyzer:
                     # 날짜 파싱 실패 시 포함
                     pass
                 
-                # 아티팩트링크 또는 원시PDF링크 있어야 함
+                # 구글드라이브링크, 아티팩트링크, 원시PDF링크 중 하나 있어야 함
+                gdrive_link = record.get('구글드라이브링크', '')
                 artifact_link = record.get('아티팩트링크', '')
                 raw_pdf_link = record.get('원시PDF링크', '')
                 
-                if not artifact_link and not raw_pdf_link:
+                if not gdrive_link and not artifact_link and not raw_pdf_link:
                     continue
                 
                 pending.append(record)
