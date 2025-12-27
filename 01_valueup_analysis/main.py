@@ -469,6 +469,13 @@ def parse_args():
     )
     
     parser.add_argument(
+        '--period', '-p',
+        type=str,
+        default=os.environ.get('VALUEUP_PERIOD', ''),
+        help='기간 선택 (1주, 1개월, 3개월, 6개월, 1년, 2년, 3년, 전체) - days보다 우선'
+    )
+    
+    parser.add_argument(
         '--max-items', '-m',
         type=int,
         default=int(os.environ.get('ANALYSIS_MAX_ITEMS', '10')),
@@ -485,12 +492,49 @@ def parse_args():
     return parser.parse_args()
 
 
+def period_to_days(period: str) -> int:
+    """
+    기간 문자열을 일수로 변환
+    
+    Args:
+        period: 기간 문자열 (1주, 1개월, 3개월, 6개월, 1년, 2년, 3년, 전체)
+        
+    Returns:
+        일수
+    """
+    period_map = {
+        '1주': 7,
+        '1개월': 30,
+        '3개월': 90,
+        '6개월': 180,
+        '1년': 365,
+        '2년': 730,
+        '3년': 1095,
+        '전체': 3650,  # 약 10년
+    }
+    return period_map.get(period, 7)
+
+
 def main():
     """메인 함수"""
     args = parse_args()
     
-    # 환경변수 확인
-    required_env = ['GOOGLE_SERVICE', 'VALUEUP_GSPREAD_ID', 'GEM_ANALYTIC']
+    # period가 설정되면 days로 변환
+    if args.period:
+        days = period_to_days(args.period)
+        log(f"기간 설정: {args.period} → {days}일")
+    else:
+        days = args.days
+    
+    # 환경변수 확인 (Claude 기본, Gemini 선택 가능)
+    required_env = ['GOOGLE_SERVICE', 'VALUEUP_GSPREAD_ID']
+    
+    # 분석기에 따라 필요한 API 키 확인
+    if ANALYZER_TYPE == 'gemini':
+        required_env.append('GEM_ANALYTIC')
+    else:
+        required_env.append('ANT_ANALYTIC')
+    
     missing = [e for e in required_env if not os.environ.get(e)]
     
     if missing:
@@ -499,11 +543,14 @@ def main():
         log("필요한 환경변수:")
         log("  - GOOGLE_SERVICE: 서비스 계정 JSON")
         log("  - VALUEUP_GSPREAD_ID: 스프레드시트 ID")
-        log("  - GEM_ANALYTIC: Gemini API 키")
+        if ANALYZER_TYPE == 'gemini':
+            log("  - GEM_ANALYTIC: Gemini API 키")
+        else:
+            log("  - ANT_ANALYTIC: Claude API 키")
         sys.exit(1)
     
     analyzer = ValueUpAnalyzer(
-        days=args.days,
+        days=days,
         max_items=args.max_items,
         dry_run=args.dry_run
     )
