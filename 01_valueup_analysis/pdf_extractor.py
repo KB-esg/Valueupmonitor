@@ -1,12 +1,24 @@
 """
 PDF 추출기
-KRX에서 PDF 다운로드 및 텍스트 추출
+구글 드라이브에서 PDF 다운로드 및 텍스트 추출
+OAuth2 인증 우선, 서비스 계정 fallback
+
+환경변수:
+- OAuth2 방식 (개인 드라이브 접근):
+  - GDRIVE_REFRESH_TOKEN: 리프레시 토큰
+  - GDRIVE_CLIENT_ID: OAuth 클라이언트 ID
+  - GDRIVE_CLIENT_SECRET: OAuth 클라이언트 시크릿
+  
+- 서비스 계정 방식 (fallback):
+  - GOOGLE_SERVICE: 서비스 계정 JSON
 """
 
 import os
 import sys
+import re
+import io
+import json
 import tempfile
-import requests
 from typing import Optional, Tuple
 from datetime import datetime
 
@@ -23,6 +35,14 @@ try:
 except ImportError:
     HAS_PYPDF2 = False
 
+# Google Drive API
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    HAS_GOOGLE_DRIVE = True
+except ImportError:
+    HAS_GOOGLE_DRIVE = False
+
 sys.stdout.reconfigure(line_buffering=True)
 
 
@@ -33,29 +53,36 @@ def log(message: str):
 
 
 class PDFExtractor:
-    """PDF 다운로드 및 텍스트 추출"""
+    """PDF 다운로드 및 텍스트 추출 (OAuth2 + 서비스 계정 지원)"""
     
-    # KRX PDF 다운로드 URL 템플릿
-    KRX_PDF_URL = "https://kind.krx.co.kr/common/pdfDownload.do"
+    SCOPES = [
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive'
+    ]
     
-    # 요청 헤더
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/pdf,*/*',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://kind.krx.co.kr/'
-    }
-    
-    def __init__(self, temp_dir: Optional[str] = None):
+    def __init__(
+        self,
+        # OAuth2 인증 정보
+        refresh_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        # 서비스 계정 인증 정보 (fallback)
+        credentials_json: Optional[str] = None,
+        temp_dir: Optional[str] = None
+    ):
         """
         초기화
         
         Args:
+            refresh_token: OAuth2 리프레시 토큰
+            client_id: OAuth2 클라이언트 ID
+            client_secret: OAuth2 클라이언트 시크릿
+            credentials_json: 서비스 계정 JSON 문자열 또는 파일 경로
             temp_dir: 임시 파일 저장 디렉토리 (기본값: 시스템 임시 디렉토리)
         """
         self.temp_dir = temp_dir or tempfile.gettempdir()
-        self.session = requests.Session()
-        self.session.headers.update(self.HEADERS)
+        self.drive_service = None
+        self.auth_method = None
         
         # PDF 추출 라이브러리 확인
         if HAS_PDFPLUMBER:
@@ -63,74 +90,167 @@ class PDFExtractor:
         elif HAS_PYPDF2:
             log("PDF 추출 라이브러리: PyPDF2")
         else:
-            log("[WARN] PDF 추출 라이브러리가 없습니다. pdfplumber 또는 PyPDF2를 설치하세요.")
+            log("[WARN] PDF 추출 라이브러리가 없습니다.")
+        
+        if not HAS_GOOGLE_DRIVE:
+            log("[WARN] Google Drive API 라이브러리가 없습니다.")
+            return
+        
+        # 환경변수에서 OAuth2 인증 정보 로드
+        refresh_token = refresh_token or os.environ.get('GDRIVE_REFRESH_TOKEN')
+        client_id = client_id or os.environ.get('GDRIVE_CLIENT_ID')
+        client_secret = client_secret or os.environ.get('GDRIVE_CLIENT_SECRET')
+        
+        # 1. OAuth2 인증 시도 (우선)
+        if refresh_token and client_id and client_secret:
+            try:
+                self._init_oauth2(refresh_token, client_id, client_secret)
+                self.auth_method = 'OAuth2'
+                log("Google Drive 인증: OAuth2 (개인 계정)")
+            except Exception as e:
+                log(f"[WARN] OAuth2 인증 실패: {e}")
+        
+        # 2. 서비스 계정 인증 (fallback)
+        if not self.drive_service:
+            credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
+            if credentials_json:
+                try:
+                    self._init_service_account(credentials_json)
+                    self.auth_method = 'ServiceAccount'
+                    log("Google Drive 인증: 서비스 계정")
+                except Exception as e:
+                    log(f"[WARN] 서비스 계정 인증 실패: {e}")
+        
+        if self.drive_service:
+            log(f"Google Drive API 초기화 완료 ({self.auth_method})")
+        else:
+            log("[ERROR] Google Drive API 초기화 실패")
     
-    def download_pdf_from_krx(self, acptno: str) -> Optional[bytes]:
+    def _init_oauth2(self, refresh_token: str, client_id: str, client_secret: str):
+        """OAuth2 인증 초기화"""
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+            token_uri='https://oauth2.googleapis.com/token'
+        )
+        
+        # 액세스 토큰 갱신
+        creds.refresh(Request())
+        
+        self.drive_service = build('drive', 'v3', credentials=creds)
+    
+    def _init_service_account(self, credentials_json: str):
+        """서비스 계정 인증 초기화"""
+        from google.oauth2.service_account import Credentials
+        
+        if os.path.isfile(credentials_json):
+            creds = Credentials.from_service_account_file(credentials_json, scopes=self.SCOPES)
+        else:
+            info = json.loads(credentials_json)
+            creds = Credentials.from_service_account_info(info, scopes=self.SCOPES)
+        
+        self.drive_service = build('drive', 'v3', credentials=creds)
+    
+    def extract_file_id_from_url(self, gdrive_url: str) -> Optional[str]:
         """
-        KRX에서 PDF 다운로드
+        구글 드라이브 URL에서 파일 ID 추출
         
         Args:
-            acptno: 접수번호
+            gdrive_url: 구글 드라이브 공유 링크
+            
+        Returns:
+            파일 ID 또는 None
+        """
+        if not gdrive_url:
+            return None
+        
+        # 패턴들: 
+        # https://drive.google.com/file/d/FILE_ID/view?usp=drivesdk
+        # https://drive.google.com/open?id=FILE_ID
+        patterns = [
+            r'/file/d/([a-zA-Z0-9_-]+)',
+            r'id=([a-zA-Z0-9_-]+)',
+            r'/d/([a-zA-Z0-9_-]+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, gdrive_url)
+            if match:
+                return match.group(1)
+        
+        return None
+    
+    def download_pdf_from_gdrive(self, file_id: str) -> Optional[bytes]:
+        """
+        구글 드라이브에서 PDF 다운로드
+        
+        Args:
+            file_id: 파일 ID
             
         Returns:
             PDF 바이트 데이터 또는 None
         """
+        if not self.drive_service:
+            log("  [ERROR] Google Drive 서비스가 초기화되지 않았습니다.")
+            return None
+        
         try:
-            params = {
-                'method': 'pdfDown',
-                'acptNo': acptno
-            }
+            # 파일 메타데이터 확인
+            file_metadata = self.drive_service.files().get(
+                fileId=file_id,
+                fields='name,mimeType,size'
+            ).execute()
             
-            response = self.session.get(
-                self.KRX_PDF_URL,
-                params=params,
-                timeout=60
-            )
+            file_name = file_metadata.get('name', 'unknown')
+            mime_type = file_metadata.get('mimeType', '')
+            file_size = file_metadata.get('size', 'unknown')
             
-            if response.status_code == 200:
-                content_type = response.headers.get('Content-Type', '')
-                
-                if 'pdf' in content_type.lower() or response.content[:4] == b'%PDF':
-                    log(f"  PDF 다운로드 완료: {len(response.content):,} bytes")
-                    return response.content
-                else:
-                    log(f"  [WARN] PDF가 아닌 응답: {content_type[:50]}")
-                    return None
+            log(f"  파일 정보: {file_name} ({file_size} bytes)")
+            
+            # PDF 다운로드
+            request = self.drive_service.files().get_media(fileId=file_id)
+            
+            buffer = io.BytesIO()
+            downloader = MediaIoBaseDownload(buffer, request)
+            
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            
+            pdf_bytes = buffer.getvalue()
+            
+            if pdf_bytes[:4] == b'%PDF':
+                log(f"  PDF 다운로드 완료: {len(pdf_bytes):,} bytes")
+                return pdf_bytes
             else:
-                log(f"  [ERROR] HTTP {response.status_code}")
+                log(f"  [WARN] PDF가 아닌 파일입니다: {mime_type}")
                 return None
                 
-        except requests.RequestException as e:
-            log(f"  [ERROR] 다운로드 실패: {e}")
+        except Exception as e:
+            log(f"  [ERROR] 드라이브 다운로드 실패: {e}")
             return None
     
-    def download_pdf_from_url(self, url: str) -> Optional[bytes]:
+    def download_pdf_from_gdrive_url(self, gdrive_url: str) -> Optional[bytes]:
         """
-        URL에서 PDF 다운로드
+        구글 드라이브 URL에서 PDF 다운로드
         
         Args:
-            url: PDF URL
+            gdrive_url: 구글 드라이브 공유 링크
             
         Returns:
             PDF 바이트 데이터 또는 None
         """
-        try:
-            response = self.session.get(url, timeout=60)
-            
-            if response.status_code == 200:
-                if response.content[:4] == b'%PDF':
-                    log(f"  PDF 다운로드 완료: {len(response.content):,} bytes")
-                    return response.content
-                else:
-                    log(f"  [WARN] PDF가 아닌 응답")
-                    return None
-            else:
-                log(f"  [ERROR] HTTP {response.status_code}")
-                return None
-                
-        except requests.RequestException as e:
-            log(f"  [ERROR] 다운로드 실패: {e}")
+        file_id = self.extract_file_id_from_url(gdrive_url)
+        if not file_id:
+            log(f"  [ERROR] 파일 ID를 추출할 수 없습니다: {gdrive_url[:50]}...")
             return None
+        
+        return self.download_pdf_from_gdrive(file_id)
     
     def extract_text_from_bytes(self, pdf_bytes: bytes) -> str:
         """
@@ -143,7 +263,10 @@ class PDFExtractor:
             추출된 텍스트
         """
         # 임시 파일에 저장
-        temp_path = os.path.join(self.temp_dir, f"temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf")
+        temp_path = os.path.join(
+            self.temp_dir, 
+            f"temp_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.pdf"
+        )
         
         try:
             with open(temp_path, 'wb') as f:
@@ -237,17 +360,17 @@ class PDFExtractor:
         
         return "\n".join(lines)
     
-    def get_pdf_and_text(self, acptno: str) -> Tuple[Optional[bytes], str]:
+    def get_pdf_and_text_from_gdrive(self, gdrive_url: str) -> Tuple[Optional[bytes], str]:
         """
-        PDF 다운로드 및 텍스트 추출을 한번에 수행
+        구글 드라이브에서 PDF 다운로드 및 텍스트 추출
         
         Args:
-            acptno: 접수번호
+            gdrive_url: 구글 드라이브 공유 링크
             
         Returns:
             (PDF 바이트, 추출된 텍스트) 튜플
         """
-        pdf_bytes = self.download_pdf_from_krx(acptno)
+        pdf_bytes = self.download_pdf_from_gdrive_url(gdrive_url)
         
         if pdf_bytes:
             text = self.extract_text_from_bytes(pdf_bytes)
@@ -285,11 +408,11 @@ def main():
     """테스트용 메인 함수"""
     extractor = PDFExtractor()
     
-    # 테스트 (실제 접수번호로 테스트)
-    test_acptno = "20251226000082"
+    # 테스트 (실제 구글 드라이브 링크로 테스트)
+    test_url = "https://drive.google.com/file/d/1UYnBc930Kcv-PaskjmHO6i04eH7z3J4C/view?usp=drivesdk"
     
-    log(f"테스트 접수번호: {test_acptno}")
-    pdf_bytes, text = extractor.get_pdf_and_text(test_acptno)
+    log(f"테스트 URL: {test_url}")
+    pdf_bytes, text = extractor.get_pdf_and_text_from_gdrive(test_url)
     
     if pdf_bytes:
         log(f"PDF 크기: {len(pdf_bytes):,} bytes")
