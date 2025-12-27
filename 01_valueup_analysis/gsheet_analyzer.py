@@ -132,6 +132,10 @@ class GSheetAnalyzer:
         """
         분석 대기 중인 공시 목록 조회
         
+        제외 조건:
+        1. 밸류업공시분석 시트에 접수번호가 있는 경우
+        2. 밸류업공시목록 L열(분석상태)이 completed 또는 error인 경우
+        
         Args:
             days: 최근 N일간의 공시만 조회
             
@@ -152,14 +156,23 @@ class GSheetAnalyzer:
             # 필터링: 최근 N일 + 분석 안됨 + 아티팩트링크 있음
             cutoff_date = datetime.now() - timedelta(days=days)
             pending = []
+            skipped_by_analysis_sheet = 0
+            skipped_by_status = 0
             
             for record in all_records:
                 acptno = str(record.get('접수번호', '')).strip()
                 if not acptno:
                     continue
                 
-                # 이미 분석됨
+                # [체크 1] 밸류업공시분석 시트에 이미 있음
                 if acptno in analyzed_acptnos:
+                    skipped_by_analysis_sheet += 1
+                    continue
+                
+                # [체크 2] 밸류업공시목록 L열 분석상태 확인
+                analysis_status = str(record.get('분석상태', '')).strip().lower()
+                if analysis_status in ['completed', 'error']:
+                    skipped_by_status += 1
                     continue
                 
                 # 공시일자 파싱
@@ -189,7 +202,9 @@ class GSheetAnalyzer:
                 
                 pending.append(record)
             
-            log(f"분석 대기 공시: {len(pending)}건 (전체 {len(all_records)}건 중)")
+            log(f"분석 대기 공시: {len(pending)}건 (전체 {len(all_records)}건)")
+            if skipped_by_analysis_sheet > 0 or skipped_by_status > 0:
+                log(f"  → 제외: 분석시트 {skipped_by_analysis_sheet}건, L열상태 {skipped_by_status}건")
             return pending
             
         except Exception as e:
@@ -209,6 +224,49 @@ class GSheetAnalyzer:
         except Exception as e:
             log(f"[WARN] 분석 완료 목록 조회 실패: {e}")
             return set()
+    
+    def _ensure_analysis_meta_headers(self, worksheet: gspread.Worksheet) -> bool:
+        """
+        밸류업공시목록 시트의 L~P열 헤더 확인 및 추가
+        
+        헤더 구조:
+        - L: 분석상태
+        - M: 분석일시
+        - N: 분석항목수
+        - O: Core항목수
+        - P: 기업시트링크
+        
+        Returns:
+            헤더가 추가되었으면 True
+        """
+        try:
+            # 현재 헤더 확인
+            headers = worksheet.row_values(1)
+            
+            # 필요한 헤더
+            required_headers = ['분석상태', '분석일시', '분석항목수', 'Core항목수', '기업시트링크']
+            
+            # L열(12번째)부터 헤더 확인
+            needs_update = False
+            for i, header in enumerate(required_headers):
+                col_idx = 12 + i  # L=12, M=13, N=14, O=15, P=16
+                
+                # 헤더가 부족하거나 다른 경우
+                if len(headers) < col_idx or (len(headers) >= col_idx and headers[col_idx - 1] != header):
+                    needs_update = True
+                    break
+            
+            if needs_update:
+                # L~P열 헤더 일괄 업데이트
+                worksheet.update('L1:P1', [required_headers])
+                log("  → 밸류업공시목록 L~P열 헤더 추가됨")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            log(f"  [WARN] 헤더 확인/추가 실패: {e}")
+            return False
     
     def _generate_headers(self) -> List[str]:
         """분석 시트 헤더 생성"""
@@ -542,6 +600,9 @@ class GSheetAnalyzer:
             return False
         
         try:
+            # L~P열 헤더 확인 및 추가
+            self._ensure_analysis_meta_headers(worksheet)
+            
             # 접수번호로 행 찾기 (A열)
             acptno_col = worksheet.col_values(1)  # A열
             
