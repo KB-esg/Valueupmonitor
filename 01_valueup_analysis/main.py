@@ -95,10 +95,8 @@ class ValueUpAnalyzer:
             api_key=self.llm_api_key
         )
         
-        # 기업별 분석 결과 저장 관리자 (VALUEUP_ARCHIVE_ID가 있을 때만 활성화)
-        self.company_sheet_manager = CompanySheetManager(
-            credentials_json=self.credentials_json
-        )
+        # 기업별 분석 결과 저장 관리자 (OAuth2 우선, 서비스 계정 fallback)
+        self.company_sheet_manager = CompanySheetManager()
         
         # 연결 상태
         self.sheet_ready = self.sheet_analyzer.spreadsheet is not None
@@ -134,7 +132,10 @@ class ValueUpAnalyzer:
         log(f"최대 분석 수: {self.max_items}건")
         log(f"테스트 모드: {'예' if self.dry_run else '아니오'}")
         log(f"Google Sheets 연결: {'성공' if self.sheet_ready else '실패'}")
-        log(f"기업별 시트 저장: {'활성화' if self.company_sheet_ready else '비활성화 (VALUEUP_ARCHIVE_ID 미설정)'}")
+        if self.company_sheet_ready:
+            log(f"기업별 시트 저장: 활성화 ({self.company_sheet_manager.auth_method})")
+        else:
+            log("기업별 시트 저장: 비활성화 (인증 정보 없음)")
         if self.drive_ready:
             log(f"Google Drive 연결: 성공 ({self.pdf_extractor.auth_method})")
         else:
@@ -277,6 +278,9 @@ class ValueUpAnalyzer:
         requests_this_minute = 0
         tokens_this_minute = 0
         minute_start_time = time.time()
+        
+        # 메타 업데이트 일괄 처리용 리스트
+        meta_updates = []
         
         for idx, disclosure in enumerate(items_to_analyze, 1):
             # 강제 flush
@@ -434,14 +438,14 @@ class ValueUpAnalyzer:
                             if company_sheet_url:
                                 log(f"  [STEP 3] 기업별 시트 저장 완료")
                         
-                        # 3-3. 밸류업공시목록 시트 L~P열에 메타정보 저장
-                        self.sheet_analyzer.update_disclosure_analysis_meta(
-                            acptno=acptno,
-                            status="completed",
-                            items_count=items_count,
-                            core_count=core_count,
-                            company_sheet_url=company_sheet_url
-                        )
+                        # 3-3. 메타정보 업데이트 데이터 수집 (나중에 일괄 처리)
+                        meta_updates.append({
+                            '접수번호': acptno,
+                            '분석상태': 'completed',
+                            '분석항목수': items_count,
+                            'Core항목수': core_count,
+                            '기업시트링크': company_sheet_url
+                        })
                     else:
                         result['errors'] += 1
                         result['error_details'].append(f"{company}: 저장 실패")
@@ -456,6 +460,13 @@ class ValueUpAnalyzer:
                     self.sheet_analyzer.save_error_result(disclosure, str(e))
                 result['errors'] += 1
                 result['error_details'].append(f"{company}: {str(e)[:50]}")
+        
+        # 5. 메타정보 일괄 업데이트 (Quota 절약)
+        if meta_updates and not self.dry_run:
+            log("")
+            log("[5단계] 밸류업공시목록 메타정보 일괄 업데이트...")
+            updated_count = self.sheet_analyzer.batch_update_analysis_meta(meta_updates)
+            log(f"  → {updated_count}건 업데이트 완료")
         
         # 결과 출력
         log("")
