@@ -213,7 +213,8 @@ class ValueUpMonitor:
                 log("[3단계] Google Sheets에 공시 목록 기록 중...")
                 
                 disclosures = [asdict(item) for item in items]
-                new_count = self.sheet_manager.append_disclosures(disclosures)
+                new_items = self.sheet_manager.append_disclosures(disclosures)
+                new_count = len(new_items)
                 result['new_added'] = new_count
                 log(f"  → {new_count}건의 새로운 공시 추가됨")
                 
@@ -226,33 +227,23 @@ class ValueUpMonitor:
                 else:
                     log("[4단계] PDF 다운로드 및 저장 중...")
                     
-                    # 구글드라이브 링크가 없는 항목 조회 (아직 PDF 처리 안된 항목)
+                    # 이번 크롤링에서 수집한 접수번호 집합
+                    crawled_acptno_set = {item.접수번호 for item in items}
+                    
+                    # 구글드라이브링크가 없는 항목 조회 (새 항목 + 기존 실패 항목)
                     all_pending = self.sheet_manager.get_items_without_gdrive_link()
                     
-                    # 현재 조회 기간에 해당하는 항목만 필터링
-                    cutoff_date = datetime.now() - timedelta(days=self.days)
-                    pending_items = []
-                    
-                    for item in all_pending:
-                        date_str = item.get('공시일자', '').replace('-', '').replace(' ', '_').replace(':', '')[:8]
-                        try:
-                            if len(date_str) == 8:
-                                item_date = datetime.strptime(date_str, "%Y%m%d")
-                                if item_date >= cutoff_date:
-                                    pending_items.append(item)
-                                else:
-                                    # 기간 외 항목은 건너뜀 (로그 생략 - 너무 많을 수 있음)
-                                    pass
-                            else:
-                                pending_items.append(item)  # 날짜 파싱 실패시 포함
-                        except:
-                            pending_items.append(item)  # 예외시 포함
+                    # 이번 크롤링 범위 내 항목만 필터링
+                    pending_items = [
+                        item for item in all_pending 
+                        if item.get('접수번호') in crawled_acptno_set
+                    ]
                     
                     skipped = len(all_pending) - len(pending_items)
-                    log(f"  → 처리 대기 항목: {len(pending_items)}건 (조회 기간 외 {skipped}건 제외)")
+                    log(f"  → 처리 대상: {len(pending_items)}건 (범위 외 {skipped}건 제외)")
                     
                     if not pending_items:
-                        log("  → 모든 항목이 이미 처리되어 있습니다.")
+                        log("  → 처리할 항목이 없습니다.")
                     
                     # 링크 업데이트 정보 수집 (배치용)
                     link_updates = []
