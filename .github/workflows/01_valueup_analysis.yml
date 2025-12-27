@@ -1,4 +1,4 @@
-name: Value-Up Analysis (Claude)
+name: 11_Value-Up Analysis (Claude)
 
 on:
   # 매일 오전 10시 (KST) = 오전 1시 (UTC)
