@@ -177,48 +177,69 @@ class ValueUpAnalyzer:
         total_estimated_tokens = 0
         
         for idx, disclosure in enumerate(items_to_analyze, 1):
-            acptno = disclosure.get('접수번호', '')
-            company = disclosure.get('회사명', '')
-            gdrive_url = disclosure.get('구글드라이브링크', '')
-            
-            log(f"  [{idx}/{len(items_to_analyze)}] {company} - 토큰 산정 중...")
-            sys.stdout.flush()
-            
-            if not gdrive_url:
-                log(f"    → 구글드라이브링크 없음, 건너뜀")
-                continue
-            
-            # PDF 다운로드 및 토큰 추정
-            pdf_info = self.pdf_extractor.get_pdf_info(gdrive_url)
-            
-            if pdf_info['pdf_bytes']:
-                estimated_tokens = pdf_info['estimated_tokens']
-                total_estimated_tokens += estimated_tokens
+            try:
+                acptno = disclosure.get('접수번호', '')
+                company = disclosure.get('회사명', '')
+                gdrive_url = disclosure.get('구글드라이브링크', '')
                 
-                # 캐시에 저장 (분석 단계에서 재사용)
-                pdf_cache[acptno] = {
-                    'pdf_bytes': pdf_info['pdf_bytes'],
-                    'text': pdf_info['text'],
-                    'tokens': estimated_tokens
-                }
+                log(f"  [{idx}/{len(items_to_analyze)}] {company} ({acptno}) - 토큰 산정 중...")
+                sys.stdout.flush()
                 
-                token_updates.append({
-                    '접수번호': acptno,
-                    '예상토큰수': estimated_tokens
-                })
+                if not gdrive_url:
+                    log(f"    → 구글드라이브링크 없음, 건너뜀")
+                    sys.stdout.flush()
+                    continue
                 
-                log(f"    → {estimated_tokens:,} 토큰 (페이지: {pdf_info['page_count']}, 텍스트: {len(pdf_info['text']):,}자)")
-            else:
-                log(f"    → PDF 다운로드 실패")
+                log(f"    → URL: {gdrive_url[:60]}...")
+                sys.stdout.flush()
+                
+                # PDF 다운로드 및 토큰 추정
+                pdf_info = self.pdf_extractor.get_pdf_info(gdrive_url)
+                
+                if pdf_info['pdf_bytes']:
+                    estimated_tokens = pdf_info['estimated_tokens']
+                    total_estimated_tokens += estimated_tokens
+                    
+                    # 캐시에 저장 (분석 단계에서 재사용)
+                    pdf_cache[acptno] = {
+                        'pdf_bytes': pdf_info['pdf_bytes'],
+                        'text': pdf_info['text'],
+                        'tokens': estimated_tokens
+                    }
+                    
+                    token_updates.append({
+                        '접수번호': acptno,
+                        '예상토큰수': estimated_tokens
+                    })
+                    
+                    log(f"    → {estimated_tokens:,} 토큰 (페이지: {pdf_info['page_count']}, 텍스트: {len(pdf_info['text']):,}자)")
+                    sys.stdout.flush()
+                else:
+                    log(f"    → PDF 다운로드 실패")
+                    sys.stdout.flush()
+                    
+            except Exception as e:
+                log(f"    → [ERROR] 토큰 산정 중 예외: {type(e).__name__}: {e}")
+                sys.stdout.flush()
+                import traceback
+                log(f"    → {traceback.format_exc()[:300]}")
+                sys.stdout.flush()
         
         # 시트 업데이트
         if token_updates and not self.dry_run:
             log("")
             log("  시트에 토큰 정보 업데이트 중...")
-            updated = self.sheet_analyzer.batch_update_estimated_tokens(token_updates)
-            log(f"  → {updated}건 업데이트 완료")
+            sys.stdout.flush()
+            try:
+                updated = self.sheet_analyzer.batch_update_estimated_tokens(token_updates)
+                log(f"  → {updated}건 업데이트 완료")
+            except Exception as e:
+                log(f"  → [ERROR] 시트 업데이트 실패: {e}")
+            sys.stdout.flush()
         
         log(f"  → 총 예상 토큰: {total_estimated_tokens:,} 토큰")
+        log(f"  → 캐시된 PDF: {len(pdf_cache)}건")
+        sys.stdout.flush()
         
         # Rate Limit 체크 (분당 100만 토큰 제한)
         if total_estimated_tokens > 1_000_000:
