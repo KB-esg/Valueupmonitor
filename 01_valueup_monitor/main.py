@@ -227,17 +227,25 @@ class ValueUpMonitor:
                 else:
                     log("[4단계] PDF 다운로드 및 저장 중...")
                     
-                    # 이번 크롤링에서 수집한 접수번호 집합
-                    crawled_acptno_set = {item.접수번호 for item in items}
+                    # 이번 크롤링에서 수집한 접수번호 집합 (문자열)
+                    crawled_acptno_set = {str(item.접수번호).strip() for item in items}
                     
                     # 구글드라이브링크가 없는 항목 조회 (새 항목 + 기존 실패 항목)
                     all_pending = self.sheet_manager.get_items_without_gdrive_link()
                     
                     # 이번 크롤링 범위 내 항목만 필터링
-                    pending_items = [
-                        item for item in all_pending 
-                        if item.get('접수번호') in crawled_acptno_set
-                    ]
+                    # 접수번호 비교 시 문자열로 정규화 (시트에서 숫자로 저장된 경우 대비)
+                    pending_items = []
+                    for item in all_pending:
+                        sheet_acptno = item.get('접수번호', '')
+                        # 숫자인 경우 정수로 변환 후 문자열로 (지수 표기 방지)
+                        if isinstance(sheet_acptno, (int, float)):
+                            sheet_acptno = str(int(sheet_acptno))
+                        else:
+                            sheet_acptno = str(sheet_acptno).strip()
+                        
+                        if sheet_acptno in crawled_acptno_set:
+                            pending_items.append(item)
                     
                     skipped = len(all_pending) - len(pending_items)
                     log(f"  → 처리 대상: {len(pending_items)}건 (범위 외 {skipped}건 제외)")
