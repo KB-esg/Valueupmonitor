@@ -152,6 +152,12 @@ class CompanySheetManager:
         """
         ValueUp_analysis 폴더 ID 조회 또는 생성
         
+        로직:
+        1. OAuth2로 폴더 검색
+        2. 못 찾으면 서비스 계정으로 재검색
+        3. 서비스 계정 폴더 발견 시 OAuth2 계정에 권한 추가 + 소유권 이전 시도
+        4. 그래도 없으면 OAuth2로 새로 생성
+        
         Returns:
             폴더 ID 또는 None
         """
@@ -162,7 +168,7 @@ class CompanySheetManager:
             return None
         
         try:
-            # 1. 기존 폴더 검색
+            # 1. OAuth2 계정으로 폴더 검색
             query = (
                 f"name = '{self.ANALYSIS_FOLDER_NAME}' and "
                 f"'{self.archive_folder_id}' in parents and "
@@ -173,39 +179,194 @@ class CompanySheetManager:
             results = self.drive_service.files().list(
                 q=query,
                 spaces='drive',
-                fields='files(id, name)'
+                fields='files(id, name, owners)'
             ).execute()
             
             files = results.get('files', [])
             
             if files:
                 self.analysis_folder_id = files[0]['id']
-                log(f"기존 {self.ANALYSIS_FOLDER_NAME} 폴더 발견: {self.analysis_folder_id}")
+                log(f"기존 {self.ANALYSIS_FOLDER_NAME} 폴더 발견 (OAuth2): {self.analysis_folder_id}")
                 return self.analysis_folder_id
             
-            # 2. 폴더가 없으면 생성
+            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색
+            sa_folder_id = self._search_folder_with_service_account()
+            
+            if sa_folder_id:
+                # 3. 서비스 계정 폴더 발견 → OAuth2 계정에 권한 추가 및 소유권 이전
+                log(f"서비스 계정 소유 폴더 발견: {sa_folder_id}")
+                if self._transfer_ownership(sa_folder_id):
+                    self.analysis_folder_id = sa_folder_id
+                    return self.analysis_folder_id
+                else:
+                    log("[WARN] 소유권 이전 실패, 새 폴더 생성...")
+            
+            # 4. 폴더가 없으면 OAuth2로 새로 생성
             folder_metadata = {
                 'name': self.ANALYSIS_FOLDER_NAME,
                 'mimeType': 'application/vnd.google-apps.folder',
                 'parents': [self.archive_folder_id]
             }
             
+            time.sleep(1)  # API 호출 간 딜레이
             folder = self.drive_service.files().create(
                 body=folder_metadata,
                 fields='id'
             ).execute()
             
             self.analysis_folder_id = folder['id']
-            log(f"{self.ANALYSIS_FOLDER_NAME} 폴더 생성 완료: {self.analysis_folder_id}")
+            log(f"{self.ANALYSIS_FOLDER_NAME} 폴더 생성 완료 (OAuth2): {self.analysis_folder_id}")
             return self.analysis_folder_id
             
         except Exception as e:
             log(f"[ERROR] 폴더 조회/생성 실패: {e}")
             return None
     
+    def _search_folder_with_service_account(self) -> Optional[str]:
+        """
+        서비스 계정으로 ValueUp_analysis 폴더 검색
+        
+        Returns:
+            폴더 ID 또는 None
+        """
+        if not self.credentials_json:
+            return None
+        
+        try:
+            from google.oauth2.service_account import Credentials
+            
+            creds_info = json.loads(self.credentials_json)
+            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
+            sa_drive = build('drive', 'v3', credentials=creds)
+            
+            query = (
+                f"name = '{self.ANALYSIS_FOLDER_NAME}' and "
+                f"'{self.archive_folder_id}' in parents and "
+                f"mimeType = 'application/vnd.google-apps.folder' and "
+                f"trashed = false"
+            )
+            
+            results = sa_drive.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            
+            files = results.get('files', [])
+            if files:
+                return files[0]['id']
+            
+            return None
+            
+        except Exception as e:
+            log(f"[WARN] 서비스 계정 폴더 검색 실패: {e}")
+            return None
+    
+    def _transfer_ownership(self, folder_id: str) -> bool:
+        """
+        서비스 계정 소유 폴더의 소유권을 OAuth2 계정으로 이전
+        
+        Args:
+            folder_id: 폴더 ID
+            
+        Returns:
+            성공 여부
+        """
+        if not self.credentials_json:
+            return False
+        
+        try:
+            from google.oauth2.service_account import Credentials
+            
+            # 서비스 계정 Drive 클라이언트
+            creds_info = json.loads(self.credentials_json)
+            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
+            sa_drive = build('drive', 'v3', credentials=creds)
+            
+            # OAuth2 계정 이메일 가져오기
+            oauth_email = self._get_oauth_email()
+            if not oauth_email:
+                log("[WARN] OAuth2 계정 이메일을 가져올 수 없음")
+                return False
+            
+            log(f"소유권 이전 시도: {folder_id} → {oauth_email}")
+            
+            # 1. OAuth2 계정에 writer 권한 추가 (먼저 접근 가능하게)
+            try:
+                permission = {
+                    'type': 'user',
+                    'role': 'writer',
+                    'emailAddress': oauth_email
+                }
+                sa_drive.permissions().create(
+                    fileId=folder_id,
+                    body=permission,
+                    sendNotificationEmail=False
+                ).execute()
+                log(f"  → writer 권한 추가 완료")
+                time.sleep(1)
+            except Exception as e:
+                if 'already has access' not in str(e).lower():
+                    log(f"  → writer 권한 추가 실패: {e}")
+            
+            # 2. 소유권 이전 시도 (owner로 변경)
+            try:
+                permission = {
+                    'type': 'user',
+                    'role': 'owner',
+                    'emailAddress': oauth_email
+                }
+                sa_drive.permissions().create(
+                    fileId=folder_id,
+                    body=permission,
+                    transferOwnership=True,
+                    sendNotificationEmail=False
+                ).execute()
+                log(f"  → 소유권 이전 완료: {oauth_email}")
+                return True
+                
+            except Exception as e:
+                error_str = str(e)
+                if 'cannotShareWithOwner' in error_str or 'already the owner' in error_str:
+                    log(f"  → 이미 소유자임")
+                    return True
+                elif 'transferOwnership' in error_str or 'forbidden' in error_str.lower():
+                    # 소유권 이전 불가 (도메인 제한 등) - writer 권한만으로도 OK
+                    log(f"  → 소유권 이전 불가 (도메인 제한), writer 권한으로 사용")
+                    return True
+                else:
+                    log(f"  → 소유권 이전 실패: {e}")
+                    return False
+                    
+        except Exception as e:
+            log(f"[ERROR] 소유권 이전 중 오류: {e}")
+            return False
+    
+    def _get_oauth_email(self) -> Optional[str]:
+        """
+        OAuth2 계정의 이메일 주소 가져오기
+        
+        Returns:
+            이메일 주소 또는 None
+        """
+        if not self.drive_service:
+            return None
+        
+        try:
+            about = self.drive_service.about().get(fields='user').execute()
+            return about.get('user', {}).get('emailAddress')
+        except Exception as e:
+            log(f"[WARN] OAuth2 이메일 조회 실패: {e}")
+            return None
+    
     def _find_company_spreadsheet(self, company_name: str, stock_code: str) -> Optional[str]:
         """
         기업별 스프레드시트 검색
+        
+        로직:
+        1. OAuth2로 스프레드시트 검색
+        2. 못 찾으면 서비스 계정으로 재검색
+        3. 서비스 계정 파일 발견 시 OAuth2 계정에 권한 추가
         
         Args:
             company_name: 기업명
@@ -222,6 +383,7 @@ class CompanySheetManager:
         file_name = f"{company_name}_{stock_code}"
         
         try:
+            # 1. OAuth2 계정으로 검색
             query = (
                 f"name = '{file_name}' and "
                 f"'{folder_id}' in parents and "
@@ -240,10 +402,63 @@ class CompanySheetManager:
             if files:
                 return files[0]['id']
             
+            # 2. OAuth2로 못 찾았으면 서비스 계정으로 재검색
+            sa_file_id = self._search_spreadsheet_with_service_account(file_name, folder_id)
+            
+            if sa_file_id:
+                # 3. 서비스 계정 파일 발견 → OAuth2 계정에 권한 추가
+                log(f"서비스 계정 소유 스프레드시트 발견: {file_name}")
+                if self._transfer_ownership(sa_file_id):
+                    return sa_file_id
+            
             return None
             
         except Exception as e:
             log(f"[ERROR] 스프레드시트 검색 실패: {e}")
+            return None
+    
+    def _search_spreadsheet_with_service_account(self, file_name: str, folder_id: str) -> Optional[str]:
+        """
+        서비스 계정으로 스프레드시트 검색
+        
+        Args:
+            file_name: 파일명
+            folder_id: 폴더 ID
+            
+        Returns:
+            스프레드시트 ID 또는 None
+        """
+        if not self.credentials_json:
+            return None
+        
+        try:
+            from google.oauth2.service_account import Credentials
+            
+            creds_info = json.loads(self.credentials_json)
+            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
+            sa_drive = build('drive', 'v3', credentials=creds)
+            
+            query = (
+                f"name = '{file_name}' and "
+                f"'{folder_id}' in parents and "
+                f"mimeType = 'application/vnd.google-apps.spreadsheet' and "
+                f"trashed = false"
+            )
+            
+            results = sa_drive.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            
+            files = results.get('files', [])
+            if files:
+                return files[0]['id']
+            
+            return None
+            
+        except Exception as e:
+            log(f"[WARN] 서비스 계정 스프레드시트 검색 실패: {e}")
             return None
     
     def _create_company_spreadsheet(self, company_name: str, stock_code: str, industry: str = "") -> Optional[str]:
