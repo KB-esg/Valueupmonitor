@@ -9,9 +9,23 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: '분석 대상 기간 (일)'
+        description: '조회 기간 (일) - period 미선택 시 사용'
         required: false
         default: '7'
+      period:
+        description: '기간 버튼 선택 (days보다 우선)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - '1주'
+          - '1개월'
+          - '3개월'
+          - '6개월'
+          - '1년'
+          - '2년'
+          - '3년'
+          - '전체'
       max_items:
         description: '최대 분석 건수'
         required: false
@@ -70,6 +84,9 @@ jobs:
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           
+          # 01_Valueup_archive 폴더 ID (하위에 ValueUp_analysis 자동 생성)
+          VALUEUP_ARCHIVE_ID: ${{ secrets.VALUEUP_ARCHIVE_ID }}
+          
           # LLM API 키
           ANT_ANALYTIC: ${{ secrets.ANT_ANALYTIC }}
           GEM_ANALYTIC: ${{ secrets.GEM_ANALYTIC }}
@@ -79,14 +96,23 @@ jobs:
           
           # 실행 옵션
           VALUEUP_DAYS: ${{ github.event.inputs.days || '7' }}
+          VALUEUP_PERIOD: ${{ github.event.inputs.period }}
           VALUEUP_MAX_ITEMS: ${{ github.event.inputs.max_items || '10' }}
           VALUEUP_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         working-directory: 01_valueup_analysis
         run: |
-          python -u main.py \
-            --days $VALUEUP_DAYS \
-            --max-items $VALUEUP_MAX_ITEMS \
-            ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+          # period가 설정되면 days 대신 period 사용
+          if [ -n "$VALUEUP_PERIOD" ]; then
+            python -u main.py \
+              --period "$VALUEUP_PERIOD" \
+              --max-items $VALUEUP_MAX_ITEMS \
+              ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+          else
+            python -u main.py \
+              --days $VALUEUP_DAYS \
+              --max-items $VALUEUP_MAX_ITEMS \
+              ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+          fi
       
       - name: Summary
         if: always()
@@ -95,7 +121,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 설정" >> $GITHUB_STEP_SUMMARY
           echo "- **분석기**: ${{ github.event.inputs.analyzer || 'claude' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **분석 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.period }}" ]; then
+            echo "- **분석 기간**: ${{ github.event.inputs.period }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **분석 기간**: ${{ github.event.inputs.days || '7' }}일" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- **최대 분석 수**: ${{ github.event.inputs.max_items || '10' }}건" >> $GITHUB_STEP_SUMMARY
           echo "- **테스트 모드**: ${{ github.event.inputs.dry_run == 'true' && '예' || '아니오' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **실행 시각**: $(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
