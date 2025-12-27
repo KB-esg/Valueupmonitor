@@ -119,13 +119,14 @@ class CompanySheetManager:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
         
+        # scopes를 명시하지 않음 → refresh token에 있는 기존 scope 사용
+        # (pdf_extractor.py와 동일한 방식)
         creds = Credentials(
             token=None,
             refresh_token=self.refresh_token,
             client_id=self.client_id,
             client_secret=self.client_secret,
-            token_uri='https://oauth2.googleapis.com/token',
-            scopes=self.SCOPES
+            token_uri='https://oauth2.googleapis.com/token'
         )
         
         # 액세스 토큰 갱신
