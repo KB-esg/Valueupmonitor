@@ -60,7 +60,7 @@ class ClaudeAnalyzer:
             api_key: Anthropic API 키 (기본값: ANTHROPIC_API_KEY 환경변수)
             model_name: 모델명 (기본값: claude-3-5-haiku-20241022)
         """
-        self.api_key = api_key or os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('CLAUDE_API_KEY')
+        self.api_key = api_key or os.environ.get('ANT_ANALYTIC')
         self.model_name = model_name or self.DEFAULT_MODEL
         self.client = None
         self.last_analysis_method = None  # 마지막 분석 방식 기록
@@ -72,7 +72,7 @@ class ClaudeAnalyzer:
         
         if not self.api_key:
             log("[ERROR] Anthropic API 키가 설정되지 않았습니다.")
-            log("  ANTHROPIC_API_KEY 환경변수를 설정해주세요.")
+            log("  ANT_ANALYTIC 환경변수를 설정해주세요.")
             return
         
         # 클라이언트 초기화
