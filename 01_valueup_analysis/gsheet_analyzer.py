@@ -603,8 +603,8 @@ class GSheetAnalyzer:
             # L~P열 헤더 확인 및 추가
             self._ensure_analysis_meta_headers(worksheet)
             
-            # 접수번호로 행 찾기 (A열)
-            acptno_col = worksheet.col_values(1)  # A열
+            # 접수번호로 행 찾기 (F열 = 6번째 열)
+            acptno_col = worksheet.col_values(6)  # F열: 접수번호
             
             row_idx = None
             for i, val in enumerate(acptno_col):
@@ -613,7 +613,7 @@ class GSheetAnalyzer:
                     break
             
             if not row_idx:
-                log(f"  [WARN] 접수번호 {acptno}를 밸류업공시목록에서 찾을 수 없음")
+                log(f"  [WARN] 접수번호 {acptno}를 밸류업공시목록 F열에서 찾을 수 없음")
                 return False
             
             # L~P열 업데이트
@@ -644,8 +644,8 @@ class GSheetAnalyzer:
             return False
         
         try:
-            # 접수번호로 행 찾기
-            acptno_col = worksheet.col_values(1)
+            # 접수번호로 행 찾기 (F열 = 6번째 열)
+            acptno_col = worksheet.col_values(6)  # F열: 접수번호
             
             row_idx = None
             for i, val in enumerate(acptno_col):
@@ -663,6 +663,79 @@ class GSheetAnalyzer:
         except Exception as e:
             log(f"  [ERROR] 기업시트링크 업데이트 실패: {e}")
             return False
+    
+    def batch_update_analysis_meta(self, updates: List[Dict[str, Any]]) -> int:
+        """
+        여러 공시의 분석 메타정보를 일괄 업데이트 (Quota 절약)
+        
+        Args:
+            updates: [{'접수번호': str, '분석상태': str, '분석항목수': int, 
+                      'Core항목수': int, '기업시트링크': str}, ...]
+            
+        Returns:
+            업데이트 성공 건수
+        """
+        worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
+        if not worksheet:
+            log("  [ERROR] 밸류업공시목록 시트를 찾을 수 없습니다.")
+            return 0
+        
+        if not updates:
+            return 0
+        
+        try:
+            import time
+            
+            # L~P열 헤더 확인 및 추가
+            self._ensure_analysis_meta_headers(worksheet)
+            time.sleep(0.5)  # API 호출 간 딜레이
+            
+            # F열(접수번호) 전체 조회
+            acptno_col = worksheet.col_values(6)  # F열: 접수번호
+            
+            # 접수번호 → 행 번호 매핑
+            acptno_to_row = {}
+            for i, val in enumerate(acptno_col):
+                if val:
+                    acptno_to_row[str(val).strip()] = i + 1
+            
+            # 일괄 업데이트 준비
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            batch_data = []
+            
+            for update in updates:
+                acptno = str(update.get('접수번호', '')).strip()
+                
+                if acptno not in acptno_to_row:
+                    log(f"  [WARN] 접수번호 {acptno}를 시트에서 찾을 수 없음")
+                    continue
+                
+                row_idx = acptno_to_row[acptno]
+                
+                # L~P열 데이터
+                status = update.get('분석상태', 'completed')
+                items_count = update.get('분석항목수', 0)
+                core_count = update.get('Core항목수', 0)
+                company_url = update.get('기업시트링크', '')
+                
+                batch_data.append({
+                    'range': f'L{row_idx}:P{row_idx}',
+                    'values': [[status, now, items_count, core_count, company_url]]
+                })
+            
+            if batch_data:
+                time.sleep(0.5)  # API 호출 전 딜레이
+                worksheet.batch_update(batch_data)
+                log(f"  분석 메타정보 일괄 업데이트: {len(batch_data)}건")
+                return len(batch_data)
+            
+            return 0
+            
+        except Exception as e:
+            log(f"  [ERROR] 일괄 메타정보 업데이트 실패: {type(e).__name__}: {e}")
+            import traceback
+            log(f"  {traceback.format_exc()[:300]}")
+            return 0
 
 
 def main():
