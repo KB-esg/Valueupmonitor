@@ -93,9 +93,9 @@ jobs:
         run: |
           python main.py
       
-      # PDF 파일 아티팩트 업로드 (Archive_pdf 폴더)
+      # PDF 파일 아티팩트 업로드 (스케줄 실행 시에만)
       - name: Upload PDF artifacts
-        if: always()
+        if: github.event_name == 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: Archive_pdf
@@ -103,7 +103,7 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
       
-      # 디버그 파일 아티팩트 업로드
+      # 디버그 파일 아티팩트 업로드 (항상)
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -119,6 +119,11 @@ jobs:
           echo "## Value-Up Monitor 실행 완료" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 설정" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "- **실행 유형**: 스케줄 (자동)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **실행 유형**: 수동 (workflow_dispatch)" >> $GITHUB_STEP_SUMMARY
+          fi
           if [ -n "${{ github.event.inputs.period }}" ]; then
             echo "- **조회 기간**: ${{ github.event.inputs.period }}" >> $GITHUB_STEP_SUMMARY
           else
@@ -129,7 +134,11 @@ jobs:
           echo "- **실행 시각**: $(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 아티팩트" >> $GITHUB_STEP_SUMMARY
-          echo "- **Archive_pdf**: PDF 파일 (90일 보관)" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "- **Archive_pdf**: PDF 파일 (90일 보관) ✅" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Archive_pdf**: 수동 실행 시 업로드 안함 ⏭️" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- **krx_debug**: 디버그 파일 (7일 보관)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Google Drive 업로드" >> $GITHUB_STEP_SUMMARY
