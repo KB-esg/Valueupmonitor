@@ -2,6 +2,10 @@
 Gemini API 분석기
 밸류업 PDF를 Framework 기반으로 분석
 새로운 google-genai 패키지 사용
+
+분석 방식:
+1. PDF 직접 전달 (우선) - Gemini의 멀티모달 기능 활용
+2. 텍스트 전달 (fallback) - PDF 직접 전달 실패 시
 """
 
 import os
@@ -56,6 +60,7 @@ class GeminiAnalyzer:
         self.api_key = api_key or os.environ.get('GEM_ANALYTIC')
         self.model_name = model_name or self.DEFAULT_MODEL
         self.client = None
+        self.last_analysis_method = None  # 마지막 분석 방식 기록
         
         if not HAS_GENAI:
             log("[ERROR] google-genai 패키지가 설치되지 않았습니다.")
@@ -135,9 +140,59 @@ class GeminiAnalyzer:
         
         return prompt
     
-    def _build_user_prompt(self, pdf_text: str, company_name: str, framework: Framework) -> str:
+    def _build_user_prompt_for_pdf(self, company_name: str, framework: Framework) -> str:
         """
-        사용자 프롬프트 생성
+        PDF 직접 전달용 사용자 프롬프트 생성
+        
+        Args:
+            company_name: 회사명
+            framework: 분석 프레임워크
+            
+        Returns:
+            사용자 프롬프트 텍스트
+        """
+        item_ids = framework.get_item_ids()
+        
+        prompt = f"""## 분석 대상
+- 회사명: {company_name}
+
+첨부된 PDF 문서를 분석하여 아래 JSON 형식으로 응답해주세요.
+각 항목에 대해 level, current_value, target_value, target_year, note를 분석해주세요.
+
+```json
+{{
+  "company_name": "{company_name}",
+  "analysis_items": {{
+"""
+        
+        for i, item_id in enumerate(item_ids):
+            comma = "," if i < len(item_ids) - 1 else ""
+            prompt += f"""    "{item_id}": {{
+      "level": 0,
+      "current_value": null,
+      "target_value": null,
+      "target_year": null,
+      "note": ""
+    }}{comma}
+"""
+        
+        prompt += """  },
+  "summary": {
+    "total_items_mentioned": 0,
+    "core_items_mentioned": 0,
+    "key_highlights": []
+  }
+}
+```
+
+위 형식을 정확히 따라 JSON으로만 응답해주세요.
+"""
+        
+        return prompt
+    
+    def _build_user_prompt_for_text(self, pdf_text: str, company_name: str, framework: Framework) -> str:
+        """
+        텍스트 전달용 사용자 프롬프트 생성
         
         Args:
             pdf_text: PDF 추출 텍스트
@@ -147,7 +202,6 @@ class GeminiAnalyzer:
         Returns:
             사용자 프롬프트 텍스트
         """
-        # 항목 ID 리스트
         item_ids = framework.get_item_ids()
         
         prompt = f"""## 분석 대상
@@ -167,7 +221,6 @@ class GeminiAnalyzer:
   "analysis_items": {{
 """
         
-        # 각 항목별 템플릿 추가
         for i, item_id in enumerate(item_ids):
             comma = "," if i < len(item_ids) - 1 else ""
             prompt += f"""    "{item_id}": {{
@@ -195,12 +248,139 @@ class GeminiAnalyzer:
     
     def analyze(
         self, 
+        company_name: str, 
+        framework: Framework,
+        pdf_bytes: Optional[bytes] = None,
+        pdf_text: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        밸류업 PDF 분석
+        
+        분석 방식:
+        1. pdf_bytes가 있으면 PDF 직접 전달 시도
+        2. 실패하거나 pdf_bytes가 없으면 pdf_text로 fallback
+        
+        Args:
+            company_name: 회사명
+            framework: 분석 프레임워크
+            pdf_bytes: PDF 바이너리 데이터 (Optional)
+            pdf_text: PDF 추출 텍스트 (Optional, fallback용)
+            
+        Returns:
+            분석 결과 딕셔너리 또는 None
+        """
+        if not self.client:
+            log("  [ERROR] Gemini 클라이언트가 초기화되지 않았습니다.")
+            return None
+        
+        if not pdf_bytes and not pdf_text:
+            log("  [ERROR] PDF 데이터 또는 텍스트가 필요합니다.")
+            return None
+        
+        result = None
+        
+        # 1. PDF 직접 전달 시도
+        if pdf_bytes:
+            log(f"  [방식1] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
+            result = self._analyze_with_pdf(pdf_bytes, company_name, framework)
+            
+            if result:
+                self.last_analysis_method = "PDF_DIRECT"
+                log("  ✓ PDF 직접 전달 성공!")
+            else:
+                log("  ✗ PDF 직접 전달 실패, 텍스트 방식으로 전환...")
+        
+        # 2. 텍스트 전달 (fallback)
+        if not result and pdf_text:
+            log(f"  [방식2] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
+            result = self._analyze_with_text(pdf_text, company_name, framework)
+            
+            if result:
+                self.last_analysis_method = "TEXT_FALLBACK"
+                log("  ✓ 텍스트 전달 성공!")
+            else:
+                log("  ✗ 텍스트 전달도 실패")
+        
+        # 결과 통계 출력
+        if result:
+            items_mentioned = sum(
+                1 for item_id, data in result.get('analysis_items', {}).items()
+                if data.get('level', 0) > 0
+            )
+            core_mentioned = sum(
+                1 for item in framework.core_items
+                if result.get('analysis_items', {}).get(item.item_id, {}).get('level', 0) > 0
+            )
+            
+            log(f"  분석 완료 [{self.last_analysis_method}]: "
+                f"{items_mentioned}개 항목 언급, {core_mentioned}개 Core 항목")
+        
+        return result
+    
+    def _analyze_with_pdf(
+        self, 
+        pdf_bytes: bytes, 
+        company_name: str, 
+        framework: Framework
+    ) -> Optional[Dict[str, Any]]:
+        """
+        PDF 직접 전달로 분석
+        
+        Args:
+            pdf_bytes: PDF 바이너리 데이터
+            company_name: 회사명
+            framework: 분석 프레임워크
+            
+        Returns:
+            분석 결과 또는 None
+        """
+        try:
+            # 시스템 프롬프트
+            system_prompt = self._build_system_prompt(framework)
+            
+            # PDF용 사용자 프롬프트
+            user_prompt = self._build_user_prompt_for_pdf(company_name, framework)
+            
+            # PDF Part 생성
+            pdf_part = types.Part.from_bytes(
+                data=pdf_bytes,
+                mime_type="application/pdf"
+            )
+            
+            # 전체 프롬프트 = 시스템 + PDF + 사용자 질문
+            full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+            
+            # API 호출 (PDF + 텍스트)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[pdf_part, full_prompt],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=8192,
+                    response_mime_type="application/json"
+                )
+            )
+            
+            if not response or not response.text:
+                log("    → Gemini 응답이 비어있습니다.")
+                return None
+            
+            return self._parse_response(response.text)
+            
+        except Exception as e:
+            log(f"    → PDF 직접 전달 오류: {e}")
+            return None
+    
+    def _analyze_with_text(
+        self, 
         pdf_text: str, 
         company_name: str, 
         framework: Framework
     ) -> Optional[Dict[str, Any]]:
         """
-        밸류업 PDF 분석
+        텍스트로 분석 (fallback)
         
         Args:
             pdf_text: PDF 추출 텍스트
@@ -208,27 +388,21 @@ class GeminiAnalyzer:
             framework: 분석 프레임워크
             
         Returns:
-            분석 결과 딕셔너리 또는 None
+            분석 결과 또는 None
         """
-        if not self.client:
-            log("[ERROR] Gemini 클라이언트가 초기화되지 않았습니다.")
-            return None
-        
         if not pdf_text or len(pdf_text) < 100:
-            log("[ERROR] PDF 텍스트가 너무 짧습니다.")
+            log("    → 텍스트가 너무 짧습니다.")
             return None
         
         try:
             # 프롬프트 생성
             system_prompt = self._build_system_prompt(framework)
-            user_prompt = self._build_user_prompt(pdf_text, company_name, framework)
+            user_prompt = self._build_user_prompt_for_text(pdf_text, company_name, framework)
             
             # 전체 프롬프트
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
             
-            log(f"  Gemini API 호출 중... (텍스트 길이: {len(pdf_text):,}자)")
-            
-            # 새로운 google-genai API 호출
+            # API 호출
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=full_prompt,
@@ -242,29 +416,13 @@ class GeminiAnalyzer:
             )
             
             if not response or not response.text:
-                log("[ERROR] Gemini 응답이 비어있습니다.")
+                log("    → Gemini 응답이 비어있습니다.")
                 return None
             
-            # JSON 파싱
-            result = self._parse_response(response.text)
-            
-            if result:
-                # 통계 계산
-                items_mentioned = sum(
-                    1 for item_id, data in result.get('analysis_items', {}).items()
-                    if data.get('level', 0) > 0
-                )
-                core_mentioned = sum(
-                    1 for item in framework.core_items
-                    if result.get('analysis_items', {}).get(item.item_id, {}).get('level', 0) > 0
-                )
-                
-                log(f"  분석 완료: {items_mentioned}개 항목 언급, {core_mentioned}개 Core 항목 언급")
-            
-            return result
+            return self._parse_response(response.text)
             
         except Exception as e:
-            log(f"[ERROR] 분석 중 오류: {e}")
+            log(f"    → 텍스트 분석 오류: {e}")
             return None
     
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
