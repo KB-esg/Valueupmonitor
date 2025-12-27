@@ -1,6 +1,7 @@
 """
 Gemini API 분석기
 밸류업 PDF를 Framework 기반으로 분석
+새로운 google-genai 패키지 사용
 """
 
 import os
@@ -10,8 +11,10 @@ import re
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
+# 새로운 google-genai 패키지
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
@@ -52,34 +55,27 @@ class GeminiAnalyzer:
         """
         self.api_key = api_key or os.environ.get('GEM_ANALYTIC')
         self.model_name = model_name or self.DEFAULT_MODEL
-        self.model = None
+        self.client = None
         
         if not HAS_GENAI:
-            log("[ERROR] google-generativeai 패키지가 설치되지 않았습니다.")
+            log("[ERROR] google-genai 패키지가 설치되지 않았습니다.")
             return
         
         if not self.api_key:
             log("[ERROR] Gemini API 키가 설정되지 않았습니다.")
             return
         
-        # API 초기화
-        genai.configure(api_key=self.api_key)
-        
-        # 모델 설정
-        generation_config = {
-            "temperature": 0.1,  # 낮은 temperature로 일관된 결과
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json"
-        }
-        
-        self.model = genai.GenerativeModel(
-            model_name=self.model_name,
-            generation_config=generation_config
-        )
-        
-        log(f"Gemini 모델 초기화 완료: {self.model_name}")
+        # 클라이언트 초기화
+        try:
+            self.client = genai.Client(api_key=self.api_key)
+            log(f"Gemini 클라이언트 초기화 완료: {self.model_name}")
+        except Exception as e:
+            log(f"[ERROR] Gemini 클라이언트 초기화 실패: {e}")
+    
+    @property
+    def model(self):
+        """하위 호환성을 위한 model 속성"""
+        return self.client
     
     def _build_system_prompt(self, framework: Framework) -> str:
         """
@@ -164,6 +160,7 @@ class GeminiAnalyzer:
 
 ## 응답 형식
 아래 JSON 형식으로 응답하세요. 각 항목에 대해 level, current_value, target_value, target_year, note를 분석해주세요.
+
 ```json
 {{
   "company_name": "{company_name}",
@@ -213,8 +210,8 @@ class GeminiAnalyzer:
         Returns:
             분석 결과 딕셔너리 또는 None
         """
-        if not self.model:
-            log("[ERROR] Gemini 모델이 초기화되지 않았습니다.")
+        if not self.client:
+            log("[ERROR] Gemini 클라이언트가 초기화되지 않았습니다.")
             return None
         
         if not pdf_text or len(pdf_text) < 100:
@@ -226,12 +223,23 @@ class GeminiAnalyzer:
             system_prompt = self._build_system_prompt(framework)
             user_prompt = self._build_user_prompt(pdf_text, company_name, framework)
             
-            # Gemini API 호출
+            # 전체 프롬프트
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
             
             log(f"  Gemini API 호출 중... (텍스트 길이: {len(pdf_text):,}자)")
             
-            response = self.model.generate_content(full_prompt)
+            # 새로운 google-genai API 호출
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=8192,
+                    response_mime_type="application/json"
+                )
+            )
             
             if not response or not response.text:
                 log("[ERROR] Gemini 응답이 비어있습니다.")
@@ -376,7 +384,7 @@ def main():
     # 분석기 테스트
     analyzer = GeminiAnalyzer()
     
-    if analyzer.model:
+    if analyzer.client:
         # 샘플 텍스트로 테스트
         sample_text = """
         기업가치 제고 계획
