@@ -342,6 +342,7 @@ class GeminiAnalyzer:
             user_prompt = self._build_user_prompt_for_pdf(company_name, framework)
             
             # PDF Part 생성
+            log("    → PDF Part 생성 중...")
             pdf_part = types.Part.from_bytes(
                 data=pdf_bytes,
                 mime_type="application/pdf"
@@ -351,6 +352,7 @@ class GeminiAnalyzer:
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
             
             # API 호출 (PDF + 텍스트)
+            log("    → Gemini API 호출 중...")
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=[pdf_part, full_prompt],
@@ -363,14 +365,25 @@ class GeminiAnalyzer:
                 )
             )
             
-            if not response or not response.text:
-                log("    → Gemini 응답이 비어있습니다.")
+            if not response:
+                log("    → Gemini 응답 객체가 None입니다.")
                 return None
             
+            if not response.text:
+                log("    → Gemini 응답 텍스트가 비어있습니다.")
+                # 응답 객체 디버깅
+                log(f"    → 응답 타입: {type(response)}")
+                if hasattr(response, 'candidates'):
+                    log(f"    → candidates: {response.candidates}")
+                return None
+            
+            log(f"    → 응답 수신 완료: {len(response.text):,}자")
             return self._parse_response(response.text)
             
         except Exception as e:
-            log(f"    → PDF 직접 전달 오류: {e}")
+            log(f"    → PDF 직접 전달 오류: {type(e).__name__}: {e}")
+            import traceback
+            log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
             return None
     
     def _analyze_with_text(
@@ -391,7 +404,7 @@ class GeminiAnalyzer:
             분석 결과 또는 None
         """
         if not pdf_text or len(pdf_text) < 100:
-            log("    → 텍스트가 너무 짧습니다.")
+            log(f"    → 텍스트가 너무 짧습니다. (길이: {len(pdf_text) if pdf_text else 0}자)")
             return None
         
         try:
@@ -401,6 +414,9 @@ class GeminiAnalyzer:
             
             # 전체 프롬프트
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+            
+            log(f"    → 프롬프트 길이: {len(full_prompt):,}자")
+            log("    → Gemini API 호출 중...")
             
             # API 호출
             response = self.client.models.generate_content(
@@ -415,14 +431,21 @@ class GeminiAnalyzer:
                 )
             )
             
-            if not response or not response.text:
-                log("    → Gemini 응답이 비어있습니다.")
+            if not response:
+                log("    → Gemini 응답 객체가 None입니다.")
+                return None
+                
+            if not response.text:
+                log("    → Gemini 응답 텍스트가 비어있습니다.")
                 return None
             
+            log(f"    → 응답 수신 완료: {len(response.text):,}자")
             return self._parse_response(response.text)
             
         except Exception as e:
-            log(f"    → 텍스트 분석 오류: {e}")
+            log(f"    → 텍스트 분석 오류: {type(e).__name__}: {e}")
+            import traceback
+            log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
             return None
     
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
