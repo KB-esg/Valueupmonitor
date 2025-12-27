@@ -393,6 +393,103 @@ class GSheetAnalyzer:
         except Exception as e:
             log(f"[WARN] 요약 조회 실패: {e}")
             return {'total': 0, 'completed': 0, 'error': 0}
+    
+    def update_estimated_tokens(self, acptno: str, estimated_tokens: int) -> bool:
+        """
+        밸류업공시목록 시트의 K열(예상토큰수) 업데이트
+        
+        Args:
+            acptno: 접수번호
+            estimated_tokens: 예상 토큰 수
+            
+        Returns:
+            성공 여부
+        """
+        worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
+        if not worksheet:
+            return False
+        
+        try:
+            # F열(접수번호)에서 해당 행 찾기
+            acptno_col = worksheet.col_values(6)  # F열: 접수번호
+            
+            row_idx = None
+            for i, val in enumerate(acptno_col):
+                if str(val).strip() == str(acptno).strip():
+                    row_idx = i + 1  # 1-based index
+                    break
+            
+            if not row_idx:
+                log(f"  [WARN] 접수번호 {acptno}를 찾을 수 없습니다.")
+                return False
+            
+            # K열 헤더 확인 및 생성
+            headers = worksheet.row_values(1)
+            if len(headers) < 11:  # K열이 없으면 헤더 추가
+                worksheet.update_cell(1, 11, '예상토큰수')
+                log("  K열 '예상토큰수' 헤더 추가됨")
+            
+            # K열 업데이트
+            worksheet.update_cell(row_idx, 11, estimated_tokens)
+            return True
+            
+        except Exception as e:
+            log(f"  [ERROR] 토큰 수 업데이트 실패: {e}")
+            return False
+    
+    def batch_update_estimated_tokens(self, updates: List[Dict[str, Any]]) -> int:
+        """
+        여러 공시의 예상 토큰 수 일괄 업데이트
+        
+        Args:
+            updates: [{'접수번호': str, '예상토큰수': int}, ...]
+            
+        Returns:
+            업데이트 성공 건수
+        """
+        worksheet = self._get_worksheet(self.SHEET_DISCLOSURES)
+        if not worksheet:
+            return 0
+        
+        try:
+            # K열 헤더 확인 및 생성
+            headers = worksheet.row_values(1)
+            if len(headers) < 11:
+                worksheet.update_cell(1, 11, '예상토큰수')
+                log("  K열 '예상토큰수' 헤더 추가됨")
+            
+            # F열(접수번호) 전체 조회
+            acptno_col = worksheet.col_values(6)
+            
+            # 접수번호 → 행 번호 매핑
+            acptno_to_row = {}
+            for i, val in enumerate(acptno_col):
+                if val:
+                    acptno_to_row[str(val).strip()] = i + 1
+            
+            # 일괄 업데이트 준비
+            batch_data = []
+            for update in updates:
+                acptno = str(update.get('접수번호', '')).strip()
+                tokens = update.get('예상토큰수', 0)
+                
+                if acptno in acptno_to_row:
+                    row_idx = acptno_to_row[acptno]
+                    batch_data.append({
+                        'range': f'K{row_idx}',
+                        'values': [[tokens]]
+                    })
+            
+            if batch_data:
+                worksheet.batch_update(batch_data)
+                log(f"  예상토큰수 일괄 업데이트: {len(batch_data)}건")
+                return len(batch_data)
+            
+            return 0
+            
+        except Exception as e:
+            log(f"  [ERROR] 일괄 토큰 수 업데이트 실패: {e}")
+            return 0
 
 
 def main():
