@@ -11,17 +11,21 @@ Google Drive에 기업별 스프레드시트를 생성/업데이트
     ├── SK하이닉스_000660 (Google Spreadsheet)
     └── ...
 
-분석 메타정보는 VALUEUP_GSPREAD_ID의 "밸류업공시 목록" 시트 L열부터 관리
+인증 방식:
+- OAuth2 (개인 계정) 우선: 개인 Drive에 파일 생성
+- 서비스 계정 fallback: 공유 폴더에 파일 생성
+
+분석 메타정보는 VALUEUP_GSPREAD_ID의 "밸류업공시목록" 시트 L열부터 관리
 """
 
 import os
 import sys
 import json
+import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 import gspread
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -34,7 +38,7 @@ def log(message: str):
 
 
 class CompanySheetManager:
-    """기업별 분석 결과 스프레드시트 관리자"""
+    """기업별 분석 결과 스프레드시트 관리자 (OAuth2 우선)"""
     
     ANALYSIS_FOLDER_NAME = "ValueUp_analysis"
     
@@ -43,46 +47,106 @@ class CompanySheetManager:
         'https://www.googleapis.com/auth/drive'
     ]
     
-    def __init__(self, credentials_json: Optional[str] = None, archive_folder_id: Optional[str] = None):
+    def __init__(
+        self, 
+        # OAuth2 인증 정보 (개인 계정 - 우선)
+        refresh_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        # 서비스 계정 인증 정보 (fallback)
+        credentials_json: Optional[str] = None, 
+        archive_folder_id: Optional[str] = None
+    ):
         """
         초기화
         
         Args:
-            credentials_json: 서비스 계정 JSON 문자열
+            refresh_token: OAuth2 리프레시 토큰
+            client_id: OAuth2 클라이언트 ID
+            client_secret: OAuth2 클라이언트 시크릿
+            credentials_json: 서비스 계정 JSON 문자열 (fallback)
             archive_folder_id: 01_Valueup_archive 폴더 ID
         """
+        # OAuth2 인증 정보
+        self.refresh_token = refresh_token or os.environ.get('GDRIVE_REFRESH_TOKEN')
+        self.client_id = client_id or os.environ.get('GDRIVE_CLIENT_ID')
+        self.client_secret = client_secret or os.environ.get('GDRIVE_CLIENT_SECRET')
+        
+        # 서비스 계정 인증 정보 (fallback)
         self.credentials_json = credentials_json or os.environ.get('GOOGLE_SERVICE')
         self.archive_folder_id = archive_folder_id or os.environ.get('VALUEUP_ARCHIVE_ID')
         
         self.gc = None  # gspread 클라이언트
         self.drive_service = None  # Google Drive API
         self.analysis_folder_id = None  # ValueUp_analysis 폴더 ID (캐시)
+        self.auth_method = None  # 인증 방식
+        self._storage_quota_exceeded = False  # 저장 공간 부족 플래그
         
         self._init_clients()
     
     def _init_clients(self):
-        """Google API 클라이언트 초기화"""
-        if not self.credentials_json:
-            log("[ERROR] GOOGLE_SERVICE 환경변수가 설정되지 않았습니다.")
-            return
-        
+        """Google API 클라이언트 초기화 (OAuth2 우선)"""
         if not self.archive_folder_id:
             log("[WARN] VALUEUP_ARCHIVE_ID 환경변수가 설정되지 않았습니다. 기업별 시트 저장 비활성화.")
             return
         
-        try:
-            creds_info = json.loads(self.credentials_json)
-            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
-            
-            # gspread 클라이언트
-            self.gc = gspread.authorize(creds)
-            
-            # Drive API 클라이언트
-            self.drive_service = build('drive', 'v3', credentials=creds)
-            
-            log("CompanySheetManager 초기화 완료")
-        except Exception as e:
-            log(f"[ERROR] 클라이언트 초기화 실패: {e}")
+        # 1. OAuth2 인증 시도 (개인 계정 - 우선)
+        if self.refresh_token and self.client_id and self.client_secret:
+            try:
+                self._init_oauth2()
+                self.auth_method = 'OAuth2'
+                log(f"CompanySheetManager 초기화 완료 (OAuth2 - 개인 계정)")
+                return
+            except Exception as e:
+                log(f"[WARN] OAuth2 인증 실패: {e}")
+        
+        # 2. 서비스 계정 인증 (fallback)
+        if self.credentials_json:
+            try:
+                self._init_service_account()
+                self.auth_method = 'ServiceAccount'
+                log(f"CompanySheetManager 초기화 완료 (서비스 계정)")
+                return
+            except Exception as e:
+                log(f"[ERROR] 서비스 계정 인증 실패: {e}")
+        
+        log("[ERROR] 기업별 시트 저장을 위한 인증 정보가 없습니다.")
+    
+    def _init_oauth2(self):
+        """OAuth2 인증 초기화 (개인 계정)"""
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        
+        creds = Credentials(
+            token=None,
+            refresh_token=self.refresh_token,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            token_uri='https://oauth2.googleapis.com/token',
+            scopes=self.SCOPES
+        )
+        
+        # 액세스 토큰 갱신
+        creds.refresh(Request())
+        
+        # gspread 클라이언트
+        self.gc = gspread.authorize(creds)
+        
+        # Drive API 클라이언트
+        self.drive_service = build('drive', 'v3', credentials=creds)
+    
+    def _init_service_account(self):
+        """서비스 계정 인증 초기화 (fallback)"""
+        from google.oauth2.service_account import Credentials
+        
+        creds_info = json.loads(self.credentials_json)
+        creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
+        
+        # gspread 클라이언트
+        self.gc = gspread.authorize(creds)
+        
+        # Drive API 클라이언트
+        self.drive_service = build('drive', 'v3', credentials=creds)
     
     def _get_or_create_analysis_folder(self) -> Optional[str]:
         """
@@ -201,6 +265,10 @@ class CompanySheetManager:
         file_name = f"{company_name}_{stock_code}"
         
         try:
+            # API 호출 전 딜레이 (quota 관리)
+            import time
+            time.sleep(1)
+            
             # 1. 스프레드시트 생성
             spreadsheet_metadata = {
                 'name': file_name,
@@ -217,12 +285,21 @@ class CompanySheetManager:
             log(f"스프레드시트 생성: {file_name} ({spreadsheet_id})")
             
             # 2. 시트 구조 초기화
+            time.sleep(1)  # API 호출 간 딜레이
             self._init_spreadsheet_structure(spreadsheet_id, company_name, stock_code, industry)
             
             return spreadsheet_id
             
         except Exception as e:
-            log(f"[ERROR] 스프레드시트 생성 실패: {e}")
+            error_str = str(e)
+            
+            # Storage Quota 초과 에러 체크
+            if 'storageQuotaExceeded' in error_str or 'storage quota' in error_str.lower():
+                log(f"[ERROR] Drive 저장 공간 부족 - 기업 시트 생성 건너뜀: {file_name}")
+                self._storage_quota_exceeded = True
+            else:
+                log(f"[ERROR] 스프레드시트 생성 실패: {e}")
+            
             return None
     
     def _init_spreadsheet_structure(self, spreadsheet_id: str, company_name: str, stock_code: str, industry: str):
@@ -292,6 +369,11 @@ class CompanySheetManager:
             log("[WARN] 클라이언트 미초기화 - 기업별 시트 저장 건너뜀")
             return None
         
+        # Storage quota 초과 시 새 스프레드시트 생성 건너뛰기
+        if self._storage_quota_exceeded:
+            log("[WARN] Drive 저장 공간 부족 - 기업별 시트 저장 건너뜀")
+            return None
+        
         # 1. 기존 스프레드시트 검색
         spreadsheet_id = self._find_company_spreadsheet(company_name, stock_code)
         
@@ -306,6 +388,8 @@ class CompanySheetManager:
             return None
         
         try:
+            import time
+            time.sleep(0.5)  # API 호출 간 딜레이
             return self.gc.open_by_key(spreadsheet_id)
         except Exception as e:
             log(f"[ERROR] 스프레드시트 열기 실패: {e}")
