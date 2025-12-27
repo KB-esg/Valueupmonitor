@@ -52,6 +52,11 @@ jobs:
           GOOGLE_SERVICE: ${{ secrets.GOOGLE_SERVICE }}
           VALUEUP_GSPREAD_ID: ${{ secrets.VALUEUP_GSPREAD_ID }}
           
+          # Google Drive 인증 (OAuth2 - 개인 드라이브 접근)
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          
           # Gemini API
           GEM_ANALYTIC: ${{ secrets.GEM_ANALYTIC }}
           
