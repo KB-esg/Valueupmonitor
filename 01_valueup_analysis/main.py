@@ -24,6 +24,8 @@ def log(message: str):
     """타임스탬프와 함께 로그 출력 (즉시 flush)"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 def get_service_account_email() -> str:
@@ -165,25 +167,122 @@ class ValueUpAnalyzer:
         if len(pending_disclosures) > self.max_items:
             log(f"  → {self.max_items}건만 분석 (나머지는 다음 실행에서)")
         
-        # 3. 각 공시 분석
+        # 3. PDF 토큰 산정 및 시트 업데이트
         log("")
-        log("[3단계] 공시 분석 시작...")
+        log("[3단계] PDF 토큰 산정 중...")
+        sys.stdout.flush()
+        
+        token_updates = []
+        pdf_cache = {}  # PDF 데이터 캐시: {acptno: {'pdf_bytes': bytes, 'text': str, 'tokens': int}}
+        total_estimated_tokens = 0
         
         for idx, disclosure in enumerate(items_to_analyze, 1):
             acptno = disclosure.get('접수번호', '')
             company = disclosure.get('회사명', '')
             gdrive_url = disclosure.get('구글드라이브링크', '')
             
+            log(f"  [{idx}/{len(items_to_analyze)}] {company} - 토큰 산정 중...")
+            sys.stdout.flush()
+            
+            if not gdrive_url:
+                log(f"    → 구글드라이브링크 없음, 건너뜀")
+                continue
+            
+            # PDF 다운로드 및 토큰 추정
+            pdf_info = self.pdf_extractor.get_pdf_info(gdrive_url)
+            
+            if pdf_info['pdf_bytes']:
+                estimated_tokens = pdf_info['estimated_tokens']
+                total_estimated_tokens += estimated_tokens
+                
+                # 캐시에 저장 (분석 단계에서 재사용)
+                pdf_cache[acptno] = {
+                    'pdf_bytes': pdf_info['pdf_bytes'],
+                    'text': pdf_info['text'],
+                    'tokens': estimated_tokens
+                }
+                
+                token_updates.append({
+                    '접수번호': acptno,
+                    '예상토큰수': estimated_tokens
+                })
+                
+                log(f"    → {estimated_tokens:,} 토큰 (페이지: {pdf_info['page_count']}, 텍스트: {len(pdf_info['text']):,}자)")
+            else:
+                log(f"    → PDF 다운로드 실패")
+        
+        # 시트 업데이트
+        if token_updates and not self.dry_run:
+            log("")
+            log("  시트에 토큰 정보 업데이트 중...")
+            updated = self.sheet_analyzer.batch_update_estimated_tokens(token_updates)
+            log(f"  → {updated}건 업데이트 완료")
+        
+        log(f"  → 총 예상 토큰: {total_estimated_tokens:,} 토큰")
+        
+        # Rate Limit 체크 (분당 100만 토큰 제한)
+        if total_estimated_tokens > 1_000_000:
+            log("")
+            log("  [WARN] 총 토큰이 분당 제한(1,000,000)을 초과합니다.")
+            log("  [WARN] 일부 공시만 분석하고, 나머지는 다음 실행에서 처리합니다.")
+        
+        # 4. 각 공시 분석
+        log("")
+        log("[4단계] 공시 분석 시작...")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Rate Limit 관리 변수
+        requests_this_minute = 0
+        tokens_this_minute = 0
+        minute_start_time = time.time()
+        
+        for idx, disclosure in enumerate(items_to_analyze, 1):
+            # 강제 flush
+            sys.stdout.flush()
+            
+            acptno = disclosure.get('접수번호', '')
+            company = disclosure.get('회사명', '')
+            gdrive_url = disclosure.get('구글드라이브링크', '')
+            
             log("")
             log(f"[{idx}/{len(items_to_analyze)}] {company} ({acptno})")
+            sys.stdout.flush()
             
-            # 디버깅: 공시 데이터 키 출력
-            log(f"  공시 데이터 키: {list(disclosure.keys())}")
-            log(f"  구글드라이브링크: {gdrive_url[:60] if gdrive_url else '(없음)'}...")
+            # Rate Limit 체크 (분당 15회, 100만 토큰)
+            elapsed = time.time() - minute_start_time
+            if elapsed >= 60:
+                # 1분 경과 시 카운터 리셋
+                requests_this_minute = 0
+                tokens_this_minute = 0
+                minute_start_time = time.time()
+                log("  [Rate Limit] 1분 경과, 카운터 리셋")
+            
+            # 분당 요청 수 체크
+            if requests_this_minute >= 14:  # 15회 제한에서 여유 1회
+                wait_time = 60 - elapsed + 5  # 5초 여유
+                log(f"  [Rate Limit] 분당 요청 제한 도달, {wait_time:.0f}초 대기...")
+                time.sleep(wait_time)
+                requests_this_minute = 0
+                tokens_this_minute = 0
+                minute_start_time = time.time()
+            
+            # 분당 토큰 체크
+            cached_data = pdf_cache.get(acptno, {})
+            estimated_tokens = cached_data.get('tokens', 0)
+            
+            if tokens_this_minute + estimated_tokens > 900_000:  # 100만에서 여유 10만
+                wait_time = 60 - elapsed + 5
+                log(f"  [Rate Limit] 분당 토큰 제한 도달, {wait_time:.0f}초 대기...")
+                time.sleep(wait_time)
+                requests_this_minute = 0
+                tokens_this_minute = 0
+                minute_start_time = time.time()
             
             # 구글 드라이브 링크 확인
             if not gdrive_url:
                 log("  [WARN] 구글드라이브링크가 없습니다. 건너뜁니다.")
+                sys.stdout.flush()
                 if not self.dry_run:
                     self.sheet_analyzer.save_error_result(disclosure, "구글드라이브링크 없음")
                 result['errors'] += 1
@@ -191,20 +290,33 @@ class ValueUpAnalyzer:
                 continue
             
             try:
-                # 3-1. 구글 드라이브에서 PDF 다운로드 및 텍스트 추출
-                log("  구글 드라이브에서 PDF 다운로드 중...")
-                pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text_from_gdrive(gdrive_url)
+                # 4-1. PDF 데이터 가져오기 (캐시 또는 새로 다운로드)
+                if acptno in pdf_cache:
+                    log("  [STEP 1] PDF 캐시에서 로드...")
+                    pdf_bytes = cached_data.get('pdf_bytes')
+                    pdf_text = cached_data.get('text', '')
+                    log(f"  [STEP 1 결과] pdf_bytes: {len(pdf_bytes) if pdf_bytes else 0} bytes, pdf_text: {len(pdf_text) if pdf_text else 0}자")
+                else:
+                    log("  [STEP 1] 구글 드라이브에서 PDF 다운로드 중...")
+                    sys.stdout.flush()
+                    pdf_bytes, pdf_text = self.pdf_extractor.get_pdf_and_text_from_gdrive(gdrive_url)
+                    log(f"  [STEP 1 결과] pdf_bytes: {len(pdf_bytes) if pdf_bytes else 0} bytes, pdf_text: {len(pdf_text) if pdf_text else 0}자")
+                
+                sys.stdout.flush()
                 
                 if not pdf_bytes:
                     log("  [ERROR] PDF 다운로드 실패")
+                    sys.stdout.flush()
                     if not self.dry_run:
                         self.sheet_analyzer.save_error_result(disclosure, "PDF 다운로드 실패")
                     result['errors'] += 1
                     result['error_details'].append(f"{company}: PDF 다운로드 실패")
                     continue
                 
-                # 3-2. Gemini 분석 (PDF 직접 전달 우선, 텍스트 fallback)
-                log("  Gemini 분석 시작...")
+                # 4-2. Gemini 분석 (PDF 직접 전달 우선, 텍스트 fallback)
+                log("  [STEP 2] Gemini 분석 시작...")
+                sys.stdout.flush()
+                
                 analysis_result = self.gemini_analyzer.analyze(
                     company_name=company,
                     framework=self.framework,
@@ -212,18 +324,36 @@ class ValueUpAnalyzer:
                     pdf_text=pdf_text
                 )
                 
+                # Rate Limit 카운터 업데이트 (성공/실패 무관하게 요청은 발생)
+                requests_this_minute += 1
+                tokens_this_minute += estimated_tokens
+                log(f"  [Rate Limit] 이번 분 요청: {requests_this_minute}/15, 토큰: {tokens_this_minute:,}/1,000,000")
+                
+                log(f"  [STEP 2 결과] analysis_result: {'성공' if analysis_result else '실패'}")
+                sys.stdout.flush()
+                
                 if not analysis_result:
                     log("  [WARN] Gemini 분석 실패")
+                    sys.stdout.flush()
                     if not self.dry_run:
                         self.sheet_analyzer.save_error_result(disclosure, "Gemini 분석 실패")
                     result['errors'] += 1
                     result['error_details'].append(f"{company}: Gemini 분석 실패")
+                    
+                    # 연속 실패 체크 (일일 할당량 초과 가능성)
+                    consecutive_failures = sum(1 for err in result['error_details'][-3:] if 'Gemini 분석 실패' in err)
+                    if consecutive_failures >= 3:
+                        log("")
+                        log("  [WARN] 연속 3회 Gemini 분석 실패 - 일일 할당량 초과 가능성")
+                        log("  [WARN] 남은 공시 분석을 중단합니다. 내일 다시 시도하세요.")
+                        break
+                    
                     continue
                 
                 # 분석 방식 기록 (PDF_DIRECT 또는 TEXT_FALLBACK)
                 analysis_method = self.gemini_analyzer.last_analysis_method
                 
-                # 3-3. 결과 저장
+                # 4-3. 결과 저장
                 if self.dry_run:
                     log("  [DRY-RUN] 저장 건너뜀")
                     result['analyzed'] += 1
@@ -241,8 +371,9 @@ class ValueUpAnalyzer:
                         result['errors'] += 1
                         result['error_details'].append(f"{company}: 저장 실패")
                 
-                # API 호출 간 딜레이
-                time.sleep(2)
+                # API 호출 간 딜레이 (Rate Limit 방지: 분당 15회 제한 고려)
+                log("  다음 분석 전 5초 대기...")
+                time.sleep(5)
                 
             except Exception as e:
                 log(f"  [ERROR] 예외 발생: {e}")
