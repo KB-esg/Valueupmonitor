@@ -32,13 +32,15 @@ def log(message: str):
     """타임스탬프와 함께 로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
 
 
 class GeminiAnalyzer:
     """Gemini API를 사용한 밸류업 분석기"""
     
     # 모델 설정
-    DEFAULT_MODEL = "gemini-2.0-flash"
+    DEFAULT_MODEL = "gemini-1.5-flash"
     
     # 분석 결과 템플릿
     RESULT_TEMPLATE = {
@@ -55,7 +57,7 @@ class GeminiAnalyzer:
         
         Args:
             api_key: Gemini API 키 (기본값: GEM_ANALYTIC 환경변수)
-            model_name: 모델명 (기본값: gemini-2.0-flash)
+            model_name: 모델명 (기본값: gemini-1.5-flash)
         """
         self.api_key = api_key or os.environ.get('GEM_ANALYTIC')
         self.model_name = model_name or self.DEFAULT_MODEL
@@ -269,12 +271,17 @@ class GeminiAnalyzer:
         Returns:
             분석 결과 딕셔너리 또는 None
         """
+        import sys
+        sys.stdout.flush()
+        
         if not self.client:
             log("  [ERROR] Gemini 클라이언트가 초기화되지 않았습니다.")
+            sys.stdout.flush()
             return None
         
         if not pdf_bytes and not pdf_text:
             log("  [ERROR] PDF 데이터 또는 텍스트가 필요합니다.")
+            sys.stdout.flush()
             return None
         
         result = None
@@ -282,24 +289,34 @@ class GeminiAnalyzer:
         # 1. PDF 직접 전달 시도
         if pdf_bytes:
             log(f"  [방식1] PDF 직접 전달 시도 ({len(pdf_bytes):,} bytes)...")
+            sys.stdout.flush()
+            
             result = self._analyze_with_pdf(pdf_bytes, company_name, framework)
+            sys.stdout.flush()
             
             if result:
                 self.last_analysis_method = "PDF_DIRECT"
                 log("  ✓ PDF 직접 전달 성공!")
+                sys.stdout.flush()
             else:
                 log("  ✗ PDF 직접 전달 실패, 텍스트 방식으로 전환...")
+                sys.stdout.flush()
         
         # 2. 텍스트 전달 (fallback)
         if not result and pdf_text:
             log(f"  [방식2] 텍스트 전달 시도 ({len(pdf_text):,} 글자)...")
+            sys.stdout.flush()
+            
             result = self._analyze_with_text(pdf_text, company_name, framework)
+            sys.stdout.flush()
             
             if result:
                 self.last_analysis_method = "TEXT_FALLBACK"
                 log("  ✓ 텍스트 전달 성공!")
+                sys.stdout.flush()
             else:
                 log("  ✗ 텍스트 전달도 실패")
+                sys.stdout.flush()
         
         # 결과 통계 출력
         if result:
@@ -314,6 +331,7 @@ class GeminiAnalyzer:
             
             log(f"  분석 완료 [{self.last_analysis_method}]: "
                 f"{items_mentioned}개 항목 언급, {core_mentioned}개 Core 항목")
+            sys.stdout.flush()
         
         return result
     
@@ -321,132 +339,203 @@ class GeminiAnalyzer:
         self, 
         pdf_bytes: bytes, 
         company_name: str, 
-        framework: Framework
+        framework: Framework,
+        max_retries: int = 3
     ) -> Optional[Dict[str, Any]]:
         """
-        PDF 직접 전달로 분석
+        PDF 직접 전달로 분석 (Retry 로직 포함)
         
         Args:
             pdf_bytes: PDF 바이너리 데이터
             company_name: 회사명
             framework: 분석 프레임워크
+            max_retries: 최대 재시도 횟수
             
         Returns:
             분석 결과 또는 None
         """
-        try:
-            # 시스템 프롬프트
-            system_prompt = self._build_system_prompt(framework)
-            
-            # PDF용 사용자 프롬프트
-            user_prompt = self._build_user_prompt_for_pdf(company_name, framework)
-            
-            # PDF Part 생성
-            log("    → PDF Part 생성 중...")
-            pdf_part = types.Part.from_bytes(
-                data=pdf_bytes,
-                mime_type="application/pdf"
-            )
-            
-            # 전체 프롬프트 = 시스템 + PDF + 사용자 질문
-            full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-            
-            # API 호출 (PDF + 텍스트)
-            log("    → Gemini API 호출 중...")
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[pdf_part, full_prompt],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    top_p=0.95,
-                    top_k=40,
-                    max_output_tokens=8192,
-                    response_mime_type="application/json"
+        import time
+        
+        # 시스템 프롬프트
+        system_prompt = self._build_system_prompt(framework)
+        
+        # PDF용 사용자 프롬프트
+        user_prompt = self._build_user_prompt_for_pdf(company_name, framework)
+        
+        # PDF Part 생성
+        log("    → PDF Part 생성 중...")
+        pdf_part = types.Part.from_bytes(
+            data=pdf_bytes,
+            mime_type="application/pdf"
+        )
+        
+        # 전체 프롬프트 = 시스템 + PDF + 사용자 질문
+        full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        
+        for attempt in range(max_retries):
+            try:
+                # API 호출 (PDF + 텍스트)
+                log(f"    → Gemini API 호출 중... (시도 {attempt + 1}/{max_retries})")
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[pdf_part, full_prompt],
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        top_p=0.95,
+                        top_k=40,
+                        max_output_tokens=8192,
+                        response_mime_type="application/json"
+                    )
                 )
-            )
+                
+                if not response:
+                    log("    → Gemini 응답 객체가 None입니다.")
+                    return None
+                
+                if not response.text:
+                    log("    → Gemini 응답 텍스트가 비어있습니다.")
+                    if hasattr(response, 'candidates'):
+                        log(f"    → candidates: {response.candidates}")
+                    return None
+                
+                log(f"    → 응답 수신 완료: {len(response.text):,}자")
+                return self._parse_response(response.text)
+                
+            except Exception as e:
+                error_str = str(e)
+                
+                # Rate Limit 오류 처리
+                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    # retryDelay 파싱 시도
+                    wait_time = self._parse_retry_delay(error_str)
+                    
+                    if attempt < max_retries - 1:
+                        log(f"    → Rate Limit 발생, {wait_time}초 대기 후 재시도...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        log(f"    → Rate Limit: 최대 재시도 횟수({max_retries}) 초과")
+                        return None
+                else:
+                    log(f"    → PDF 직접 전달 오류: {type(e).__name__}: {e}")
+                    import traceback
+                    log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
+                    return None
+        
+        return None
+    
+    def _parse_retry_delay(self, error_str: str) -> int:
+        """
+        오류 메시지에서 retryDelay 파싱
+        
+        Args:
+            error_str: 오류 메시지 문자열
             
-            if not response:
-                log("    → Gemini 응답 객체가 None입니다.")
-                return None
-            
-            if not response.text:
-                log("    → Gemini 응답 텍스트가 비어있습니다.")
-                # 응답 객체 디버깅
-                log(f"    → 응답 타입: {type(response)}")
-                if hasattr(response, 'candidates'):
-                    log(f"    → candidates: {response.candidates}")
-                return None
-            
-            log(f"    → 응답 수신 완료: {len(response.text):,}자")
-            return self._parse_response(response.text)
-            
-        except Exception as e:
-            log(f"    → PDF 직접 전달 오류: {type(e).__name__}: {e}")
-            import traceback
-            log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
-            return None
+        Returns:
+            대기 시간 (초), 기본값 30초
+        """
+        import re
+        
+        # "retryDelay': '23s'" 또는 "Please retry in 23.575660186s" 패턴 찾기
+        patterns = [
+            r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)",
+            r"retry in (\d+(?:\.\d+)?)",
+            r"(\d+(?:\.\d+)?)s"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, error_str, re.IGNORECASE)
+            if match:
+                delay = float(match.group(1))
+                # 최소 5초, 최대 60초
+                return max(5, min(int(delay) + 2, 60))
+        
+        # 기본 대기 시간
+        return 30
     
     def _analyze_with_text(
         self, 
         pdf_text: str, 
         company_name: str, 
-        framework: Framework
+        framework: Framework,
+        max_retries: int = 3
     ) -> Optional[Dict[str, Any]]:
         """
-        텍스트로 분석 (fallback)
+        텍스트로 분석 (fallback, Retry 로직 포함)
         
         Args:
             pdf_text: PDF 추출 텍스트
             company_name: 회사명
             framework: 분석 프레임워크
+            max_retries: 최대 재시도 횟수
             
         Returns:
             분석 결과 또는 None
         """
+        import time
+        
         if not pdf_text or len(pdf_text) < 100:
             log(f"    → 텍스트가 너무 짧습니다. (길이: {len(pdf_text) if pdf_text else 0}자)")
             return None
         
-        try:
-            # 프롬프트 생성
-            system_prompt = self._build_system_prompt(framework)
-            user_prompt = self._build_user_prompt_for_text(pdf_text, company_name, framework)
-            
-            # 전체 프롬프트
-            full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-            
-            log(f"    → 프롬프트 길이: {len(full_prompt):,}자")
-            log("    → Gemini API 호출 중...")
-            
-            # API 호출
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    top_p=0.95,
-                    top_k=40,
-                    max_output_tokens=8192,
-                    response_mime_type="application/json"
-                )
-            )
-            
-            if not response:
-                log("    → Gemini 응답 객체가 None입니다.")
-                return None
+        # 프롬프트 생성
+        system_prompt = self._build_system_prompt(framework)
+        user_prompt = self._build_user_prompt_for_text(pdf_text, company_name, framework)
+        
+        # 전체 프롬프트
+        full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        
+        log(f"    → 프롬프트 길이: {len(full_prompt):,}자")
+        
+        for attempt in range(max_retries):
+            try:
+                log(f"    → Gemini API 호출 중... (시도 {attempt + 1}/{max_retries})")
                 
-            if not response.text:
-                log("    → Gemini 응답 텍스트가 비어있습니다.")
-                return None
-            
-            log(f"    → 응답 수신 완료: {len(response.text):,}자")
-            return self._parse_response(response.text)
-            
-        except Exception as e:
-            log(f"    → 텍스트 분석 오류: {type(e).__name__}: {e}")
-            import traceback
-            log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
-            return None
+                # API 호출
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        top_p=0.95,
+                        top_k=40,
+                        max_output_tokens=8192,
+                        response_mime_type="application/json"
+                    )
+                )
+                
+                if not response:
+                    log("    → Gemini 응답 객체가 None입니다.")
+                    return None
+                    
+                if not response.text:
+                    log("    → Gemini 응답 텍스트가 비어있습니다.")
+                    return None
+                
+                log(f"    → 응답 수신 완료: {len(response.text):,}자")
+                return self._parse_response(response.text)
+                
+            except Exception as e:
+                error_str = str(e)
+                
+                # Rate Limit 오류 처리
+                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    wait_time = self._parse_retry_delay(error_str)
+                    
+                    if attempt < max_retries - 1:
+                        log(f"    → Rate Limit 발생, {wait_time}초 대기 후 재시도...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        log(f"    → Rate Limit: 최대 재시도 횟수({max_retries}) 초과")
+                        return None
+                else:
+                    log(f"    → 텍스트 분석 오류: {type(e).__name__}: {e}")
+                    import traceback
+                    log(f"    → 스택 트레이스: {traceback.format_exc()[:500]}")
+                    return None
+        
+        return None
     
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
         """
