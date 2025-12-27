@@ -364,19 +364,38 @@ class PDFExtractor:
         """
         구글 드라이브에서 PDF 다운로드 및 텍스트 추출
         
+        PDF 직접 전달을 우선하므로, 텍스트 추출 실패해도 pdf_bytes는 반환
+        
         Args:
             gdrive_url: 구글 드라이브 공유 링크
             
         Returns:
             (PDF 바이트, 추출된 텍스트) 튜플
+            - PDF 다운로드 성공 시: (bytes, text) - text는 빈 문자열일 수 있음
+            - PDF 다운로드 실패 시: (None, "")
         """
         pdf_bytes = self.download_pdf_from_gdrive_url(gdrive_url)
         
-        if pdf_bytes:
-            text = self.extract_text_from_bytes(pdf_bytes)
-            return pdf_bytes, text
+        if not pdf_bytes:
+            log("  [ERROR] PDF 다운로드 실패 - 구글드라이브 링크 또는 인증 확인 필요")
+            return None, ""
         
-        return None, ""
+        # 텍스트 추출 시도 (fallback용)
+        log("  텍스트 추출 중 (fallback용)...")
+        text = ""
+        try:
+            text = self.extract_text_from_bytes(pdf_bytes)
+            if text:
+                log(f"  텍스트 추출 성공: {len(text):,}자")
+            else:
+                log("  [WARN] 텍스트 추출 결과 없음 (이미지 PDF일 수 있음)")
+                log("  → PDF 직접 전달로 분석 시도 예정")
+        except Exception as e:
+            log(f"  [WARN] 텍스트 추출 실패: {e}")
+            log("  → PDF 직접 전달로 분석 시도 예정")
+        
+        # 텍스트 추출 실패해도 pdf_bytes는 반환 (Gemini가 직접 읽을 수 있음)
+        return pdf_bytes, text
 
 
 def parse_artifact_link(artifact_link: str) -> Tuple[str, str]:
